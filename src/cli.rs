@@ -287,12 +287,62 @@ pub enum Commands {
         action: SuggestCommands,
     },
 
+    /// Schedule posts for later
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleCommands,
+    },
+
     /// Self-update from GitHub releases
     Update {
         /// Check for updates without installing
         #[arg(long)]
         check: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ScheduleCommands {
+    /// Schedule a new post
+    Add {
+        /// Tweet text
+        content: String,
+        /// When to post: ISO datetime "2026-03-24 09:00" or "auto" for best time
+        #[arg(long)]
+        at: String,
+        /// Reply to tweet ID
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Quote tweet ID
+        #[arg(long)]
+        quote: Option<String>,
+        /// Media file paths
+        #[arg(long, num_args = 1..=4)]
+        media: Vec<String>,
+    },
+    /// List scheduled posts
+    List {
+        /// Filter by status: pending, sent, failed, cancelled
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Cancel a scheduled post
+    Cancel {
+        /// Schedule ID
+        id: String,
+    },
+    /// Reschedule a post
+    Reschedule {
+        /// Schedule ID
+        id: String,
+        /// New time: ISO datetime or "auto"
+        #[arg(long)]
+        at: String,
+    },
+    /// Fire all due scheduled posts (run via cron/launchd)
+    Fire,
+    /// Set up launchd for automatic scheduling (macOS)
+    Setup,
 }
 
 #[derive(Subcommand)]

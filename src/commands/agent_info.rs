@@ -73,6 +73,8 @@ pub fn execute(format: OutputFormat) {
             "analyze".into(), "track run".into(), "track status".into(),
             "report daily".into(), "report weekly".into(),
             "suggest best-time".into(), "suggest next-post".into(),
+            "schedule add".into(), "schedule list".into(), "schedule cancel".into(),
+            "schedule reschedule".into(), "schedule fire".into(), "schedule setup".into(),
             "config show".into(), "config set".into(), "config check".into(),
             "agent-info".into(), "update".into(),
         ],
@@ -82,6 +84,7 @@ pub fn execute(format: OutputFormat) {
             "media_upload".into(), "user_lookup".into(), "lists".into(),
             "moderation".into(), "analytics".into(), "preflight_scoring".into(),
             "performance_tracking".into(), "timing_intelligence".into(),
+            "scheduling".into(),
             "self_update".into(),
         ],
         env_prefix: "XMASTER_".into(),
@@ -116,6 +119,7 @@ pub fn execute(format: OutputFormat) {
             "Check 'xmaster suggest next-post' before posting — avoid cannibalizing your own reach".into(),
             "Post threads for maximum growth — they get bookmarked and shared heavily".into(),
             "Check 'xmaster report weekly' to learn what's working".into(),
+            "Use 'xmaster schedule add --at auto' to schedule posts at your historically best time".into(),
         ],
     };
     output::render(format, &info, None);

@@ -18,8 +18,9 @@ pub mod analyze;
 pub mod track;
 pub mod report;
 pub mod suggest;
+pub mod schedule;
 
-use crate::cli::{Cli, Commands, ConfigCommands, DmCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands};
+use crate::cli::{Cli, Commands, ConfigCommands, DmCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands};
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::OutputFormat;
@@ -107,6 +108,16 @@ pub async fn dispatch(
         Commands::Suggest { action } => match action {
             SuggestCommands::BestTime => suggest::best_time(ctx, format).await,
             SuggestCommands::NextPost => suggest::next_post(ctx, format).await,
+        },
+        Commands::Schedule { action } => match action {
+            ScheduleCommands::Add { content, at, reply_to, quote, media } => {
+                schedule::add(ctx, format, content, at, reply_to.as_deref(), quote.as_deref(), media).await
+            }
+            ScheduleCommands::List { status } => schedule::list(format, status.as_deref()).await,
+            ScheduleCommands::Cancel { id } => schedule::cancel(format, id).await,
+            ScheduleCommands::Reschedule { id, at } => schedule::reschedule(format, id, at).await,
+            ScheduleCommands::Fire => schedule::fire(ctx, format).await,
+            ScheduleCommands::Setup => schedule::setup(format).await,
         },
     }
 }

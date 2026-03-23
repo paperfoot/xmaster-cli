@@ -17,7 +17,7 @@
 
 ---
 
-A single Rust binary that gives you full control over X/Twitter: post, reply, like, retweet, DM, search, bookmark, follow, and more. Two search backends — X API v2 for structured queries and xAI/Grok for AI-powered semantic search. Designed from day one for AI agents with structured JSON output, semantic exit codes, and auto-JSON when piped.
+A single Rust binary that gives you full control over X/Twitter: post, reply, like, retweet, DM, search, bookmark, follow, schedule, and more. Two search backends — X API v2 for structured queries and xAI/Grok for AI-powered semantic search. Designed from day one for AI agents with structured JSON output, semantic exit codes, and auto-JSON when piped.
 
 ```bash
 xmaster post "Hello from the command line"
@@ -128,6 +128,20 @@ xmaster post "Hello from xmaster"
 | `dm send` | Send a DM | `xmaster dm send alice "Hey!"` |
 | `dm inbox` | View DM inbox | `xmaster dm inbox -c 20` |
 | `dm thread` | View a DM conversation | `xmaster dm thread CONV_ID` |
+
+### Scheduling
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `schedule add` | Schedule a post for later | `xmaster schedule add "text" --at "2026-03-24 09:00"` |
+| `schedule add --at auto` | Auto-pick best posting time | `xmaster schedule add "text" --at auto` |
+| `schedule list` | List scheduled posts | `xmaster schedule list --status pending` |
+| `schedule cancel` | Cancel a scheduled post | `xmaster schedule cancel sched_abc123` |
+| `schedule reschedule` | Change post time | `xmaster schedule reschedule sched_abc --at "2026-03-25 10:00"` |
+| `schedule fire` | Execute due posts (cron) | `xmaster schedule fire` |
+| `schedule setup` | Install launchd auto-scheduler | `xmaster schedule setup` |
+
+Posts are stored locally in SQLite — no X Ads API needed, pure local scheduling. The `launchd` daemon fires every 5 minutes on macOS. Use `--at auto` to let xmaster pick the best posting time from your engagement history. Missed schedules are handled with a 5-minute grace period.
 
 ### System
 
