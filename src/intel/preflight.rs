@@ -18,7 +18,7 @@ pub struct Issue {
     pub fix: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum Severity {
     Critical,
     Warning,

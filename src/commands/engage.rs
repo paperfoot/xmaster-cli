@@ -41,6 +41,11 @@ impl CsvRenderable for ActionResult {
 }
 
 fn render_success(format: OutputFormat, action_name: &str, tweet_id: String) {
+    // Silently log engagement to intelligence store
+    if let Ok(store) = crate::intel::store::IntelStore::open() {
+        let _ = store.log_engagement(action_name, Some(&tweet_id), None, None, None);
+    }
+
     let display = ActionResult {
         action: action_name.to_string(),
         tweet_id,
