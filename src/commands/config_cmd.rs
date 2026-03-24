@@ -343,30 +343,15 @@ pub async fn auth(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xmas
         return Ok(());
     }
 
-    // Build authorization URL with PKCE
-    let (auth_url, code_verifier) = oauth2::build_auth_url(client_id);
-
-    // Save code_verifier temporarily for the exchange step
-    let verifier_path = config::config_dir().join(".pkce_verifier");
-    std::fs::write(&verifier_path, &code_verifier)?;
+    // Run the full PKCE flow: listener → browser → callback → token exchange → save
+    oauth2::authorize(client_id, client_secret).await?;
 
     let result = AuthResult {
-        status: "awaiting_authorization".into(),
-        message: "Open this URL in your browser, authorize the app, then copy the FULL redirect URL from your browser's address bar.".into(),
-        auth_url: Some(auth_url.clone()),
-        next_step: Some(format!(
-            "After authorizing, your browser will redirect to http://localhost:3000/callback?code=...&state=... \
-            Copy the 'code' value from that URL and run: xmaster config set keys.oauth2_code THE_CODE \
-            Then run: xmaster config auth-exchange"
-        )),
+        status: "success".into(),
+        message: "OAuth 2.0 authorization complete! Tokens saved to config.".into(),
+        auth_url: None,
+        next_step: Some("You can now use: xmaster bookmarks list".into()),
     };
-
-    // Try to open the browser
-    if format == OutputFormat::Table {
-        eprintln!("Opening browser for authorization...");
-        let _ = std::process::Command::new("open").arg(&auth_url).spawn();
-    }
-
     output::render(format, &result, None);
     Ok(())
 }

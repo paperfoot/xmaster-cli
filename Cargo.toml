@@ -1,6 +1,6 @@
 [package]
 name = "xmaster"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 description = "Enterprise-grade X/Twitter CLI — post, reply, like, retweet, DM, search, and more"
 license = "MIT"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart", "stream"] }
 reqwest-oauth1 = "0.3"
 serde = { version = "1.0", features = ["derive"] }

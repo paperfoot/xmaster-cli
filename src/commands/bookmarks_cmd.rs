@@ -238,8 +238,24 @@ pub async fn sync(
     format: OutputFormat,
     count: usize,
 ) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
-    let tweets = api.get_bookmarks(count).await?;
+    // Bookmarks require OAuth 2.0 — get token (auto-refresh if needed)
+    let token = crate::providers::oauth2::ensure_oauth2_token(&ctx.config).await?;
+
+    // Fetch bookmarks via OAuth 2.0
+    let user_id = {
+        let api = XApi::new(ctx.clone());
+        let me = api.get_me().await?;
+        me.id
+    };
+    let url = format!(
+        "https://api.x.com/2/users/{}/bookmarks?max_results={}&tweet.fields=created_at,public_metrics,author_id&expansions=author_id&user.fields=username,name",
+        user_id,
+        count.min(100) // API max is 100 per request
+    );
+    let json = crate::providers::oauth2::oauth2_get(&url, &token).await?;
+
+    // Parse response into TweetData
+    let tweets = parse_bookmark_response(&json);
     let store = BookmarkStore::open()?;
     let result = store.sync(tweets)?;
 
@@ -263,6 +279,52 @@ pub async fn sync(
         );
     }
     Ok(())
+}
+
+/// Parse X API v2 bookmarks response into TweetData for the store
+fn parse_bookmark_response(json: &serde_json::Value) -> Vec<crate::providers::xapi::TweetData> {
+    let mut tweets = Vec::new();
+    let empty_arr = Vec::new();
+    let data = json.get("data").and_then(|d| d.as_array()).unwrap_or(&empty_arr);
+
+    // Build author lookup from includes.users
+    let mut author_map = std::collections::HashMap::new();
+    if let Some(includes) = json.get("includes") {
+        if let Some(users) = includes.get("users").and_then(|u| u.as_array()) {
+            for user in users {
+                let id = user.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let username = user.get("username").and_then(|v| v.as_str()).unwrap_or("");
+                let name = user.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                author_map.insert(id.to_string(), (username.to_string(), name.to_string()));
+            }
+        }
+    }
+
+    for tweet in data {
+        let id = tweet.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text = tweet.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let author_id = tweet.get("author_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let created_at = tweet.get("created_at").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let (username, _name) = author_map.get(&author_id).cloned().unwrap_or_default();
+
+        let metrics = tweet.get("public_metrics").map(|m| crate::providers::xapi::TweetMetrics {
+            like_count: m.get("like_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            retweet_count: m.get("retweet_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            reply_count: m.get("reply_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            impression_count: m.get("impression_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            bookmark_count: m.get("bookmark_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+
+        tweets.push(crate::providers::xapi::TweetData {
+            id,
+            text,
+            author_id: Some(author_id),
+            author_username: Some(username),
+            created_at,
+            public_metrics: metrics,
+        });
+    }
+    tweets
 }
 
 pub async fn search(format: OutputFormat, query: &str) -> Result<(), XmasterError> {
