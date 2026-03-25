@@ -651,6 +651,10 @@ impl XApi {
         let ct0 = &keys.web_ct0;
         let auth_token = &keys.web_auth_token;
 
+        // Generate x-client-transaction-id via helper script
+        let gql_path = format!("/i/api/graphql/{query_id}/CreateTweet");
+        let transaction_id = self.generate_transaction_id("POST", &gql_path, ct0, auth_token)?;
+
         // Build the GraphQL variables
         let mut variables = json!({
             "tweet_text": text,
@@ -726,6 +730,7 @@ impl XApi {
             .header("content-type", "application/json")
             .header("x-twitter-active-user", "yes")
             .header("x-twitter-auth-type", "OAuth2Session")
+            .header("x-client-transaction-id", &transaction_id)
             .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
             .header("origin", "https://x.com")
             .header("referer", "https://x.com/compose/post")
@@ -791,6 +796,79 @@ impl XApi {
             id: tweet_id.to_string(),
             text: tweet_text.to_string(),
         })
+    }
+
+    /// Generate X-Client-Transaction-Id by calling the helper Python script.
+    /// This is needed to pass X's anti-automation checks on GraphQL endpoints.
+    fn generate_transaction_id(
+        &self,
+        method: &str,
+        path: &str,
+        ct0: &str,
+        auth_token: &str,
+    ) -> Result<String, XmasterError> {
+        // Find the script relative to the xmaster binary, or in common locations
+        let script = Self::find_transaction_script()?;
+
+        let output = std::process::Command::new("python3")
+            .arg(&script)
+            .arg(method)
+            .arg(path)
+            .arg(ct0)
+            .arg(auth_token)
+            .output()
+            .map_err(|e| XmasterError::Config(format!(
+                "Failed to run transaction ID script (python3 required): {e}"
+            )))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(XmasterError::Api {
+                provider: "x-web",
+                code: "transaction_id_failed",
+                message: format!("Transaction ID generation failed: {stderr}"),
+            });
+        }
+
+        let tid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if tid.is_empty() {
+            return Err(XmasterError::Api {
+                provider: "x-web",
+                code: "transaction_id_empty",
+                message: "Transaction ID script returned empty output".into(),
+            });
+        }
+
+        Ok(tid)
+    }
+
+    fn find_transaction_script() -> Result<std::path::PathBuf, XmasterError> {
+        // Check next to the binary first
+        if let Ok(exe) = std::env::current_exe() {
+            let dir = exe.parent().unwrap_or(std::path::Path::new("."));
+            let script = dir.join("scripts").join("gen_transaction_id.py");
+            if script.exists() {
+                return Ok(script);
+            }
+            // Check ../scripts/ (for cargo builds)
+            let script = dir.parent().unwrap_or(dir).join("scripts").join("gen_transaction_id.py");
+            if script.exists() {
+                return Ok(script);
+            }
+        }
+        // Check ~/.config/xmaster/
+        let config_script = crate::config::config_dir().join("gen_transaction_id.py");
+        if config_script.exists() {
+            return Ok(config_script);
+        }
+        // Check the repo root (dev mode)
+        let repo_script = std::path::PathBuf::from("scripts/gen_transaction_id.py");
+        if repo_script.exists() {
+            return Ok(repo_script);
+        }
+        Err(XmasterError::Config(
+            "gen_transaction_id.py not found. Copy it to ~/.config/xmaster/gen_transaction_id.py".into()
+        ))
     }
 
     /// Look up any tweet by ID (yours or someone else's). Only requests public metrics.

@@ -10,8 +10,6 @@ use std::path::PathBuf;
 pub struct WebCookies {
     pub ct0: String,
     pub auth_token: String,
-    /// Full cookie header string (all X cookies for anti-automation bypass)
-    pub full_cookie_header: String,
 }
 
 /// Try all supported browsers, return the first that has valid X cookies.
