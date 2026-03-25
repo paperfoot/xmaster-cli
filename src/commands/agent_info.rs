@@ -16,6 +16,9 @@ struct AgentInfo {
     algorithm: AlgorithmInfo,
     /// Hints for optimal usage — the CLI tells agents how to use it well.
     usage_hints: Vec<String>,
+    /// User's writing style for X posts (only present when configured).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    writing_style: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -51,11 +54,24 @@ impl Tableable for AgentInfo {
         table.add_row(vec!["Best Times", &self.algorithm.best_posting_hours]);
         table.add_row(vec!["Best Days", &self.algorithm.best_posting_days]);
         table.add_row(vec!["Hint", &self.usage_hints.first().cloned().unwrap_or_default()]);
+        if let Some(ref style) = self.writing_style {
+            table.add_row(vec!["Writing Style", style]);
+        }
         table
     }
 }
 
 pub fn execute(format: OutputFormat) {
+    let style = config::load_config()
+        .ok()
+        .and_then(|c| {
+            if c.style.voice.is_empty() {
+                None
+            } else {
+                Some(c.style.voice)
+            }
+        });
+
     let info = AgentInfo {
         name: "xmaster".into(),
         version: env!("CARGO_PKG_VERSION").into(),
@@ -128,6 +144,7 @@ pub fn execute(format: OutputFormat) {
             "Run 'xmaster bookmarks sync' regularly to archive bookmarks — local copies survive tweet deletion".into(),
             "Use 'xmaster engage recommend --topic \"your niche\"' to find high-ROI reply targets — conversations are 150x a like".into(),
         ],
+        writing_style: style,
     };
     output::render(format, &info, None);
 }

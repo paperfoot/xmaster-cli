@@ -13,6 +13,16 @@ pub struct AppConfig {
     pub keys: Keys,
     #[serde(default)]
     pub settings: Settings,
+    #[serde(default)]
+    pub style: Style,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Style {
+    /// The user's writing voice for X posts. Used by analyze and agent-info.
+    /// Set via: xmaster config set style.voice "your style description"
+    #[serde(default)]
+    pub voice: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -70,6 +80,7 @@ impl Default for AppConfig {
         Self {
             keys: Keys::default(),
             settings: Settings::default(),
+            style: Style::default(),
         }
     }
 }
