@@ -111,8 +111,7 @@ pub async fn recommend(
                     if candidates.contains_key(&key) {
                         continue;
                     }
-                    // Try to get follower count from the store or default to 0
-                    let followers = get_mention_followers(&tweet.author_id);
+                    let followers = tweet.author_followers.unwrap_or(0);
                     candidates.entry(key).or_insert(RawCandidate {
                         username: username.clone(),
                         followers,

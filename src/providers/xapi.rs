@@ -53,6 +53,9 @@ pub struct TweetData {
     pub created_at: Option<String>,
     #[serde(default)]
     pub public_metrics: Option<TweetMetrics>,
+    /// Author's follower count (populated from includes.users)
+    #[serde(default)]
+    pub author_followers: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,6 +499,10 @@ impl XApi {
                             if user.get("id").and_then(|i| i.as_str()) == Some(aid) {
                                 tweet.author_username =
                                     user.get("username").and_then(|u| u.as_str()).map(String::from);
+                                tweet.author_followers = user
+                                    .get("public_metrics")
+                                    .and_then(|m| m.get("followers_count"))
+                                    .and_then(|f| f.as_u64());
                             }
                         }
                     }
