@@ -363,6 +363,7 @@ fn parse_bookmark_response(json: &serde_json::Value) -> Vec<crate::providers::xa
             created_at,
             public_metrics: metrics,
             author_followers: None,
+            media_urls: vec![],
         });
     }
     tweets

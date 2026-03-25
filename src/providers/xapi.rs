@@ -63,6 +63,9 @@ pub struct TweetData {
     /// Author's follower count (populated from includes.users)
     #[serde(default)]
     pub author_followers: Option<u64>,
+    /// Media URLs (populated from includes.media)
+    #[serde(default)]
+    pub media_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -485,19 +488,20 @@ impl XApi {
     // -- Tweet fields query string helpers ----------------------------------
 
     fn tweet_fields() -> &'static str {
-        "tweet.fields=created_at,public_metrics,author_id,conversation_id,entities,lang"
+        "tweet.fields=created_at,public_metrics,author_id,conversation_id,entities,lang,attachments"
     }
 
     fn tweet_expansions() -> &'static str {
-        "expansions=author_id"
+        "expansions=author_id,attachments.media_keys&media.fields=url,preview_image_url,type,alt_text"
     }
 
     fn user_fields_param() -> &'static str {
         "user.fields=created_at,description,public_metrics,verified,profile_image_url,username,name"
     }
 
-    /// Merge author usernames from `includes.users` into tweet data.
+    /// Merge author usernames and media URLs from `includes` into tweet data.
     fn merge_authors(tweets: &mut [TweetData], includes: &Option<Value>) {
+        let tweets_len = tweets.len();
         if let Some(inc) = includes {
             if let Some(users) = inc.get("users").and_then(|u| u.as_array()) {
                 for tweet in tweets.iter_mut() {
@@ -511,6 +515,34 @@ impl XApi {
                                     .and_then(|m| m.get("followers_count"))
                                     .and_then(|f| f.as_u64());
                             }
+                        }
+                    }
+                }
+            }
+            // Merge media URLs from includes.media
+            if let Some(media_list) = inc.get("media").and_then(|m| m.as_array()) {
+                // Build a lookup: media_key → url
+                let media_map: std::collections::HashMap<&str, &str> = media_list
+                    .iter()
+                    .filter_map(|m| {
+                        let key = m.get("media_key").and_then(|k| k.as_str())?;
+                        let url = m
+                            .get("url")
+                            .or_else(|| m.get("preview_image_url"))
+                            .and_then(|u| u.as_str())?;
+                        Some((key, url))
+                    })
+                    .collect();
+
+                if !media_map.is_empty() {
+                    for tweet in tweets.iter_mut() {
+                        if tweet.media_urls.is_empty() {
+                            // For single-tweet responses, just grab all media
+                            if tweets_len == 1 {
+                                tweet.media_urls = media_map.values().map(|u| u.to_string()).collect();
+                            }
+                            // For multi-tweet (search), media_keys aren't in TweetData
+                            // so we can't match precisely — skip to avoid misattribution
                         }
                     }
                 }
