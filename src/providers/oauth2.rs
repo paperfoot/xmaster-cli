@@ -50,7 +50,7 @@ fn base64_url_encode(bytes: &[u8]) -> String {
 
 fn generate_code_verifier() -> String {
     let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
     base64_url_encode(&bytes)
 }
 
@@ -63,7 +63,7 @@ fn generate_code_challenge(verifier: &str) -> String {
 
 fn generate_state() -> String {
     let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..16).map(|_| rng.gen()).collect();
+    let bytes: Vec<u8> = (0..16).map(|_| rng.gen::<u8>()).collect();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
