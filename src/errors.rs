@@ -24,6 +24,9 @@ pub enum XmasterError {
     #[error("Server error (HTTP {status}), retries exhausted")]
     ServerError { status: u16 },
 
+    #[error("Reply restricted: {0}")]
+    ReplyRestricted(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -50,6 +53,7 @@ impl XmasterError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Config(_) => 2,
+            Self::ReplyRestricted(_) => 1,
             Self::AuthMissing { .. } => 3,
             Self::RateLimited { .. } => 4,
             Self::ServerError { .. } => 1,
@@ -64,6 +68,7 @@ impl XmasterError {
 
     pub fn error_code(&self) -> &'static str {
         match self {
+            Self::ReplyRestricted(_) => "reply_restricted",
             Self::Api { code, .. } => code,
             Self::AuthMissing { .. } => "auth_missing",
             Self::RateLimited { .. } => "rate_limited",
@@ -80,6 +85,12 @@ impl XmasterError {
 
     pub fn suggestion(&self) -> String {
         match self {
+            Self::ReplyRestricted(_) => {
+                "X restricts programmatic replies to non-mentioners. \
+                Run: xmaster config web-login \
+                (auto-captures cookies from your browser, zero manual steps)"
+                    .into()
+            }
             Self::AuthMissing { provider, .. } => {
                 if *provider == "xai" {
                     "Set XMASTER_KEYS__XAI env var or run: xmaster config set keys.xai <key>".into()

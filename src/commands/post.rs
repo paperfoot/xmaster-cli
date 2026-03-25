@@ -132,6 +132,10 @@ pub async fn execute(
         )
         .await
         .map_err(|err| {
+            // ReplyRestricted already has a clear message — pass through
+            if matches!(&err, XmasterError::ReplyRestricted(_)) {
+                return err;
+            }
             if let XmasterError::AuthMissing { provider, ref message } = err {
                 if message.contains("403") {
                     return XmasterError::Api {

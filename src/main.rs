@@ -1,3 +1,4 @@
+mod browser_cookies;
 mod cli;
 mod commands;
 mod config;

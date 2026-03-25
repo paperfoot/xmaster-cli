@@ -77,6 +77,7 @@ pub async fn dispatch(
             ConfigCommands::Check => config_cmd::check(ctx, format).await,
             ConfigCommands::Guide => { config_cmd::guide(format).await }
             ConfigCommands::Auth => { config_cmd::auth(ctx, format).await }
+            ConfigCommands::WebLogin => { config_cmd::web_login(format).await }
         },
         Commands::AgentInfo => {
             agent_info::execute(format);

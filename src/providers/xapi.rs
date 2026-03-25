@@ -17,6 +17,13 @@ const MAX_RETRIES: u32 = 3;
 const BASE: &str = "https://api.x.com/2";
 const UPLOAD_URL: &str = "https://upload.twitter.com/1.1/media/upload.json";
 
+/// Public bearer token used by the X web app (same for all users, not secret).
+const WEB_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+
+/// Default GraphQL CreateTweet query ID (hash rotates every few weeks on X deploys).
+/// Can be overridden via config: keys.graphql_create_tweet_id
+const DEFAULT_GRAPHQL_CREATE_TWEET_ID: &str = "oB-5XsHNAbjvARJEc8CZFw";
+
 // ---------------------------------------------------------------------------
 // Rate limit info
 // ---------------------------------------------------------------------------
@@ -548,8 +555,198 @@ impl XApi {
             }
         }
 
-        self.request_data(Method::POST, &format!("{BASE}/tweets"), Some(body))
-            .await
+        let result = self
+            .request_data(Method::POST, &format!("{BASE}/tweets"), Some(body))
+            .await;
+
+        // Auto-fallback: if this is a reply and we got 403 (reply restriction),
+        // retry via GraphQL web endpoint using browser cookies.
+        if let Err(ref err) = result {
+            if reply_to.is_some() && Self::is_reply_restricted(err) {
+                if self.ctx.config.has_web_cookies() {
+                    warn!("API reply blocked (X restriction). Falling back to web session...");
+                    return self
+                        .create_tweet_via_web(text, reply_to, quote_tweet_id, media_ids)
+                        .await;
+                } else {
+                    return Err(XmasterError::ReplyRestricted(
+                        "X blocks programmatic replies to users who haven't @mentioned you. \
+                        Configure web cookies for automatic fallback."
+                            .into(),
+                    ));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Detect whether an error is the Feb 2026 reply restriction (403 on replies
+    /// to users who haven't mentioned you).
+    /// Note: oauth1-permissions 403s are handled separately in request_once() with
+    /// a specific regeneration hint, so they won't reach here. Any 403 that makes
+    /// it to this check is a non-permission 403, likely the reply restriction.
+    fn is_reply_restricted(err: &XmasterError) -> bool {
+        match err {
+            XmasterError::AuthMissing { message, .. } => {
+                message.contains("403") && !message.contains("oauth1-permissions")
+            }
+            XmasterError::Api { message, .. } => {
+                message.contains("403")
+                    || message.contains("reply")
+                    || message.contains("not allowed")
+                    || message.contains("not permitted")
+            }
+            _ => false,
+        }
+    }
+
+    /// Post a tweet via X's internal GraphQL web endpoint using browser cookies.
+    /// This bypasses the API reply restriction since it behaves like a browser session.
+    async fn create_tweet_via_web(
+        &self,
+        text: &str,
+        reply_to: Option<&str>,
+        quote_tweet_id: Option<&str>,
+        media_ids: Option<&[String]>,
+    ) -> Result<TweetResponse, XmasterError> {
+        let keys = &self.ctx.config.keys;
+        let query_id = if keys.graphql_create_tweet_id.is_empty() {
+            DEFAULT_GRAPHQL_CREATE_TWEET_ID.to_string()
+        } else {
+            keys.graphql_create_tweet_id.clone()
+        };
+        let ct0 = &keys.web_ct0;
+        let auth_token = &keys.web_auth_token;
+
+        // Build the GraphQL variables
+        let mut variables = json!({
+            "tweet_text": text,
+            "dark_request": false,
+            "media": {
+                "media_entities": [],
+                "possibly_sensitive": false,
+            },
+            "semantic_annotation_ids": [],
+        });
+
+        if let Some(reply_id) = reply_to {
+            variables["reply"] = json!({
+                "in_reply_to_tweet_id": reply_id,
+                "exclude_reply_user_ids": [],
+            });
+        }
+
+        if let Some(qid) = quote_tweet_id {
+            variables["quote_tweet_id"] = qid.into();
+        }
+
+        if let Some(ids) = media_ids {
+            let entities: Vec<Value> = ids
+                .iter()
+                .map(|id| json!({ "media_id": id, "tagged_users": [] }))
+                .collect();
+            variables["media"]["media_entities"] = json!(entities);
+        }
+
+        let gql_body = json!({
+            "variables": variables,
+            "features": {
+                "communities_web_enable_tweet_community_results_fetch": true,
+                "c9s_tweet_anatomy_moderator_badge_enabled": true,
+                "responsive_web_edit_tweet_api_enabled": true,
+                "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
+                "view_counts_everywhere_api_enabled": true,
+                "longform_notetweets_consumption_enabled": true,
+                "responsive_web_twitter_article_tweet_consumption_enabled": true,
+                "tweet_awards_web_tipping_enabled": false,
+                "creator_subscriptions_quote_tweet_preview_enabled": false,
+                "longform_notetweets_rich_text_read_enabled": true,
+                "longform_notetweets_inline_media_enabled": true,
+                "articles_preview_enabled": true,
+                "rweb_video_timestamps_enabled": true,
+                "rweb_tipjar_consumption_enabled": true,
+                "responsive_web_graphql_exclude_directive_enabled": true,
+                "verified_phone_label_enabled": false,
+                "freedom_of_speech_not_reach_fetch_enabled": true,
+                "standardized_nudges_misinfo": true,
+                "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+                "responsive_web_graphql_timeline_navigation_enabled": true,
+                "responsive_web_enhance_cards_enabled": false,
+            },
+            "queryId": &query_id,
+        });
+
+        let cookie_header = format!("ct0={ct0}; auth_token={auth_token}");
+        let bearer = format!("Bearer {WEB_BEARER}");
+        let gql_url = format!(
+            "https://x.com/i/api/graphql/{query_id}/CreateTweet"
+        );
+
+        let resp = self
+            .ctx
+            .client
+            .post(&gql_url)
+            .header("authorization", &bearer)
+            .header("x-csrf-token", ct0)
+            .header("cookie", &cookie_header)
+            .header("content-type", "application/json")
+            .header("x-twitter-active-user", "yes")
+            .header("x-twitter-auth-type", "OAuth2Session")
+            .body(serde_json::to_string(&gql_body)?)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(XmasterError::Api {
+                provider: "x-web",
+                code: "graphql_error",
+                message: format!(
+                    "Web fallback failed (HTTP {status}): {}",
+                    &body_text[..body_text.len().min(300)]
+                ),
+            });
+        }
+
+        // Parse the GraphQL response to extract tweet ID and text
+        let val: Value = serde_json::from_str(&body_text).map_err(|_| XmasterError::Api {
+            provider: "x-web",
+            code: "json_parse",
+            message: format!("Failed to parse GraphQL response: {}", &body_text[..body_text.len().min(200)]),
+        })?;
+
+        // Navigate: data.create_tweet.tweet_results.result.rest_id
+        let tweet_result = val
+            .pointer("/data/create_tweet/tweet_results/result")
+            .ok_or_else(|| XmasterError::Api {
+                provider: "x-web",
+                code: "no_tweet_result",
+                message: format!("Unexpected GraphQL response shape: {}", &body_text[..body_text.len().min(300)]),
+            })?;
+
+        let tweet_id = tweet_result
+            .get("rest_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| XmasterError::Api {
+                provider: "x-web",
+                code: "no_rest_id",
+                message: "No rest_id in tweet result".into(),
+            })?;
+
+        // Try to get the full text from the nested legacy object
+        let tweet_text = tweet_result
+            .pointer("/legacy/full_text")
+            .and_then(|v| v.as_str())
+            .unwrap_or(text);
+
+        Ok(TweetResponse {
+            id: tweet_id.to_string(),
+            text: tweet_text.to_string(),
+        })
     }
 
     pub async fn delete_tweet(&self, id: &str) -> Result<(), XmasterError> {

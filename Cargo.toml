@@ -1,6 +1,6 @@
 [package]
 name = "xmaster"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "Enterprise-grade X/Twitter CLI — post, reply, like, retweet, DM, search, and more"
 license = "MIT"
@@ -42,6 +42,9 @@ async-trait = "0.1"
 sha2 = "0.10"
 urlencoding = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = { version = "0.12", features = ["hmac"] }
 
 [dev-dependencies]
 assert_cmd = "2"

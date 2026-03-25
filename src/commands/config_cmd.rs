@@ -1,3 +1,4 @@
+use crate::browser_cookies;
 use crate::config::{self, AppConfig};
 use crate::context::AppContext;
 use crate::errors::XmasterError;
@@ -357,6 +358,50 @@ pub async fn auth(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xmas
         message: "OAuth 2.0 authorization complete! Tokens saved to config.".into(),
         auth_url: None,
         next_step: Some("You can now use: xmaster bookmarks list".into()),
+    };
+    output::render(format, &result, None);
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct WebLoginResult {
+    status: String,
+    browser: String,
+    message: String,
+    ct0_preview: String,
+    auth_token_preview: String,
+}
+
+impl Tableable for WebLoginResult {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["Field", "Value"]);
+        table.add_row(vec!["Status", &self.status]);
+        table.add_row(vec!["Browser", &self.browser]);
+        table.add_row(vec!["ct0", &self.ct0_preview]);
+        table.add_row(vec!["auth_token", &self.auth_token_preview]);
+        table.add_row(vec!["Message", &self.message]);
+        table
+    }
+}
+
+pub async fn web_login(format: OutputFormat) -> Result<(), XmasterError> {
+    if format == OutputFormat::Table {
+        eprintln!("Scanning browsers for X session cookies...");
+    }
+
+    let cookies = browser_cookies::extract()?;
+
+    // Save to config automatically
+    set(OutputFormat::Json, "keys.web_ct0", &cookies.ct0).await?;
+    set(OutputFormat::Json, "keys.web_auth_token", &cookies.auth_token).await?;
+
+    let result = WebLoginResult {
+        status: "success".into(),
+        browser: "auto-detected".into(),
+        message: "Web cookies saved. Replies will now auto-fallback to web session if API blocks them.".into(),
+        ct0_preview: AppConfig::masked_key(&cookies.ct0),
+        auth_token_preview: AppConfig::masked_key(&cookies.auth_token),
     };
     output::render(format, &result, None);
     Ok(())

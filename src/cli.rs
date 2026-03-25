@@ -503,6 +503,8 @@ pub enum ConfigCommands {
     Guide,
     /// Authorize OAuth 2.0 (required for bookmarks)
     Auth,
+    /// Auto-capture X web cookies from your browser (enables reply fallback)
+    WebLogin,
 }
 
 #[derive(Subcommand)]

@@ -38,6 +38,14 @@ pub struct Keys {
     pub oauth2_access_token: String,
     #[serde(default)]
     pub oauth2_refresh_token: String,
+    // Web session cookies (fallback for reply restrictions)
+    #[serde(default)]
+    pub web_ct0: String,
+    #[serde(default)]
+    pub web_auth_token: String,
+    /// GraphQL CreateTweet query ID (rotates every few weeks, auto-updated)
+    #[serde(default)]
+    pub graphql_create_tweet_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +124,10 @@ impl AppConfig {
 
     pub fn has_xai_auth(&self) -> bool {
         !self.keys.xai.is_empty()
+    }
+
+    pub fn has_web_cookies(&self) -> bool {
+        !self.keys.web_ct0.is_empty() && !self.keys.web_auth_token.is_empty()
     }
 
     pub fn masked_key(key: &str) -> String {
