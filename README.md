@@ -32,7 +32,7 @@ Every X CLI makes you choose between official API features and AI-powered search
 - **Dual backend** — X API v2 (OAuth 1.0a) for posting, engagement, DMs, and structured search. xAI/Grok for AI-powered semantic search and trending topics.
 - **Agent-first** — Structured JSON output, semantic exit codes (0-4), machine-readable `agent-info` command, auto-JSON when piped. Built for AI agents that shell out.
 - **Enterprise-grade** — Per-provider rate limiting (token bucket), OAuth 1.0a signing, media uploads, polls, quote tweets. Production-ready.
-- **Single binary** — ~6MB, ~2ms startup, no Python, no Node, no Docker. Just `curl | sh` and go.
+- **Single binary** — ~8MB Rust binary, ~2ms startup. Reply fallback uses a small Python helper script (stdlib only, no pip deps).
 
 ## Install
 
@@ -75,7 +75,13 @@ xmaster config set keys.xai YOUR_XAI_KEY
 # 4. Verify setup
 xmaster config check
 
-# 5. Post your first tweet
+# 5. (Optional) Enable reply fallback — auto-captures cookies from your browser
+xmaster config web-login
+
+# 6. (Optional) Set your writing style — agents will write in your voice
+xmaster config set style.voice "your style description"
+
+# 7. Post
 xmaster post "Hello from xmaster"
 ```
 
@@ -85,8 +91,10 @@ xmaster post "Hello from xmaster"
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `post` | Post a tweet (text, media, reply, quote, poll) | `xmaster post "Hello world"` |
-| `delete` | Delete a tweet | `xmaster delete 1234567890` |
+| `post` | Post (text, media, reply, quote, poll) | `xmaster post "Hello world"` |
+| `reply` | Reply to a post (auto-bypasses API restrictions) | `xmaster reply 1234567890 "Great point"` |
+| `thread` | Post a multi-tweet thread | `xmaster thread "First" "Second" "Third"` |
+| `delete` | Delete a post | `xmaster delete 1234567890` |
 | `like` | Like a tweet (ID or URL) | `xmaster like 1234567890` |
 | `unlike` | Unlike a tweet | `xmaster unlike 1234567890` |
 | `retweet` | Retweet a tweet | `xmaster retweet 1234567890` |
@@ -103,14 +111,19 @@ xmaster post "Hello from xmaster"
 | `followers` | List a user's followers | `xmaster followers elonmusk -c 50` |
 | `following` | List who a user follows | `xmaster following elonmusk -c 50` |
 
-### Timeline & Reading
+### Reading Posts
 
 | Command | Description | Example |
 |---------|-------------|---------|
+| `read` | Full post lookup (text, author, date, metrics, media) | `xmaster read 1234567890` |
+| `replies` | Get all replies/comments on a post | `xmaster replies 1234567890 -c 30` |
+| `metrics` | Detailed engagement metrics | `xmaster metrics 1234567890` |
 | `timeline` | View home or user timeline | `xmaster timeline --user elonmusk` |
 | `mentions` | View your mentions | `xmaster mentions -c 20` |
 | `user` | Get user profile info | `xmaster user elonmusk` |
 | `me` | Get your own profile info | `xmaster me` |
+
+The `read` command returns everything about a post in one call: author, full text, date, likes, retweets, replies, impressions, bookmarks, and media URLs. Accepts tweet IDs or full x.com URLs.
 
 ### Bookmark Intelligence
 
@@ -163,6 +176,38 @@ The algorithm weights conversations (reply + author replies back) at 150x a like
 
 Posts are stored locally in SQLite — no X Ads API needed, pure local scheduling. The `launchd` daemon fires every 5 minutes on macOS. Use `--at auto` to let xmaster pick the best posting time from your engagement history. Missed schedules are handled with a 5-minute grace period.
 
+### Pre-Flight Intelligence
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `analyze` | Score a post before publishing | `xmaster analyze "your text" --goal replies` |
+| `suggest best-time` | Best posting time from history | `xmaster suggest best-time` |
+| `suggest next-post` | Cannibalization guard | `xmaster suggest next-post` |
+| `report daily` | Daily performance digest | `xmaster report daily` |
+| `report weekly` | Weekly performance digest | `xmaster report weekly` |
+| `track run` | Snapshot recent post metrics | `xmaster track run` |
+| `engage recommend` | Find high-ROI reply targets | `xmaster engage recommend --topic "AI" -c 10` |
+
+### Lists
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `lists create` | Create a list | `xmaster lists create "AI Builders"` |
+| `lists add` | Add user to a list | `xmaster lists add LIST_ID username` |
+| `lists timeline` | View a list's timeline | `xmaster lists timeline LIST_ID` |
+| `lists mine` | View your lists | `xmaster lists mine` |
+
+### Moderation
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `block` | Block a user | `xmaster block spammer123` |
+| `unblock` | Unblock a user | `xmaster unblock username` |
+| `mute` | Mute a user | `xmaster mute username` |
+| `unmute` | Unmute a user | `xmaster unmute username` |
+| `hide-reply` | Hide a reply to your post | `xmaster hide-reply 1234567890` |
+| `unhide-reply` | Unhide a reply | `xmaster unhide-reply 1234567890` |
+
 ### System
 
 | Command | Description | Example |
@@ -170,7 +215,10 @@ Posts are stored locally in SQLite — no X Ads API needed, pure local schedulin
 | `config show` | Show config (keys masked) | `xmaster config show` |
 | `config set` | Set a config value | `xmaster config set keys.api_key KEY` |
 | `config check` | Validate credentials | `xmaster config check` |
-| `agent-info` | Machine-readable capabilities | `xmaster agent-info` |
+| `config web-login` | Auto-capture browser cookies (reply fallback) | `xmaster config web-login` |
+| `config auth` | OAuth 2.0 PKCE (for bookmarks) | `xmaster config auth` |
+| `agent-info` | Machine-readable capabilities + algorithm weights | `xmaster agent-info` |
+| `rate-limits` | Check API quota status | `xmaster rate-limits` |
 | `update` | Self-update from GitHub releases | `xmaster update` |
 
 ### Global Flags
@@ -287,9 +335,7 @@ xmaster --json post "Automated insight" --reply-to "$TWEET_ID"
 
 ## Configuration
 
-Config file lives at:
-- **macOS:** `~/Library/Application Support/com.199biotechnologies.xmaster/config.toml`
-- **Linux:** `~/.config/xmaster/config.toml`
+Config file lives at `~/.config/xmaster/config.toml` on all platforms.
 
 Override with `XMASTER_CONFIG_DIR` env var.
 
@@ -301,15 +347,15 @@ xmaster config set K V    # Set a value
 
 ### Environment Variables
 
-Environment variables override the config file. Prefix: `XMASTER_`:
+Environment variables override the config file. Prefix `XMASTER_` with double underscore `__` for nesting:
 
 ```bash
-export XMASTER_KEYS_API_KEY=your-api-key
-export XMASTER_KEYS_API_SECRET=your-api-secret
-export XMASTER_KEYS_ACCESS_TOKEN=your-access-token
-export XMASTER_KEYS_ACCESS_TOKEN_SECRET=your-access-token-secret
-export XMASTER_KEYS_XAI=your-xai-key
-export XMASTER_SETTINGS_TIMEOUT=30
+export XMASTER_KEYS__API_KEY=your-api-key
+export XMASTER_KEYS__API_SECRET=your-api-secret
+export XMASTER_KEYS__ACCESS_TOKEN=your-access-token
+export XMASTER_KEYS__ACCESS_TOKEN_SECRET=your-access-token-secret
+export XMASTER_KEYS__XAI=your-xai-key
+export XMASTER_SETTINGS__TIMEOUT=30
 ```
 
 ## Architecture
@@ -319,20 +365,21 @@ export XMASTER_SETTINGS_TIMEOUT=30
 │                 CLI Layer                    │
 │   clap + comfy-table (--json / human)       │
 ├─────────────────────────────────────────────┤
-│              Command Router                 │
-│   Maps commands to providers + handlers     │
-├──────────────────┬──────────────────────────┤
-│    X API v2      │       xAI / Grok         │
-│  (OAuth 1.0a)    │     (Bearer token)       │
-│  Post, Like,     │   AI search,             │
-│  RT, DM, Follow, │   Trending topics,       │
-│  Search, Timeline│   Semantic search        │
-├──────────────────┴──────────────────────────┤
-│            Rate Limiter (governor)          │
-│   Token-bucket per provider                 │
+│          Command Router + Pre-flight        │
+│   Analyze, score, cannibalization guard     │
+├──────────┬──────────────┬───────────────────┤
+│ X API v2 │  xAI / Grok  │  Web GraphQL      │
+│(OAuth1.0a│(Bearer token)│  (Cookie auth +   │
+│ Post,Like│ AI search,   │   transaction ID) │
+│ RT, DM,  │ Trending,    │  Reply fallback   │
+│ Search,  │ Semantic     │  when API blocks  │
+│ Timeline)│ search       │  replies          │
+├──────────┴──────────────┴───────────────────┤
+│  Rate Limiter │ Intel Store │ Scheduler     │
+│  (governor)   │  (SQLite)   │  (launchd)    │
 ├─────────────────────────────────────────────┤
 │             Config (figment)                │
-│   TOML file + env vars + defaults           │
+│   TOML + env vars + browser cookies         │
 └─────────────────────────────────────────────┘
 ```
 
