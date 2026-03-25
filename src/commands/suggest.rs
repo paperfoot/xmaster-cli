@@ -13,13 +13,9 @@ pub async fn best_time(
     let heatmap = tracker.compute_timing_heatmap()?;
 
     if heatmap.is_empty() {
-        output::render_error(
-            format,
-            "insufficient_data",
-            "Not enough data to compute timing heatmap",
-            "Track more posts first: `xmaster track run` (needs posts + metric snapshots)",
-        );
-        return Ok(());
+        return Err(XmasterError::NotFound(
+            "Not enough data to compute timing heatmap. Track more posts first: `xmaster track run`".into(),
+        ));
     }
 
     // Show top 10 slots

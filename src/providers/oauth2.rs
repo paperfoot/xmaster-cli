@@ -23,13 +23,13 @@ const REDIRECT_URI: &str = "http://localhost:3000/callback";
 const SCOPES: &str = "tweet.read tweet.write users.read bookmark.read bookmark.write offline.access";
 
 /// Build a shared reqwest client for OAuth2 operations with proper timeout and user-agent.
-fn build_oauth2_client() -> reqwest::Client {
+fn build_oauth2_client() -> Result<reqwest::Client, crate::errors::XmasterError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .user_agent(format!("xmaster/{}", env!("CARGO_PKG_VERSION")))
         .pool_idle_timeout(std::time::Duration::from_secs(60))
         .build()
-        .expect("failed to build OAuth2 HTTP client")
+        .map_err(|e| crate::errors::XmasterError::Config(format!("Failed to build OAuth2 HTTP client: {e}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,7 +193,7 @@ async fn exchange_code(
     code: &str,
     code_verifier: &str,
 ) -> Result<TokenResponse, XmasterError> {
-    let client = build_oauth2_client();
+    let client = build_oauth2_client()?;
 
     let params = [
         ("code", code),
@@ -228,7 +228,7 @@ async fn refresh_token_request(
     client_secret: &str,
     refresh_token: &str,
 ) -> Result<TokenResponse, XmasterError> {
-    let client = build_oauth2_client();
+    let client = build_oauth2_client()?;
 
     let params = [
         ("grant_type", "refresh_token"),
@@ -353,7 +353,7 @@ pub async fn oauth2_get(
     url: &str,
     access_token: &str,
 ) -> Result<serde_json::Value, XmasterError> {
-    let client = build_oauth2_client();
+    let client = build_oauth2_client()?;
     let resp = client
         .get(url)
         .header("Authorization", format!("Bearer {access_token}"))

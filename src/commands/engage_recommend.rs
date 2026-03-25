@@ -164,13 +164,9 @@ pub async fn recommend(
         .collect();
 
     if filtered.is_empty() {
-        output::render_error(
-            format,
-            "no_candidates",
-            "No recommendation candidates found",
-            "Try: `xmaster engage recommend --topic \"your niche\"` or engage with more accounts first",
-        );
-        return Ok(());
+        return Err(XmasterError::NotFound(
+            "No recommendation candidates found. Try: `xmaster engage recommend --topic \"your niche\"` or engage with more accounts first".into(),
+        ));
     }
 
     // Phase 2: Score

@@ -13,13 +13,9 @@ pub async fn daily(
     let report = tracker.generate_report("daily")?;
 
     if report.total_posts == 0 {
-        output::render_error(
-            format,
-            "no_data",
-            "No posts found in the last 24 hours",
-            "Post and track content first: `xmaster post \"...\"` then `xmaster track run`",
-        );
-        return Ok(());
+        return Err(XmasterError::NotFound(
+            "No posts found in the last 24 hours. Post and track content first: `xmaster post \"...\"` then `xmaster track run`".into(),
+        ));
     }
 
     output::render(format, &report, None);
@@ -35,13 +31,9 @@ pub async fn weekly(
     let report = tracker.generate_report("weekly")?;
 
     if report.total_posts == 0 {
-        output::render_error(
-            format,
-            "no_data",
-            "No posts found in the last 7 days",
-            "Post and track content first: `xmaster post \"...\"` then `xmaster track run`",
-        );
-        return Ok(());
+        return Err(XmasterError::NotFound(
+            "No posts found in the last 7 days. Post and track content first: `xmaster post \"...\"` then `xmaster track run`".into(),
+        ));
     }
 
     output::render(format, &report, None);

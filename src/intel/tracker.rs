@@ -22,6 +22,7 @@ pub struct TimingSlot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CannibalizationWarning {
+    #[serde(rename = "id")]
     pub tweet_id: String,
     pub text_preview: String,
     pub posted_minutes_ago: u32,
@@ -45,6 +46,7 @@ pub struct PerformanceReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PostSummary {
+    #[serde(rename = "id")]
     pub tweet_id: String,
     pub text_preview: String,
     pub engagement_rate: f64,
@@ -66,8 +68,10 @@ pub struct SnapshotSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackedPost {
+    #[serde(rename = "id")]
     pub tweet_id: String,
     pub text_preview: String,
+    #[serde(rename = "date")]
     pub posted_at: String,
     pub snapshots: u32,
     pub last_snapshot_age_mins: Option<i64>,
@@ -227,7 +231,15 @@ impl PostTracker {
 
         let rows: Vec<(String, i64)> = stmt
             .query_map(params![cutoff], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                let tweet_id: String = row.get(0)?;
+                // Handle both INTEGER (current) and TEXT (old DB) for posted_at
+                let posted_at = row.get::<_, i64>(1).unwrap_or_else(|_| {
+                    row.get::<_, String>(1)
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0)
+                });
+                Ok((tweet_id, posted_at))
             })
             .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?
             .collect::<Result<Vec<_>, _>>()
@@ -629,10 +641,13 @@ impl PostTracker {
             .query_map([], |row| {
                 let last_snap: Option<i64> = row.get(4)?;
                 let age_mins = last_snap.map(|ts| (now_ts - ts) / 60);
-                let posted_ts: i64 = row.get(2)?;
-                let posted_str = DateTime::from_timestamp(posted_ts, 0)
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_else(|| posted_ts.to_string());
+                // Handle both INTEGER (current schema) and TEXT (old DBs) for posted_at
+                let posted_str = match row.get::<_, i64>(2) {
+                    Ok(ts) => DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| ts.to_string()),
+                    Err(_) => row.get::<_, String>(2).unwrap_or_default(),
+                };
                 Ok(TrackedPost {
                     tweet_id: row.get(0)?,
                     text_preview: row.get(1)?,

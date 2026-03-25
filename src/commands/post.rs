@@ -39,6 +39,7 @@ impl Tableable for PostResult {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     ctx: Arc<AppContext>,
     format: OutputFormat,

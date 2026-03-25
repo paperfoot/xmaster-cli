@@ -13,10 +13,13 @@ use crate::providers::xapi::TweetData;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BookmarkRecord {
+    #[serde(rename = "id")]
     pub tweet_id: String,
+    #[serde(rename = "author")]
     pub author_username: String,
     pub author_name: Option<String>,
     pub text: String,
+    #[serde(rename = "date")]
     pub created_at: Option<String>,
     pub bookmarked_at: i64,
     pub likes: i64,

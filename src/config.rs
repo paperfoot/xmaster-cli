@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::errors::XmasterError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub keys: Keys,
@@ -71,16 +71,6 @@ impl Default for Settings {
         Self {
             timeout: default_timeout(),
             count: default_count(),
-        }
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            keys: Keys::default(),
-            settings: Settings::default(),
-            style: Style::default(),
         }
     }
 }

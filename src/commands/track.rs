@@ -24,13 +24,9 @@ pub async fn track_status(
     let status = tracker.tracking_status()?;
 
     if status.total == 0 {
-        output::render_error(
-            format,
-            "no_tracked_posts",
-            "No posts are being tracked yet",
-            "Post something first with `xmaster post`, then run `xmaster track run` to start tracking",
-        );
-        return Ok(());
+        return Err(XmasterError::NotFound(
+            "No posts are being tracked yet. Post something first with `xmaster post`, then run `xmaster track run`".into(),
+        ));
     }
 
     output::render(format, &status, None);

@@ -114,7 +114,9 @@ pub async fn show(_ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
     Ok(())
 }
 
-pub async fn set(format: OutputFormat, key: &str, value: &str) -> Result<(), XmasterError> {
+/// Write a config key without emitting any output. Used internally by commands
+/// like `web-login` that produce their own output envelope.
+fn set_silent(key: &str, value: &str) -> Result<(), XmasterError> {
     let path = config::config_path();
 
     // Read existing TOML or start fresh
@@ -160,6 +162,12 @@ pub async fn set(format: OutputFormat, key: &str, value: &str) -> Result<(), Xma
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
+
+    Ok(())
+}
+
+pub async fn set(format: OutputFormat, key: &str, value: &str) -> Result<(), XmasterError> {
+    set_silent(key, value)?;
 
     let display = ConfigSetResult {
         key: key.to_string(),
@@ -392,9 +400,9 @@ pub async fn web_login(format: OutputFormat) -> Result<(), XmasterError> {
 
     let cookies = browser_cookies::extract()?;
 
-    // Save to config automatically
-    set(OutputFormat::Json, "keys.web_ct0", &cookies.ct0).await?;
-    set(OutputFormat::Json, "keys.web_auth_token", &cookies.auth_token).await?;
+    // Save to config silently — only the final WebLoginResult is emitted
+    set_silent("keys.web_ct0", &cookies.ct0)?;
+    set_silent("keys.web_auth_token", &cookies.auth_token)?;
 
     let result = WebLoginResult {
         status: "success".into(),

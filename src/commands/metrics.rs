@@ -46,6 +46,7 @@ struct NonPublicMetrics {
 
 #[derive(Serialize)]
 struct MetricsDisplay {
+    #[serde(rename = "id")]
     tweet_id: String,
     impressions: u64,
     likes: u64,
@@ -95,6 +96,7 @@ impl CsvRenderable for MetricsDisplay {
 
 #[derive(Serialize)]
 struct MetricsRow {
+    #[serde(rename = "id")]
     tweet_id: String,
     impressions: u64,
     likes: u64,

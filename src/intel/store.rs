@@ -193,6 +193,7 @@ impl IntelStore {
     }
 
     /// Record a metric snapshot for a tweet.
+    #[allow(clippy::too_many_arguments)]
     pub fn log_metric_snapshot(
         &self,
         tweet_id: &str,
@@ -529,7 +530,6 @@ impl IntelStore {
                     }))
                 },
             )
-            .map(|opt| opt)
     }
 
     /// Top reciprocators: accounts that reply back most often, filtered by min followers.

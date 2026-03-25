@@ -200,10 +200,10 @@ fn extract_anim_svg_paths(html: &str) -> Vec<String> {
         r#"id=["']loading-x-anim-\d+["'][^>]*>.*?</svg>"#
     ).unwrap();
 
+    let path_d_re = regex::Regex::new(r#"<path[^>]*\sd=["']([^"']+)["']"#).unwrap();
+
     for svg_match in svg_re.find_iter(html) {
         let svg_text = svg_match.as_str();
-        // Get the second path's d attribute (first child group's second child)
-        let path_d_re = regex::Regex::new(r#"<path[^>]*\sd=["']([^"']+)["']"#).unwrap();
         let d_values: Vec<String> = path_d_re
             .captures_iter(svg_text)
             .map(|c| c[1].to_string())
@@ -252,7 +252,7 @@ fn solve(value: f64, min_val: f64, max_val: f64, rounding: bool) -> f64 {
 }
 
 fn is_odd_val(num: usize) -> f64 {
-    if num % 2 != 0 { -1.0 } else { 0.0 }
+    if !num.is_multiple_of(2) { -1.0 } else { 0.0 }
 }
 
 fn interpolate(from: &[f64], to: &[f64], f: f64) -> Vec<f64> {
@@ -381,7 +381,7 @@ fn animate(frames: &[i64], target_time: f64) -> String {
 
     let color: Vec<f64> = interpolate(&from_color, &to_color, val)
         .into_iter()
-        .map(|v| v.max(0.0).min(255.0))
+        .map(|v| v.clamp(0.0, 255.0))
         .collect();
     let rotation = interpolate(&[0.0], &to_rotation, val);
     let matrix = rotation_matrix(rotation[0]);

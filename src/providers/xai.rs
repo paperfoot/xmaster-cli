@@ -105,7 +105,7 @@ impl XaiSearch {
         let xai_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .map_err(|e| XmasterError::Http(e))?;
+            .map_err(XmasterError::Http)?;
 
         let resp = xai_client
             .post("https://api.x.ai/v1/responses")

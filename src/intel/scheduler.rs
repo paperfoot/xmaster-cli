@@ -299,7 +299,8 @@ impl PostScheduler {
             )
             .map_err(|e| XmasterError::Config(e.to_string()))?;
 
-        let due_posts: Vec<(String, String, i64, Option<String>, Option<String>, Option<String>, i32)> =
+        type DuePost = (String, String, i64, Option<String>, Option<String>, Option<String>, i32);
+        let due_posts: Vec<DuePost> =
             stmt.query_map([], |row| {
                 Ok((
                     row.get(0)?,
@@ -328,7 +329,7 @@ impl PostScheduler {
 
             // Missed the grace window
             if *scheduled_at < grace_cutoff {
-                self.mark_failed(&id, "Missed schedule window")?;
+                self.mark_failed(id, "Missed schedule window")?;
                 result.missed += 1;
                 result.posts.push(FiredPost {
                     id: id.clone(),

@@ -1256,7 +1256,7 @@ impl XApi {
 
         // APPEND in 1MB chunks
         let chunk_size = 1024 * 1024;
-        let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
+        let total_chunks = data.len().div_ceil(chunk_size);
         for (i, chunk) in data.chunks(chunk_size).enumerate() {
             if data.len() > 5_000_000 {
                 eprintln!("  Uploading chunk {}/{} ...", i + 1, total_chunks);

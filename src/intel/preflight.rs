@@ -338,7 +338,7 @@ fn score_hook(first_line: &str) -> u32 {
     let mut score: u32 = 40; // baseline
 
     // Starts with a number — strong hook
-    if trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+    if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         score += 30;
     }
 
@@ -403,7 +403,7 @@ fn has_proper_nouns(text: &str) -> bool {
         if prev.ends_with('.') || prev.ends_with('!') || prev.ends_with('?') {
             continue;
         }
-        if word.chars().next().map_or(false, |c| c.is_uppercase())
+        if word.chars().next().is_some_and(|c| c.is_uppercase())
             && !word.starts_with('#')
             && !word.starts_with('@')
             && !word.starts_with("http")

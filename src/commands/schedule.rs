@@ -289,13 +289,9 @@ pub async fn list(
     let entries = scheduler.list(status_filter)?;
 
     if entries.is_empty() {
-        output::render_error(
-            format,
-            "no_scheduled_posts",
-            "No scheduled posts found",
-            "Schedule a post: xmaster schedule add \"text\" --at \"2026-03-24 09:00\"",
-        );
-        return Ok(());
+        return Err(XmasterError::NotFound(
+            "No scheduled posts found. Schedule a post: xmaster schedule add \"text\" --at \"2026-03-24 09:00\"".into(),
+        ));
     }
 
     let total = entries.len();

@@ -15,7 +15,8 @@ pub struct WebCookies {
 /// Try all supported browsers, return the first that has valid X cookies.
 pub fn extract() -> Result<WebCookies, XmasterError> {
     // Try Chrome first (most popular), then Firefox
-    let browsers: Vec<(&str, fn() -> Result<WebCookies, XmasterError>)> = vec![
+    type BrowserExtractor = fn() -> Result<WebCookies, XmasterError>;
+    let browsers: Vec<(&str, BrowserExtractor)> = vec![
         ("Chrome", extract_chrome),
         ("Firefox", extract_firefox),
         ("Brave", extract_brave),

@@ -195,13 +195,9 @@ pub async fn list(
         let store = BookmarkStore::open()?;
         let records = store.list_unread(count)?;
         if records.is_empty() {
-            output::render_error(
-                format,
-                "no_unread_bookmarks",
-                "No unread bookmarks found",
-                "Sync bookmarks first: xmaster bookmarks sync",
-            );
-            return Ok(());
+            return Err(XmasterError::NotFound(
+                "No unread bookmarks found. Sync bookmarks first: xmaster bookmarks sync".into(),
+            ));
         }
         output::render(format, &records_to_list(records), None);
     } else {

@@ -212,7 +212,7 @@ fn schedule_list_empty() {
 
 #[test]
 fn bookmarks_stats_without_db() {
-    xmaster()
+    let _ = xmaster()
         .env("XMASTER_CONFIG_DIR", "/tmp/xmaster-test-bm-nonexistent")
         .args(["bookmarks", "stats", "--json"])
         .assert(); // should not panic

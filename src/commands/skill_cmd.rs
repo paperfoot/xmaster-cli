@@ -161,7 +161,7 @@ fn install_skill() -> Result<InstallResult, XmasterError> {
         }
 
         // Create parent dir and symlink
-        if let Err(_) = std::fs::create_dir_all(&target.path) {
+        if std::fs::create_dir_all(&target.path).is_err() {
             entries.push(InstallEntry {
                 platform: target.name.to_string(),
                 path: target.path.to_string_lossy().to_string(),

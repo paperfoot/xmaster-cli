@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 #[derive(Serialize)]
 struct ThreadResult {
+    #[serde(rename = "ids")]
     tweet_ids: Vec<String>,
     total: usize,
     succeeded: usize,

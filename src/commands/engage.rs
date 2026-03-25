@@ -9,6 +9,7 @@ use std::sync::Arc;
 #[derive(Serialize)]
 struct ActionResult {
     action: String,
+    #[serde(rename = "id")]
     tweet_id: String,
     success: bool,
 }
