@@ -308,12 +308,28 @@ pub enum Commands {
         action: EngageCommands,
     },
 
+    /// Install or update the xmaster agent skill for all AI platforms
+    Skill {
+        #[command(subcommand)]
+        action: SkillCommands,
+    },
+
     /// Self-update from GitHub releases
     Update {
         /// Check for updates without installing
         #[arg(long)]
         check: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SkillCommands {
+    /// Install skill to all detected agent platforms (Claude, Codex, Gemini, etc.)
+    Install,
+    /// Update skill to latest version bundled in this binary
+    Update,
+    /// Show where the skill is installed
+    Status,
 }
 
 #[derive(Subcommand)]

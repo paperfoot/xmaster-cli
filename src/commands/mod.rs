@@ -21,8 +21,9 @@ pub mod suggest;
 pub mod schedule;
 pub mod bookmarks_cmd;
 pub mod engage_recommend;
+pub mod skill_cmd;
 
-use crate::cli::{Cli, Commands, ConfigCommands, DmCommands, EngageCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands};
+use crate::cli::{Cli, Commands, ConfigCommands, DmCommands, EngageCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::OutputFormat;
@@ -137,6 +138,11 @@ pub async fn dispatch(
             ScheduleCommands::Reschedule { id, at } => schedule::reschedule(format, id, at).await,
             ScheduleCommands::Fire => schedule::fire(ctx, format).await,
             ScheduleCommands::Setup => schedule::setup(format).await,
+        },
+        Commands::Skill { action } => match action {
+            SkillCommands::Install => skill_cmd::install(format).await,
+            SkillCommands::Update => skill_cmd::update(format).await,
+            SkillCommands::Status => skill_cmd::status(format).await,
         },
     }
 }
