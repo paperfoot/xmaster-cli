@@ -19,6 +19,8 @@ struct ConfigDisplay {
     xai_key: String,
     timeout: u64,
     default_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice: Option<String>,
 }
 
 impl Tableable for ConfigDisplay {
@@ -34,6 +36,9 @@ impl Tableable for ConfigDisplay {
         table.add_row(vec!["xAI Key", &self.xai_key]);
         table.add_row(vec!["Timeout (s)", &self.timeout.to_string()]);
         table.add_row(vec!["Default Count", &self.default_count.to_string()]);
+        if let Some(ref v) = self.voice {
+            table.add_row(vec!["Voice", v]);
+        }
         table
     }
 }
@@ -42,6 +47,8 @@ impl Tableable for ConfigDisplay {
 struct ConfigSetResult {
     key: String,
     success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_value: Option<String>,
 }
 
 impl Tableable for ConfigSetResult {
@@ -52,6 +59,9 @@ impl Tableable for ConfigSetResult {
             self.key.as_str(),
             if self.success { "Updated" } else { "Failed" },
         ]);
+        if let Some(ref prev) = self.previous_value {
+            table.add_row(vec!["Previous value", prev]);
+        }
         table
     }
 }
@@ -99,6 +109,11 @@ fn mask(key: &str) -> String {
 
 pub async fn show(_ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), XmasterError> {
     let cfg = config::load_config()?;
+    let voice = if cfg.style.voice.is_empty() {
+        None
+    } else {
+        Some(cfg.style.voice)
+    };
     let display = ConfigDisplay {
         config_path: config::config_path().to_string_lossy().to_string(),
         api_key: mask(&cfg.keys.api_key),
@@ -109,6 +124,7 @@ pub async fn show(_ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
         xai_key: mask(&cfg.keys.xai),
         timeout: cfg.settings.timeout,
         default_count: cfg.settings.count,
+        voice,
     };
     output::render(format, &display, None);
     Ok(())
@@ -116,7 +132,8 @@ pub async fn show(_ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
 
 /// Write a config key without emitting any output. Used internally by commands
 /// like `web-login` that produce their own output envelope.
-fn set_silent(key: &str, value: &str) -> Result<(), XmasterError> {
+/// Returns the previous value if one existed (so callers can warn about overwrites).
+fn set_silent(key: &str, value: &str) -> Result<Option<String>, XmasterError> {
     let path = config::config_path();
 
     // Read existing TOML or start fresh
@@ -134,24 +151,35 @@ fn set_silent(key: &str, value: &str) -> Result<(), XmasterError> {
         .parse()
         .map_err(|e: toml::de::Error| XmasterError::Config(format!("Failed to parse config: {e}")))?;
 
-    // Parse key path like "keys.api_key" → ["keys", "api_key"]
+    // Parse key path like "keys.api_key" -> ["keys", "api_key"]
     let parts: Vec<&str> = key.split('.').collect();
-    match parts.len() {
+    let previous = match parts.len() {
         1 => {
+            let prev = doc.get(parts[0]).and_then(|v| v.as_str()).map(String::from);
             doc.insert(parts[0].to_string(), toml::Value::String(value.to_string()));
+            prev
         }
         2 => {
             let section = doc
                 .entry(parts[0].to_string())
                 .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let prev = if let toml::Value::Table(ref t) = section {
+                t.get(parts[1]).and_then(|v| v.as_str()).map(String::from)
+            } else {
+                None
+            };
             if let toml::Value::Table(ref mut t) = section {
                 t.insert(parts[1].to_string(), toml::Value::String(value.to_string()));
             }
+            prev
         }
         _ => {
             return Err(XmasterError::Config(format!("Invalid key path: {key}")));
         }
-    }
+    };
+
+    // Filter out empty strings -- not a meaningful previous value
+    let previous = previous.filter(|s| !s.is_empty());
 
     let toml_str = toml::to_string_pretty(&doc)
         .map_err(|e| XmasterError::Config(format!("Failed to serialize config: {e}")))?;
@@ -163,15 +191,16 @@ fn set_silent(key: &str, value: &str) -> Result<(), XmasterError> {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    Ok(())
+    Ok(previous)
 }
 
 pub async fn set(format: OutputFormat, key: &str, value: &str) -> Result<(), XmasterError> {
-    set_silent(key, value)?;
+    let previous = set_silent(key, value)?;
 
     let display = ConfigSetResult {
         key: key.to_string(),
         success: true,
+        previous_value: previous,
     };
     output::render(format, &display, None);
     Ok(())
