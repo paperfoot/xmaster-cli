@@ -1,6 +1,6 @@
 // ──────────────────────────────────────────────────────────
-//  X Recommendation Algorithm Analysis (2026)
-//  Academic paper format — clean, printable, professional
+//  How the X Algorithm Works and How to Grow
+//  Based on xai-org/x-algorithm (January 2026)
 // ──────────────────────────────────────────────────────────
 
 #set page(
@@ -10,18 +10,8 @@
   number-align: center,
 )
 
-#set text(
-  font: "New Computer Modern",
-  size: 10pt,
-  lang: "en",
-)
-
-#set par(
-  leading: 0.65em,
-  first-line-indent: 1.2em,
-  justify: true,
-)
-
+#set text(font: "New Computer Modern", size: 10pt, lang: "en")
+#set par(leading: 0.65em, first-line-indent: 1.2em, justify: true)
 #set heading(numbering: "1.1")
 
 #show heading.where(level: 1): it => {
@@ -50,14 +40,7 @@
 
 #show raw.where(block: true): it => {
   set text(8.5pt, font: "Menlo")
-  block(
-    width: 100%,
-    fill: luma(248),
-    stroke: 0.5pt + luma(200),
-    radius: 2pt,
-    inset: 10pt,
-    it,
-  )
+  block(width: 100%, fill: luma(248), stroke: 0.5pt + luma(200), radius: 2pt, inset: 10pt, it)
 }
 
 #show raw.where(block: false): it => {
@@ -65,36 +48,23 @@
   box(fill: luma(245), outset: (x: 2pt, y: 2pt), radius: 2pt, it)
 }
 
-#show figure.caption: it => {
-  set text(9pt)
-  it
-}
+#show figure.caption: it => { set text(9pt); it }
 
-// ──── Evidence tags ────
-#let code-tag = box(
-  fill: luma(230), stroke: 0.5pt + luma(180), outset: (x: 2pt, y: 1.5pt), radius: 2pt,
-)[#text(7.5pt, weight: "bold")[CODE]]
+#let code-tag = box(fill: luma(230), stroke: 0.5pt + luma(180), outset: (x: 2pt, y: 1.5pt), radius: 2pt)[#text(7.5pt, weight: "bold")[CODE]]
+#let emp-tag = box(fill: luma(230), stroke: 0.5pt + luma(180), outset: (x: 2pt, y: 1.5pt), radius: 2pt)[#text(7.5pt, weight: "bold")[EMP.]]
+#let inf-tag = box(fill: luma(230), stroke: 0.5pt + luma(180), outset: (x: 2pt, y: 1.5pt), radius: 2pt)[#text(7.5pt, weight: "bold")[INF.]]
 
-#let emp-tag = box(
-  fill: luma(230), stroke: 0.5pt + luma(180), outset: (x: 2pt, y: 1.5pt), radius: 2pt,
-)[#text(7.5pt, weight: "bold")[EMP.]]
-
-#let inf-tag = box(
-  fill: luma(230), stroke: 0.5pt + luma(180), outset: (x: 2pt, y: 1.5pt), radius: 2pt,
-)[#text(7.5pt, weight: "bold")[INF.]]
-
-// ════════════════════════════════════════════════════════════
-//  TITLE BLOCK
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════
+//  TITLE
+// ════════════════════════════════════════════
 
 #set par(first-line-indent: 0em)
 
 #align(center)[
   #v(0.5cm)
   #text(16pt, weight: "bold")[
-    Breaking the Algorithm: A Source Code Analysis of X's\
-    2026 Recommendation System and Its Implications\
-    for Small Account Growth
+    How the X Algorithm Works and How to Grow:\
+    A Source Code Analysis
   ]
   #v(0.6cm)
   #text(10.5pt)[Boris Djordjevic]
@@ -103,13 +73,11 @@
   #v(0.8cm)
 ]
 
-// ──── Abstract ────
-
 #block(width: 100%, inset: (x: 2em))[
   #set text(9.5pt)
   #set par(first-line-indent: 0em)
   #text(weight: "bold")[Abstract.] #h(0.5em)
-  We present a technical analysis of X's current recommendation algorithm based on the open-source release of `xai-org/x-algorithm` (January 2026). The system replaces the 2023 `twitter/the-algorithm` entirely, eliminating TweepCred reputation scoring, SimClusters community detection, and Real Graph relationship modelling in favour of a Grok-based transformer that learns exclusively from user engagement sequences. We examine the complete scoring pipeline---19 engagement signals combined via a weighted scorer with asymmetric negative compression---and derive practical implications for accounts with fewer than 100 followers attempting to grow from a dormant state. Every claim is tagged by evidence source: source code (#code-tag), published empirical research (#emp-tag), or first-principles inference (#inf-tag). Weight constants, excluded from the open-source release, are estimated through triangulation of code structure, 2023 baselines, and community experiments.
+  X open-sourced its recommendation algorithm in January 2026. This paper explains how it works and what it means for anyone trying to grow an account, particularly from a small or dormant starting point. The system uses a Grok-based transformer that scores every post on 19 engagement signals---15 positive and 4 negative---learned entirely from user behaviour, with no hand-engineered features. We explain the scoring pipeline, deduce the relative importance of each signal, and derive a concrete growth strategy grounded in the source code. Every claim is tagged by evidence source: source code (#code-tag), published empirical research (#emp-tag), or first-principles inference (#inf-tag).
 ]
 
 #v(0.5cm)
@@ -118,100 +86,60 @@
 
 #set par(first-line-indent: 1.2em)
 
-// ════════════════════════════════════════════════════════════
-//  1. INTRODUCTION
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════
+//  1. HOW THE ALGORITHM WORKS
+// ════════════════════════════════════════════
 
-= Introduction
+= How the Algorithm Works
 
-On January 20, 2026, X (formerly Twitter) released the source code of its recommendation algorithm under the Apache 2.0 licence at `github.com/xai-org/x-algorithm`. This is a complete rewrite of the 2023 open-source release (`twitter/the-algorithm`), replacing the Scala/Java stack with Rust for the serving layer and Python/JAX for the machine learning components.
+When you open your "For You" feed, the system executes a pipeline that narrows millions of posts down to a ranked list of roughly 50. The entire process takes about 200 milliseconds.
 
-The 2023 release produced a cottage industry of growth advice based on specific weight constants (e.g., "replies are weighted 13.5$times$, reports $-$369$times$"). Much of this advice persists in 2026, despite the underlying systems having been entirely replaced. The 2026 README states plainly: _"We have eliminated every single hand-engineered feature"_ #code-tag.
+== Where posts come from
 
-This paper analyses the 2026 source code to determine: (a) what signals the algorithm actually uses, (b) how the scoring pipeline works, (c) what can be deduced about relative signal importance, and (d) what this means for a specific use case---a dormant account with approximately 100 followers attempting to grow in a niche topic area.
+Posts are sourced from two places, in parallel #code-tag:
 
-== Scope and methodology
+- *In-network (Thunder).* Posts from accounts you follow, served from an in-memory store with sub-millisecond lookups.
+- *Out-of-network (Phoenix Retrieval).* Posts discovered from a global corpus using a machine learning model that matches your engagement history to candidate posts via dot-product similarity.
 
-We analyse every `.rs` and `.py` file in the repository. Where weight constants are referenced but not published (the `params` module is excluded "for security reasons"), we estimate relative magnitudes using three evidence sources, each tagged throughout:
+Out-of-network is the discovery mechanism. It is how posts reach people who do not follow you. It is also penalised by a multiplicative discount factor (`OON_WEIGHT_FACTOR` < 1.0), meaning in-network content has a structural advantage #code-tag.
 
-- #code-tag Direct observation from published source code.
-- #emp-tag Derived from published 2025--2026 empirical research, including Buffer's study of 18.8M posts and community experiments.
-- #inf-tag First-principles reasoning from code architecture and platform economics.
+== How posts are scored
 
-== Superseded systems
+Every candidate post is scored by a Grok-based transformer model that predicts the probability of 19 different user actions---like, reply, repost, share, block, report, and so on. These predicted probabilities are combined into a single score using a weighted sum #code-tag:
 
-The following 2023 systems are absent from the 2026 codebase and should no longer be cited:
+$ "score" = sum_(i=1)^19 w_i dot P(a_i) $
 
-#figure(
-  table(
-    columns: (1fr, 1fr),
-    stroke: 0.5pt + luma(180),
-    inset: 7pt,
-    table.header(
-      text(weight: "bold")[2023 System],
-      text(weight: "bold")[2026 Status],
-    ),
-    [TweepCred (PageRank reputation, 0--100)], [Eliminated],
-    [SimClusters (145K community embeddings)], [Replaced by Phoenix two-tower retrieval],
-    [Real Graph (interaction edge weights)], [Replaced by engagement sequence learning],
-    [MaskNet Heavy Ranker (48M params)], [Replaced by Grok transformer],
-    [EarlyBird Light Ranker], [Eliminated],
-    [`reply_engaged_by_author` signal (+75.0)], [Removed],
-    [Bookmark signal], [Not present in 2026 scorer],
-    [Blue Verified in-network 4$times$ / OON 2$times$], [Not present in 2026 recommendation code],
-  ),
-  caption: [Systems present in the 2023 open-source release that are absent from the 2026 codebase.],
-)
+The weight constants ($w_i$) determine how much each action matters. They are not published. We estimate them in Section 2.
 
-// ════════════════════════════════════════════════════════════
-//  2. SYSTEM ARCHITECTURE
-// ════════════════════════════════════════════════════════════
+== What the model sees about you
 
-= System Architecture
+The transformer takes your last *128 engagements* as input---every like, reply, repost, and share you made, along with the posts and authors involved #code-tag. This engagement history is how the model understands your interests. It is also how it predicts what you would engage with next.
 
-The system comprises four components: Home Mixer (orchestration), Thunder (in-network post store), Phoenix (ML ranking and retrieval), and a composable Candidate Pipeline framework.
+A dormant account has no engagement history. The system literally cannot score posts for you or about you until you generate data (see Section 4).
 
-== Pipeline stages
+== Filtering
 
-A request traverses nine stages in sequence #code-tag:
+Before scoring, 10 filters remove ineligible content---duplicates, old posts, content from blocked or muted accounts, muted keywords, and previously seen posts. After scoring, additional safety filters remove spam, violence, and policy violations #code-tag.
 
-+ *Query Hydration* --- `UserActionSeqQueryHydrator` fetches the user's last 128 engagements; `UserFeaturesQueryHydrator` fetches following/blocked/muted lists.
-+ *Candidate Sourcing* --- Thunder provides in-network posts; Phoenix Retrieval provides out-of-network posts via two-tower ANN search.
-+ *Candidate Hydration* --- Core data, author info, video duration, subscription status enriched in parallel.
-+ *Pre-Scoring Filters* --- 10 sequential filters remove duplicates, old posts, self-posts, blocked/muted authors, and previously seen content.
-+ *Phoenix Scorer* --- Grok transformer predicts $P("action")$ for 19 engagement types.
-+ *Weighted Scorer* --- Combines predictions into a single score via weighted sum with asymmetric offset.
-+ *Author Diversity Scorer* --- Applies exponential decay to repeated authors.
-+ *OON Scorer* --- Applies multiplicative discount to out-of-network candidates.
-+ *Selection and Post-Filtering* --- Top-K selection, then visibility filtering (safety) and conversation deduplication.
+Out-of-network content faces a stricter safety threshold than in-network content #code-tag.
 
-== Phoenix: The Grok Transformer
+== Author diversity
 
-The ranking model (`recsys_model.py`) is a transformer adapted from Grok-1 with three key properties:
+If the same author appears multiple times in a feed, each successive appearance is penalised by an exponential decay function #code-tag:
 
-*Hash-based embeddings.* Users, posts, and authors are represented via multiple hash functions mapped to embedding tables, eliminating hand-crafted features #code-tag.
+$ "multiplier"(n) = (1 - "floor") dot "decay"^n + "floor" $
 
-*Engagement history as context.* The model takes as input a sequence of $[italic("User") | italic("History") (S = 128) | italic("Candidates") (C = 32)]$ embeddings. History entries encode the post, its author, the action taken, and the product surface #code-tag.
+This means posting 5 times in an hour is counterproductive---your 5th post receives a fraction of its natural score.
 
-*Candidate isolation masking.* An attention mask prevents candidates from attending to each other while allowing them to attend to user context. This ensures scores are batch-independent and cacheable #code-tag.
+// ════════════════════════════════════════════
+//  2. WHAT THE ALGORITHM REWARDS
+// ════════════════════════════════════════════
 
-== Phoenix Retrieval: Two-Tower Model
+= What the Algorithm Rewards (and Punishes)
 
-Out-of-network discovery uses a two-tower architecture #code-tag:
+The scoring formula uses exactly 19 signals. The weight constants are hidden, but we can estimate their relative importance from code structure, platform economics, and empirical research.
 
-- *User Tower*: Encodes engagement history via the same Grok transformer, producing an L2-normalised user embedding.
-- *Candidate Tower*: Projects post+author embeddings through a two-layer MLP with SiLU activation, also L2-normalised.
-- *Retrieval*: Dot product similarity between user and candidate embeddings, selecting top-K.
-
-// ════════════════════════════════════════════════════════════
-//  3. THE 19 ENGAGEMENT SIGNALS
-// ════════════════════════════════════════════════════════════
-
-= The 19 Engagement Signals
-
-The `WeightedScorer` (`weighted_scorer.rs`) combines exactly 19 predicted engagement probabilities into a single score #code-tag. Weight constants reside in `params.rs`, which is excluded from the release.
-
-== Signal enumeration
+== The 19 signals, ranked by estimated impact
 
 #figure(
   table(
@@ -219,233 +147,87 @@ The `WeightedScorer` (`weighted_scorer.rs`) combines exactly 19 predicted engage
     stroke: 0.5pt + luma(180),
     inset: 6pt,
     table.header(
-      text(weight: "bold")[],
+      [],
       text(weight: "bold")[Signal],
-      text(weight: "bold")[Action],
-      text(weight: "bold")[Est. Wt.],
+      text(weight: "bold")[Est. weight],
+      text(weight: "bold")[Source],
     ),
-    [1], [Favorite (like)], [`ServerTweetFav`], [1$times$],
-    [2], [Reply], [`ServerTweetReply`], [$tilde$20$times$],
-    [3], [Retweet (repost)], [`ServerTweetRetweet`], [$tilde$3$times$],
-    [4], [Photo expand], [`ClientTweetPhotoExpand`], [$tilde$2$times$],
-    [5], [Click (conversation)], [`ClientTweetClick`], [$tilde$10$times$],
-    [6], [Profile click], [`ClientTweetClickProfile`], [$tilde$12$times$],
-    [7], [Video quality view], [`ClientTweetVideoQualityView`], [$tilde$3$times$],
-    [8], [Share (generic)], [`ClientTweetShare`], [$tilde$10$times$],
-    [9], [Share via DM], [`ClientTweetClickSendViaDirectMessage`], [$tilde$25$times$],
-    [10], [Share via copy link], [`ClientTweetShareViaCopyLink`], [$tilde$20$times$],
-    [11], [Dwell (binary)], [`ClientTweetRecapDwelled`], [$tilde$8$times$],
-    [12], [Quote tweet], [`ServerTweetQuote`], [$tilde$18$times$],
-    [13], [Quoted click], [`ClientQuotedTweetClick`], [$tilde$4$times$],
-    [14], [Dwell time (continuous)], [`DwellTime`], [$tilde$0.1/s],
-    [15], [Follow author], [`ClientTweetFollowAuthor`], [$tilde$30$times$],
     table.hline(),
-    [16], [Not interested], [`ClientTweetNotInterestedIn`], [$tilde minus$20$times$],
-    [17], [Block author], [`ClientTweetBlockAuthor`], [$tilde minus$74$times$],
-    [18], [Mute author], [`ClientTweetMuteAuthor`], [$tilde minus$40$times$],
-    [19], [Report], [`ClientTweetReport`], [$tilde minus$369$times$],
+    text(weight: "bold")[1], [*Follow author* --- user follows you from this post], [$tilde$30$times$], inf-tag,
+    text(weight: "bold")[2], [*Share via DM* --- user sends your post in a direct message], [$tilde$25$times$], inf-tag,
+    text(weight: "bold")[3], [*Reply* --- user replies to your post], [$tilde$20$times$], emp-tag,
+    text(weight: "bold")[4], [*Share via copy link* --- user copies the URL to share elsewhere], [$tilde$20$times$], inf-tag,
+    text(weight: "bold")[5], [*Quote tweet* --- user quotes your post with commentary], [$tilde$18$times$], emp-tag,
+    text(weight: "bold")[6], [*Profile click* --- user clicks your name or avatar], [$tilde$12$times$], emp-tag,
+    text(weight: "bold")[7], [*Click* --- user clicks into the full conversation], [$tilde$10$times$], emp-tag,
+    text(weight: "bold")[8], [*Share (generic)* --- user opens the share menu], [$tilde$10$times$], inf-tag,
+    text(weight: "bold")[9], [*Dwell* --- user pauses on your post (binary)], [$tilde$8$times$], emp-tag,
+    text(weight: "bold")[10], [*Video quality view* --- user watches your video past a threshold], [$tilde$3$times$], code-tag,
+    text(weight: "bold")[11], [*Retweet* --- user reposts without commentary], [$tilde$3$times$], emp-tag,
+    text(weight: "bold")[12], [*Photo expand* --- user taps to see full image], [$tilde$2$times$], inf-tag,
+    text(weight: "bold")[13], [*Favourite (like)* --- baseline], [1$times$], emp-tag,
+    text(weight: "bold")[14], [*Dwell time* --- how long the user pauses (continuous, in seconds)], [$tilde$0.1/s], code-tag,
+    text(weight: "bold")[15], [*Quoted click* --- user clicks into the original from a quote], [$tilde$4$times$], inf-tag,
+    table.hline(),
+    text(weight: "bold")[16], [*Not interested* --- user taps "show less"], [$tilde minus$20$times$], inf-tag,
+    text(weight: "bold")[17], [*Mute author* --- user mutes you], [$tilde minus$40$times$], inf-tag,
+    text(weight: "bold")[18], [*Block author* --- user blocks you], [$tilde minus$74$times$], inf-tag,
+    text(weight: "bold")[19], [*Report* --- user reports your post], [$tilde minus$369$times$], inf-tag,
   ),
-  caption: [All 19 engagement signals from `weighted_scorer.rs`. Weights 1--15 are positive; 16--19 are negative. Estimated weights use favorite = 1$times$ as baseline. Sources: #code-tag (signal existence), #emp-tag #inf-tag (weight estimates).],
-)
+  caption: [All 19 scoring signals from `weighted_scorer.rs`, ranked by estimated relative weight. Favourite (like) = 1#sym.times baseline. Signals 1--15 are positive; 16--19 are negative. True weight values are in the unpublished `params.rs` module.],
+) <tab:signals>
 
-== Scoring formula
+== Key observations
 
-The combined score is computed as:
+*Likes are the weakest positive signal.* Most growth advice focuses on likes. The algorithm barely values them. A like is the lowest-effort action a user can take, and its weight reflects that.
 
-$ "score" = sum_(i=1)^19 w_i dot P(a_i) $
+*Shares are probably the most underrated signals.* DM shares, copy-link shares, and generic shares are three separate dedicated signals---new in 2026. Sending a post via DM is the highest-conviction action a user can take (personally vouching to someone they know). The algorithm treats it accordingly #inf-tag.
 
-where $P(a_i)$ is the predicted probability of action $a_i$ from the Grok transformer (converted from log-probabilities via $exp(dot.c)$), and $w_i$ is the corresponding weight constant #code-tag.
+*Follows-from-post are the ultimate signal.* If your content causes someone to follow you, that post receives the highest positive weighting. This rewards genuinely novel or valuable content from accounts people have not seen before #inf-tag.
 
-== Negative score compression
+*Negative signals are predictive, not reactive.* The Grok transformer predicts the _probability_ that a user would block, mute, or report your content---and penalises your post _before anyone acts_. Content that the model expects to provoke negative reactions is suppressed pre-emptively #code-tag.
 
-The `offset_score()` function applies asymmetric treatment #code-tag:
+*Negative compression is asymmetric.* Positive scores scale linearly. Negative scores are compressed into a bounded band near zero. This means even moderate negative predictions can kill a post, while positive signals stack without limit #code-tag.
 
-```rust
-fn offset_score(combined_score: f64) -> f64 {
-    if combined_score < 0.0 {
-        (combined_score + NEGATIVE_WEIGHTS_SUM) / WEIGHTS_SUM
-            * NEGATIVE_SCORES_OFFSET
-    } else {
-        combined_score + NEGATIVE_SCORES_OFFSET
-    }
-}
-```
+*Bookmarks are not a signal.* They are not among the 19 signals in the scorer. The widely circulated claim that bookmarks carry high weight is incorrect #code-tag.
 
-Positive scores scale linearly with an additive offset. Negative scores are compressed into a bounded band near zero. This creates an architectural asymmetry: even moderate negative predictions effectively suppress content, while positive signals stack without limit #inf-tag.
+// ════════════════════════════════════════════
+//  3. CONTENT STRATEGY
+// ════════════════════════════════════════════
 
-== New signals absent in 2023
+= What to Post (and How)
 
-Three categories of signals are entirely new in the 2026 scorer:
+== Text
 
-*Share signals (3).* `share_score`, `share_via_dm_score`, and `share_via_copy_link_score` each receive independent weights. The 2023 system had no share tracking in the scorer. The architectural separation implies premium weighting---DM shares in particular represent the highest-conviction sharing action (personal vouching) #inf-tag.
+Text posts have the highest average engagement rate on X at 0.48%, compared to 0.41% for images and video #emp-tag. They require no production overhead, enabling higher posting frequency with quality. The scoring formula has no format-specific bonus for text---it simply tends to generate more replies and dwell time #inf-tag.
 
-*Dwell signals (2).* Binary dwell (`ClientTweetRecapDwelled`) captures whether the user paused; continuous dwell time (`DwellTime`) captures duration. The 2023 system had only an implicit dwell signal via click metrics #code-tag.
+*Structure for maximum impact:*
+- Open with a strong first line (visible without expanding).
+- Use line breaks for scannability---this increases dwell time.
+- End with a question or provocative claim to drive replies.
 
-*Follow author.* `ClientTweetFollowAuthor` is a first-class scoring signal. Content that causes follows receives direct algorithmic reward #code-tag.
+== Images
 
-== Video quality view gating
+The `photo_expand_score` signal fires when a user taps to see the full image #code-tag. Design images that demand expansion:
+- Infographics with text too small to read in the feed.
+- Charts and data visualisations from papers or research.
+- Screenshots that are partially cropped to force a tap.
 
-The VQV signal is gated behind a minimum duration threshold #code-tag:
+Native image uploads see up to 40% more engagement than linked images #emp-tag.
 
-```rust
-fn vqv_weight_eligibility(candidate: &PostCandidate) -> f64 {
-    if candidate.video_duration_ms
-        .is_some_and(|ms| ms > p::MIN_VIDEO_DURATION_MS)
-    {
-        p::VQV_WEIGHT
-    } else {
-        0.0
-    }
-}
-```
+== Threads
 
-Videos shorter than `MIN_VIDEO_DURATION_MS` receive zero VQV contribution. The threshold value is not published.
+Threads maximise the continuous `dwell_time` signal---the only non-probability input to the scorer, measured in seconds #code-tag. A 5-tweet thread where someone reads all 5 generates substantially more dwell signal than a single tweet. Threads average 3#sym.times more engagement than single tweets #emp-tag.
 
-// ════════════════════════════════════════════════════════════
-//  4. PENALTIES AND NEGATIVE SIGNALS
-// ════════════════════════════════════════════════════════════
+== Video
 
-= Penalties and Negative Signals
+Videos must exceed a minimum duration threshold (`MIN_VIDEO_DURATION_MS`, value not published) to qualify for the `vqv_score` (video quality view) signal. Videos shorter than this threshold receive zero contribution from VQV #code-tag. Aim for 15--60 seconds minimum.
 
-The algorithm enforces penalties at two layers: scoring (probabilistic, continuous) and filtering (binary, absolute).
+== Posting frequency and spacing
 
-== Predictive penalties
+The author diversity decay means each successive post from you in the same feed session gets `decay`#super[_n_] of its natural score. *Space posts at least 2 hours apart* to avoid cannibalisation #code-tag. A rhythm of 3--5 posts per day, well spaced, outperforms 10 posts dumped in quick succession.
 
-The four negative signals are _predictions_, not events #code-tag. The Grok transformer predicts the probability that a user _would_ block, mute, report, or dismiss a post---and penalises accordingly _before the user acts_. The model learns from historical negative actions to generalise across audience segments.
-
-This means an account that has accumulated blocks or mutes trains the model to predict higher $P("block")$ and $P("mute")$ for that account's future content across all users #inf-tag.
-
-== Hard filters
-
-Ten pre-scoring filters remove content entirely #code-tag:
-
-#figure(
-  table(
-    columns: (auto, 1fr),
-    stroke: 0.5pt + luma(180),
-    inset: 6pt,
-    table.header(
-      text(weight: "bold")[Filter],
-      text(weight: "bold")[Effect],
-    ),
-    [`DropDuplicatesFilter`], [Remove duplicate post IDs],
-    [`CoreDataHydrationFilter`], [Remove posts that failed metadata hydration],
-    [`AgeFilter`], [Remove posts older than `MAX_POST_AGE` (Snowflake timestamp)],
-    [`SelfTweetFilter`], [Remove the viewer's own posts],
-    [`RetweetDeduplicationFilter`], [Deduplicate reposts of the same content],
-    [`IneligibleSubscriptionFilter`], [Remove paywalled content user cannot access],
-    [`PreviouslySeenPostsFilter`], [Remove posts already seen],
-    [`PreviouslyServedPostsFilter`], [Remove posts already served this session],
-    [`MutedKeywordFilter`], [Remove posts matching muted keywords (tokenised)],
-    [`AuthorSocialgraphFilter`], [Remove posts from blocked/muted authors],
-  ),
-  caption: [Pre-scoring filters. A post must survive all 10 to reach the scorer.],
-)
-
-Post-selection, two additional filters apply: `VFFilter` (visibility filtering for safety---spam, violence, policy violations) and `DedupConversationFilter` #code-tag. Out-of-network content faces a stricter safety level (`TimelineHomeRecommendations` vs. `TimelineHome`).
-
-== Author diversity decay
-
-The `AuthorDiversityScorer` applies exponential decay to repeated appearances by the same author #code-tag:
-
-$ italic("multiplier")(n) = (1 - italic("floor")) dot italic("decay")^n + italic("floor") $
-
-where $n$ is the zero-indexed position of this author's $n$-th post in the ranked feed. The first post receives a multiplier near 1.0; subsequent posts decay geometrically.
-
-== Out-of-network discount
-
-The `OONScorer` multiplies out-of-network candidates by `OON_WEIGHT_FACTOR` (value hidden, confirmed $< 1.0$ by the code comment: _"Prioritize in-network candidates over out-of-network candidates"_) #code-tag.
-
-// ════════════════════════════════════════════════════════════
-//  5. COLD START ANALYSIS
-// ════════════════════════════════════════════════════════════
-
-= Cold Start Analysis: The Dormant Small Account
-
-We consider a specific profile: 96 followers, 104 following, account created 2023, dormant for an extended period, now reactivating. Free tier.
-
-== The empty history problem
-
-The Grok transformer requires engagement history as input. The `UserActionSeqQueryHydrator` fetches recent engagements and, critically #code-tag:
-
-```rust
-if thrift_user_actions.is_empty() {
-    return Err(format!("No user actions found for user {}", user_id));
-}
-```
-
-An empty engagement history causes the entire scoring pipeline to short-circuit. The Phoenix Scorer returns candidates unscored; the Weighted Scorer produces zeros. The account is algorithmically invisible.
-
-== Retrieval model implications
-
-The two-tower retrieval model builds a user embedding by encoding engagement history through the transformer and average-pooling #code-tag. With no history, the user vector degenerates to a generic/default embedding, producing undifferentiated similarity scores against the corpus. Out-of-network discovery is effectively disabled.
-
-== In-network as the only channel
-
-Thunder serves posts from followed accounts as in-network candidates with sub-millisecond lookups #code-tag. This is the only reliable channel for a dormant account. However, in-network reach is bounded by the follower count (96), and the OON discount further penalises the only growth path.
-
-== Comparison with 2023
-
-The 2023 system imposed explicit penalties on small accounts: TweepCred $< 65$ limited distribution to 3 tweets; the following/follower ratio penalty divided PageRank by $exp(5 dot (r - 0.6))$. The 2026 system has no such explicit penalties. The discrimination is _behavioural_---absence of engagement data, not a hard threshold #inf-tag.
-
-This is both better and worse. Better: there is no follower-count floor to clear. Worse: the model cannot work _at all_ without engagement data, whereas the 2023 system at least scored your 3 tweets.
-
-// ════════════════════════════════════════════════════════════
-//  6. GROWTH STRATEGY
-// ════════════════════════════════════════════════════════════
-
-= Growth Strategy Derived from Source Code
-
-== Phase 1: Populate the history buffer (Days 1--14)
-
-The immediate priority is generating engagement history to populate the 128-position sequence #code-tag. Without this, the transformer cannot function.
-
-*Daily actions:*
-
-- *Like 20--30 niche posts.* Each like enters `history_actions` and teaches the retrieval model your topic interests #code-tag.
-- *Reply to 5--10 posts* from accounts with 1K--50K followers. Replies fire `ServerTweetReply`, estimated at $tilde$20$times$ baseline weight. Target posts under 30 minutes old #emp-tag.
-- *Quote 2--3 posts.* Quote tweets fire `ServerTweetQuote` (separate from `ServerTweetRetweet`), estimated at $tilde$18$times$ #code-tag.
-- *Post 1--2 original tweets.* Text-only posts outperform video by 30% on X #emp-tag.
-- *DM 1--2 posts* to people who would value them. This fires `ClientTweetClickSendViaDirectMessage`---a separate, high-value signal #code-tag.
-
-== Phase 2: Consistent content creation (Days 15--60)
-
-With engagement history populated, the transformer can score content. Increase original output:
-
-- *3--5 posts per day*, spaced $gt.eq$ 2 hours apart to avoid the author diversity decay #code-tag.
-- *1 thread per week* (5--7 tweets). Threads maximise the continuous `dwell_time` signal #code-tag.
-- *1 image post per day* designed for tap-to-expand, triggering `photo_expand_score` #code-tag.
-- *Subscribe to Premium at Day 21--30*. Buffer's study reports $tilde$10$times$ reach for Premium accounts #emp-tag. The boost is multiplicative---subscribe only after building a base score to multiply #inf-tag.
-
-== Phase 3: Compounding growth (Days 60--180)
-
-- Increase to 5--7 posts per day if quality is maintained.
-- Add 1--2 video posts per week exceeding `MIN_VIDEO_DURATION_MS` #code-tag.
-- Seek quote-post opportunities on larger accounts. `quoted_click_score` fires when users click through #code-tag.
-- Share valuable posts via DM consistently---the most underrated signal in the system #inf-tag.
-
-== Content format selection
-
-#figure(
-  table(
-    columns: (auto, 1fr, auto),
-    stroke: 0.5pt + luma(180),
-    inset: 6pt,
-    table.header(
-      text(weight: "bold")[Format],
-      text(weight: "bold")[Rationale],
-      text(weight: "bold")[Evidence],
-    ),
-    [Text], [Highest engagement rate on X (0.48% vs. 0.41% for images/video). No production overhead enables frequency.], [#emp-tag],
-    [Images], [Triggers `photo_expand_score`. Design for forced expansion (small text, charts).], [#code-tag],
-    [Threads], [Maximises continuous `dwell_time` and binary `dwell_score`.], [#code-tag],
-    [Video ($>$ min. duration)], [Qualifies for `vqv_score`. Below threshold = zero contribution.], [#code-tag],
-    [Polls], [No direct signal, but indirectly boosts `click_score` and `dwell_time`.], [#inf-tag],
-  ),
-  caption: [Content format selection based on scoring signals.],
-)
-
-== Behaviours to avoid
+== What not to post
 
 #figure(
   table(
@@ -454,41 +236,153 @@ With engagement history populated, the transformer can score content. Increase o
     inset: 6pt,
     table.header(
       text(weight: "bold")[Behaviour],
-      text(weight: "bold")[Mechanism],
-      text(weight: "bold")[Evidence],
+      text(weight: "bold")[Why it hurts],
+      text(weight: "bold")[Source],
     ),
-    [Getting reported], [$P("report") times tilde minus 369$ weight; `offset_score()` compression], [#code-tag #inf-tag],
-    [Getting blocked], [$P("block") times tilde minus 74$; trains model against future content], [#code-tag #inf-tag],
-    [Off-topic posting], [Elevates $P("not interested")$; content mismatch signal], [#inf-tag],
-    [Posting 5+ in 1 hour], [Author diversity decay: $"decay"^4$ on 5th post], [#code-tag],
-    [$>$100 likes/hour], [Rate-limit shadowban (48--72 hours)], [#emp-tag],
-    [Follow/unfollow cycling], [3-month visibility reduction], [#emp-tag],
-    [Combative tone], [Grok predicts higher $P("block")$, $P("mute")$ even with engagement], [#emp-tag #inf-tag],
+    [Off-topic content], [Elevates P(not interested) prediction], inf-tag,
+    [Engagement bait ("Like if you agree!")], [Trained users ignore or mute; elevates P(mute)], inf-tag,
+    [Combative or aggressive tone], [Grok predicts higher P(block), P(mute) even with high engagement], emp-tag,
+    [Spam-like patterns (copy-pasted replies)], [Triggers P(report); may activate safety filters], emp-tag,
+    [5+ hashtags], [Associated with spam; 40% engagement reduction observed], emp-tag,
+    [Posting 5+ times in 1 hour], [Author diversity decay: 5th post gets decay#super[4] of score], code-tag,
   ),
-  caption: [Behaviours that trigger negative signals or penalties.],
+  caption: [Behaviours that trigger negative signals or scoring penalties.],
 )
 
-// ════════════════════════════════════════════════════════════
-//  7. PREMIUM ANALYSIS
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════
+//  4. GROWING FROM A SMALL OR DORMANT ACCOUNT
+// ════════════════════════════════════════════
 
-= Premium Subscription Analysis
+= Growing from a Small or Dormant Account
 
-The Premium/verification boost is _not present_ in the 2026 recommendation source code---it is not among the 19 signals in `weighted_scorer.rs` #code-tag. However, empirical data consistently reports substantial reach advantages #emp-tag:
+This section addresses a specific scenario: an account with fewer than 150 followers, dormant or low-activity, now trying to grow.
 
-- Buffer (18.8M posts): Premium accounts average $tilde$600 impressions/post vs. significantly fewer for free accounts ($tilde$10$times$ advantage).
-- Premium+ accounts average $tilde$1,550 impressions/post.
-- Non-Premium accounts posting links showed zero median engagement from March--October 2025 (link penalty largely removed October 2025).
+== The cold start problem
 
-The boost likely operates at a different layer of the stack (delivery, CDN, or a pre-recommendation scoring step not included in the open-source release) #inf-tag.
+The Grok transformer requires engagement history as input. The model takes your last 128 interactions and uses them to understand your interests and predict what you would engage with. If your engagement history is empty, the query hydrator returns an error and the scoring pipeline short-circuits #code-tag:
 
-*Recommendation:* Do not subscribe immediately. Build engagement history (2--3 weeks) first. A multiplicative boost on zero engagement produces zero. Subscribe at Day 21--30 when consistent posting yields measurable engagement #inf-tag.
+```rust
+if thrift_user_actions.is_empty() {
+    return Err(format!("No user actions found for user {}", user_id));
+}
+```
 
-// ════════════════════════════════════════════════════════════
-//  8. MILESTONES
-// ════════════════════════════════════════════════════════════
+*This means step zero is using X actively*---liking, replying, reposting---for at least 1--2 weeks before expecting any organic reach from original content.
 
-= Expected Milestones
+== Phase 1: Build your engagement history (Days 1--14)
+
+*Daily time: 45--60 minutes.*
+
+#set par(first-line-indent: 0em)
+
+*Morning (20 min):*
+- Like 20--30 posts in your niche. Each like enters `history_actions` and teaches the retrieval model your topics #code-tag.
+- Reply to 5--10 posts from accounts with 1K--50K followers, targeting posts under 30 minutes old #emp-tag.
+- Quote 2--3 posts with added context. Quote tweets are a separate signal from retweets #code-tag.
+
+*Midday (15 min):*
+- Post 1--2 original tweets (text-only at this stage).
+- Reply to every response you receive within 30 minutes.
+
+*Evening (10 min):*
+- DM 1--2 posts to people who would genuinely value them. This fires the `share_via_dm` signal---separate, high-value, and almost universally ignored by growth practitioners #code-tag.
+- Follow 5--10 relevant accounts. Your following list determines what Thunder serves as in-network candidates, shaping your own engagement history #code-tag.
+
+#set par(first-line-indent: 1.2em)
+
+== Phase 2: Establish a rhythm (Days 15--60)
+
+With engagement history populated, the transformer can score your content.
+
+- Increase to 3--5 original posts per day, spaced $gt.eq$ 2 hours apart #code-tag.
+- Maintain a 70/30 split: 70% engaging with others, 30% original content #emp-tag.
+- Add 1 thread per week (5--7 tweets) for dwell time #code-tag.
+- Add 1 image post per day designed for tap-to-expand #code-tag.
+
+== Phase 3: Compound (Days 60--180)
+
+- 5--7 posts per day if quality is maintained.
+- 1--2 video posts per week exceeding the minimum duration for VQV scoring #code-tag.
+- Actively seek quote-post opportunities on larger accounts.
+- Share valuable posts via DM consistently---the most underrated lever in the algorithm.
+
+== The reply strategy in detail
+
+Replies are estimated at $tilde$20#sym.times the weight of a like. They are the single highest-impact action available to a small account for three reasons:
+
++ *Algorithmic weight.* A reply fires `ServerTweetReply`, one of the highest-weighted positive signals.
++ *Visibility.* Your reply appears in the thread below the original post, exposing you to the original author's audience.
++ *Profile clicks.* Readers who find your reply valuable click your profile, firing `profile_click_score` ($tilde$12#sym.times) for your other content.
+
+*What makes a good reply:* Add information, cite data, offer a contrarian perspective, or share relevant experience. Never write "great post" or emoji-only responses---these generate zero engagement and teach the model that your content is low-value #inf-tag.
+
+*Target selection:* Accounts with 1K--50K followers in your niche. Large enough to have active threads, small enough to notice you. Avoid accounts with 500K+ followers---your reply will be buried #emp-tag.
+
+// ════════════════════════════════════════════
+//  5. PREMIUM
+// ════════════════════════════════════════════
+
+= Premium Subscription
+
+The Premium boost is not present in the 2026 recommendation source code #code-tag. It likely operates at a different layer of the stack. However, empirical data consistently reports substantial reach advantages #emp-tag:
+
+- Premium accounts average $tilde$600 impressions per post vs. significantly fewer for free accounts ($tilde$10#sym.times advantage).
+- Premium+ accounts average $tilde$1,550 impressions per post.
+
+*When to subscribe:* Not on Day 1. The boost is multiplicative---it amplifies your existing score. If your engagement history is empty and your content generates no engagement, multiplying zero is still zero. Subscribe at Day 21--30, once you are posting consistently and receiving measurable engagement #inf-tag.
+
+Choose Premium (\$8/month) initially, not Premium+ (\$16/month). The incremental benefit matters more at higher follower counts where the reach differential compounds.
+
+// ════════════════════════════════════════════
+//  6. NEGATIVE SIGNALS
+// ════════════════════════════════════════════
+
+= How the Algorithm Punishes Content
+
+== Predictive, not reactive
+
+The four negative signals---not interested, mute, block, report---are _predictions_. The Grok transformer estimates the probability that a user would take these actions and penalises your post before anyone actually does #code-tag.
+
+Your historical blocks and mutes become training data. The model generalises: if users who engage with your niche topic tend to mute your posts, the model will suppress your content for the entire niche-interested audience segment #inf-tag.
+
+== Asymmetric compression
+
+Positive scores scale linearly. Negative scores are compressed into a bounded band near zero by the `offset_score()` function #code-tag. This means:
+
+- A post with strong positive signals and a few negative signals survives---the positive dominates.
+- A post with even moderate negative signals and weak positive signals enters compression and is effectively killed.
+- There is a floor---mass-reporting cannot drive a score to negative infinity. But the floor is near zero, which is functionally invisible.
+
+== The penalty hierarchy
+
+#figure(
+  table(
+    columns: (auto, 1fr, auto),
+    stroke: 0.5pt + luma(180),
+    inset: 6pt,
+    table.header(
+      text(weight: "bold")[Rank],
+      text(weight: "bold")[Penalty],
+      text(weight: "bold")[Recovery],
+    ),
+    [1], [Safety filter drop (spam, violence, policy)], [Irreversible for that post],
+    [2], [Blocked/muted by viewer (hard filter---removed before scoring)], [Unblock/unmute by viewer],
+    [3], [High P(report) prediction], [Model must relearn from positive signals],
+    [4], [High P(block) prediction], [Same],
+    [5], [High P(mute) prediction], [Same],
+    [6], [High P(not interested) prediction], [Same],
+    [7], [Out-of-network discount factor], [Viewer follows you],
+    [8], [Author diversity decay], [Resets each feed session],
+    [9], [Rate-limit shadowban (>100 likes/hr, follow cycling)], [48 hours to 3 months],
+  ),
+  caption: [Penalty mechanisms ranked by severity. Predictions (ranks 3--6) are persistent and require sustained positive engagement to reverse.],
+)
+
+// ════════════════════════════════════════════
+//  7. MILESTONES
+// ════════════════════════════════════════════
+
+= Expected Growth Timeline
 
 #figure(
   table(
@@ -498,70 +392,81 @@ The boost likely operates at a different layer of the stack (delivery, CDN, or a
     table.header(
       text(weight: "bold")[Milestone],
       text(weight: "bold")[Timeline],
-      text(weight: "bold")[Significance],
+      text(weight: "bold")[What it means],
     ),
-    [Engagement history populated], [Day 7--14], [Phoenix transformer becomes functional],
-    [For You feed shows niche content], [Day 7--10], [Retrieval model learned embedding],
-    [First reply-back from target], [Day 2--3], [Engagement edge established],
-    [Premium subscription], [Day 21--30], [$tilde$10$times$ reach amplification],
-    [250 followers], [Week 3--4], [Meaningful in-network base],
-    [Post exceeding 1K impressions], [Week 3--4], [Out-of-network retrieval functioning],
+    [Engagement history populated], [Day 7--14], [The algorithm can now score your content],
+    [For You feed shows your niche], [Day 7--10], [Retrieval model has learned your interests],
+    [First meaningful reply exchange], [Day 2--3], [Engagement edges forming],
+    [Subscribe to Premium], [Day 21--30], [$tilde$10#sym.times reach amplification],
+    [250 followers], [Week 3--4], [Meaningful in-network audience],
+    [Post exceeding 1,000 impressions], [Week 3--4], [Out-of-network retrieval working],
     [500 followers], [Month 2--3], [Compounding growth begins],
-    [First viral post ($>$10K)], [Month 2--3], [Embedding neighbourhood established],
-    [1,000 followers], [Month 4--6], [Self-sustaining growth flywheel],
+    [First viral post (10,000+ impressions)], [Month 2--3], [You are established in the retrieval model's embedding space],
+    [1,000 followers], [Month 4--6], [Self-sustaining growth],
   ),
-  caption: [Expected growth milestones for a dormant account reactivating with the described strategy.],
+  caption: [Expected milestones for a dormant account ($tilde$100 followers) following the described strategy.],
 )
 
-// ════════════════════════════════════════════════════════════
-//  9. CONCLUSION
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════
+//  8. DAILY CHECKLIST
+// ════════════════════════════════════════════
 
-= Conclusion
+= Daily Checklist
 
-The 2026 X recommendation algorithm represents a fundamental architectural shift from the 2023 system. The elimination of all hand-engineered features in favour of a Grok-based transformer means the algorithm is simultaneously more opaque (no published weight constants) and more elegant (a single model learns everything from engagement sequences).
+#block(width: 100%, stroke: 0.5pt + luma(180), radius: 3pt, inset: 14pt)[
+  #set par(first-line-indent: 0em)
+  #set text(9.5pt)
 
-For small dormant accounts, the primary challenge is the cold start problem---a transformer with no engagement history cannot score content. The solution is not "growth hacking" but rather systematic engagement to populate the 128-position history buffer, followed by consistent content creation that optimises for high-value signals (replies, shares, quotes, follows) while avoiding negative predictions (reports, blocks, mutes).
+  #text(weight: "bold")[Morning (20 min)]
+  - Like 20--30 niche posts (builds engagement history)
+  - Reply to 5--10 posts from larger accounts (target posts < 30 min old)
+  - Quote 2--3 valuable posts with added context
 
-The most actionable findings from the source code:
+  #v(6pt)
+  #text(weight: "bold")[Midday (20 min)]
+  - Post 1--2 original posts (spaced $gt.eq$ 2 hours from each other)
+  - Reply to all replies on your content within 30 minutes
+  - DM 1 great post to someone who would value it
 
-+ *DM shares and copy-link shares are separate high-value signals*, brand new in 2026 and likely underweighted in current growth advice.
-+ *The `reply_engaged_by_author` signal is removed*, eliminating the 150#sym.times "cheat code" of the 2023 system.
-+ *Bookmarks are not a scoring signal*, contradicting widely circulated advice.
-+ *Negative signals are predictive*, not reactive---the model penalises content it expects users to dislike before they act.
-+ *The offset compression function* creates architectural asymmetry favouring punishment over reward, making reputation management critical.
+  #v(6pt)
+  #text(weight: "bold")[Evening (10 min)]
+  - Post 1 more original post or start a thread segment
+  - Check metrics: which posts generated profile clicks? Double down on that format.
+  - Follow 3--5 new relevant accounts
 
-// ════════════════════════════════════════════════════════════
+  #v(6pt)
+  #text(weight: "bold")[Weekly]
+  - 1 thread (5--7 tweets)
+  - 1 image post designed for tap-to-expand
+  - Review: which content types drove the most engagement?
+  - Unfollow accounts that pollute your engagement history with off-topic content
+]
+
+// ════════════════════════════════════════════
 //  REFERENCES
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════
 
 #heading(numbering: none)[References]
 
 #set par(first-line-indent: 0em)
 #set text(9pt)
 
-#block(inset: (left: 1.5em, right: 0em))[
-
+#block(inset: (left: 1.5em))[
   + xAI Corp. _x-algorithm_. GitHub, Apache 2.0, January 20, 2026. `github.com/xai-org/x-algorithm`
 
-  + Twitter Inc. _the-algorithm_. GitHub, March 31, 2023. `github.com/twitter/the-algorithm`
+  + Buffer Research. "Does X Premium Really Boost Your Reach? We Analyzed 18.8 Million Posts." 2025.
 
-  + Twitter Inc. _the-algorithm-ml_. GitHub, March 31, 2023. `github.com/twitter/the-algorithm-ml`
+  + PostEverywhere. "How the X/Twitter Algorithm Works in 2026 (From the Source Code)." 2026.
 
-  + Buffer Research. "Does X Premium Really Boost Your Reach? We Analyzed 18.8 Million Posts." 2025. `buffer.com/resources/x-premium-review/`
-
-  + TechCrunch. "X open sources its algorithm while facing a transparency fine." January 2026.
-
-  + PostEverywhere. "How the X/Twitter Algorithm Works in 2026 (From the Source Code)." 2026. `posteverywhere.ai/blog/how-the-x-twitter-algorithm-works`
-
-  + Tweet Archivist. "Complete Technical Breakdown: How the X Algorithm Works." 2025--2026. `tweetarchivist.com/how-twitter-algorithm-works-2025`
+  + Tweet Archivist. "Complete Technical Breakdown: How the X Algorithm Works." 2025--2026.
 
   + Social Media Today. "X Reveals Key Signals for Post Reach." 2025.
 
-  + Pixelscan. "Twitter Shadowban: Causes, Detection & Fixes (2026 Guide)." `pixelscan.net/blog/twitter-shadowban-2026-guide/`
+  + Pixelscan. "Twitter Shadowban: Causes, Detection & Fixes (2026 Guide)." 2026.
 
   + Circleboom. "The Hidden X Algorithm: TweepCred, Shadow Hierarchy, and Dwell Time." 2025.
 
   + Tomorrow's Publisher. "X Softens Stance on External Links." October 2025.
 
+  + TechCrunch. "X open sources its algorithm while facing a transparency fine." January 2026.
 ]
