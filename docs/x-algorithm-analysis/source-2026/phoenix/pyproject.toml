@@ -1,0 +1,38 @@
+[project]
+name = "grok-1"
+version = "0.1.0"
+description = "Grok-1 model"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "dm-haiku>=0.0.13",
+    "jax==0.8.1",
+    "numpy>=1.26.4",
+    "pyright>=1.1.408",
+]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'darwin'",
+    "sys_platform == 'linux'",
+]
+
+[tool.ruff]
+indent-width = 4
+line-length = 100
+
+[tool.ruff.lint]
+ignore = [
+    "E722",
+    "E731",
+    "E741",
+    "F405",
+    "E402",
+    "F403",
+]
+select = ["ISC001"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
