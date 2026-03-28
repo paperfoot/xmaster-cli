@@ -151,6 +151,14 @@ struct ApiResponse<T> {
     data: Option<T>,
     #[serde(default)]
     errors: Option<Vec<ApiErrorDetail>>,
+    #[serde(default)]
+    meta: Option<ApiMeta>,
+}
+
+#[derive(Deserialize, Default)]
+struct ApiMeta {
+    #[serde(default)]
+    next_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -975,22 +983,13 @@ impl XApi {
 
     // -- Timelines ----------------------------------------------------------
 
+    #[allow(dead_code)]
     pub async fn get_user_tweets(
         &self,
         user_id: &str,
         count: usize,
     ) -> Result<Vec<TweetData>, XmasterError> {
-        let max = count.clamp(5, 100);
-        let url = format!(
-            "{BASE}/users/{user_id}/tweets?max_results={max}&{tf}&{exp}&{uf}",
-            tf = Self::tweet_fields(),
-            exp = Self::tweet_expansions(),
-            uf = Self::user_fields_param(),
-        );
-        let (mut tweets, includes) =
-            self.request_list::<TweetData>(Method::GET, &url, None).await?;
-        Self::merge_authors(&mut tweets, &includes);
-        Ok(tweets)
+        self.get_user_tweets_paginated(user_id, count, None, None).await
     }
 
     pub async fn get_user_mentions(
@@ -1079,7 +1078,17 @@ impl XApi {
         mode: &str,
         count: usize,
     ) -> Result<Vec<TweetData>, XmasterError> {
-        let max = count.clamp(10, 100);
+        self.search_tweets_paginated(query, mode, count, None, None).await
+    }
+
+    pub async fn search_tweets_paginated(
+        &self,
+        query: &str,
+        mode: &str,
+        count: usize,
+        start_time: Option<&str>,
+        end_time: Option<&str>,
+    ) -> Result<Vec<TweetData>, XmasterError> {
         let encoded_query = percent_encoding::utf8_percent_encode(
             query,
             percent_encoding::NON_ALPHANUMERIC,
@@ -1088,16 +1097,95 @@ impl XApi {
             "relevancy" | "relevant" => "relevancy",
             _ => "recency",
         };
-        let url = format!(
-            "{BASE}/tweets/search/recent?query={encoded_query}&max_results={max}&sort_order={sort}&{tf}&{exp}&{uf}",
-            tf = Self::tweet_fields(),
-            exp = Self::tweet_expansions(),
-            uf = Self::user_fields_param(),
-        );
-        let (mut tweets, includes) =
-            self.request_list::<TweetData>(Method::GET, &url, None).await?;
-        Self::merge_authors(&mut tweets, &includes);
-        Ok(tweets)
+        let mut time_params = String::new();
+        if let Some(st) = start_time {
+            time_params.push_str(&format!("&start_time={st}"));
+        }
+        if let Some(et) = end_time {
+            time_params.push_str(&format!("&end_time={et}"));
+        }
+
+        let mut all_tweets = Vec::new();
+        let mut next_token: Option<String> = None;
+        let max_pages = (count / 100).max(1) + 1;
+
+        for _ in 0..max_pages {
+            let remaining = count - all_tweets.len();
+            if remaining == 0 { break; }
+            let page_size = remaining.clamp(10, 100);
+
+            let mut url = format!(
+                "{BASE}/tweets/search/recent?query={encoded_query}&max_results={page_size}&sort_order={sort}&{tf}&{exp}&{uf}{time_params}",
+                tf = Self::tweet_fields(),
+                exp = Self::tweet_expansions(),
+                uf = Self::user_fields_param(),
+            );
+            if let Some(ref token) = next_token {
+                url.push_str(&format!("&pagination_token={token}"));
+            }
+
+            let val = self.request(Method::GET, &url, None).await?;
+            let includes = val.get("includes").cloned();
+            let envelope: ApiResponse<Vec<TweetData>> = serde_json::from_value(val)?;
+            let mut tweets = envelope.data.unwrap_or_default();
+            Self::merge_authors(&mut tweets, &includes);
+            all_tweets.extend(tweets);
+
+            next_token = envelope.meta.and_then(|m| m.next_token);
+            if next_token.is_none() { break; }
+        }
+
+        all_tweets.truncate(count);
+        Ok(all_tweets)
+    }
+
+    pub async fn get_user_tweets_paginated(
+        &self,
+        user_id: &str,
+        count: usize,
+        start_time: Option<&str>,
+        end_time: Option<&str>,
+    ) -> Result<Vec<TweetData>, XmasterError> {
+        let mut time_params = String::new();
+        if let Some(st) = start_time {
+            time_params.push_str(&format!("&start_time={st}"));
+        }
+        if let Some(et) = end_time {
+            time_params.push_str(&format!("&end_time={et}"));
+        }
+
+        let mut all_tweets = Vec::new();
+        let mut next_token: Option<String> = None;
+        let max_pages = (count / 100).max(1) + 1;
+
+        for _ in 0..max_pages {
+            let remaining = count - all_tweets.len();
+            if remaining == 0 { break; }
+            let page_size = remaining.clamp(5, 100);
+
+            let mut url = format!(
+                "{BASE}/users/{user_id}/tweets?max_results={page_size}&{tf}&{exp}&{uf}{time_params}",
+                tf = Self::tweet_fields(),
+                exp = Self::tweet_expansions(),
+                uf = Self::user_fields_param(),
+            );
+            if let Some(ref token) = next_token {
+                url.push_str(&format!("&pagination_token={token}"));
+            }
+
+            let val = self.request(Method::GET, &url, None).await?;
+            let includes = val.get("includes").cloned();
+            let envelope: ApiResponse<Vec<TweetData>> = serde_json::from_value(val)?;
+            let mut tweets = envelope.data.unwrap_or_default();
+            Self::merge_authors(&mut tweets, &includes);
+            all_tweets.extend(tweets);
+
+            next_token = envelope.meta.and_then(|m| m.next_token);
+            if next_token.is_none() { break; }
+        }
+
+        all_tweets.truncate(count);
+        Ok(all_tweets)
     }
 
     // -- Direct Messages ----------------------------------------------------

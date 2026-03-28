@@ -113,6 +113,15 @@ pub enum Commands {
         /// Number of tweets
         #[arg(long, short, default_value = "10")]
         count: usize,
+        /// Only show posts after this time (e.g. "12h", "7d", or ISO 8601)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only show posts before this time (e.g. "12h", "7d", or ISO 8601)
+        #[arg(long)]
+        before: Option<String>,
+        /// Sort by: impressions, likes, retweets, date (default: date)
+        #[arg(long)]
+        sort: Option<String>,
     },
 
     /// View your mentions
@@ -135,6 +144,12 @@ pub enum Commands {
         /// Number of results
         #[arg(long, short, default_value = "10")]
         count: usize,
+        /// Only show posts after this time (e.g. "12h", "7d", or ISO 8601)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only show posts before this time (e.g. "12h", "7d", or ISO 8601)
+        #[arg(long)]
+        before: Option<String>,
     },
 
     /// AI-powered search (xAI/Grok)

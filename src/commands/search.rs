@@ -16,6 +16,7 @@ struct TweetRow {
     id: String,
     author: String,
     text: String,
+    impressions: u64,
     likes: u64,
     retweets: u64,
     replies: u64,
@@ -25,7 +26,7 @@ struct TweetRow {
 impl Tableable for SearchResults {
     fn to_table(&self) -> comfy_table::Table {
         let mut table = comfy_table::Table::new();
-        table.set_header(vec!["ID", "Author", "Text", "Likes", "RTs", "Replies", "Date"]);
+        table.set_header(vec!["ID", "Author", "Text", "Views", "Likes", "RTs", "Replies", "Date"]);
         for t in &self.tweets {
             let truncated: String = if t.text.chars().count() > 80 {
                 t.text.chars().take(77).collect::<String>() + "..."
@@ -36,6 +37,7 @@ impl Tableable for SearchResults {
                 t.id.clone(),
                 t.author.clone(),
                 truncated,
+                t.impressions.to_string(),
                 t.likes.to_string(),
                 t.retweets.to_string(),
                 t.replies.to_string(),
@@ -48,7 +50,7 @@ impl Tableable for SearchResults {
 
 impl CsvRenderable for SearchResults {
     fn csv_headers() -> Vec<&'static str> {
-        vec!["id", "author", "text", "likes", "retweets", "replies", "date"]
+        vec!["id", "author", "text", "impressions", "likes", "retweets", "replies", "date"]
     }
 
     fn csv_rows(&self) -> Vec<Vec<String>> {
@@ -59,6 +61,7 @@ impl CsvRenderable for SearchResults {
                     t.id.clone(),
                     t.author.clone(),
                     t.text.clone(),
+                    t.impressions.to_string(),
                     t.likes.to_string(),
                     t.retweets.to_string(),
                     t.replies.to_string(),
@@ -75,12 +78,15 @@ pub async fn execute(
     query: &str,
     mode: &str,
     count: usize,
+    since: Option<&str>,
+    before: Option<&str>,
 ) -> Result<(), XmasterError> {
+    let start_time = since.map(|s| crate::commands::timeline::parse_since(s)).transpose()
+        .map_err(|e| XmasterError::Config(e))?;
+    let end_time = before.map(|s| crate::commands::timeline::parse_since(s)).transpose()
+        .map_err(|e| XmasterError::Config(e))?;
     let api = XApi::new(ctx.clone());
-    // TODO: Pagination — when xapi exposes next_token from search_tweets(),
-    // loop here while next_token.is_some() && pages < max_pages, accumulating
-    // results across pages. The --all / --max-pages flags will be wired in cli.rs.
-    let tweets = api.search_tweets(query, mode, count).await?;
+    let tweets = api.search_tweets_paginated(query, mode, count, start_time.as_deref(), end_time.as_deref()).await?;
     let display = SearchResults {
         query: query.to_string(),
         tweets: tweets.into_iter().map(|t| {
@@ -91,6 +97,7 @@ pub async fn execute(
                     .map(|u| format!("@{u}"))
                     .unwrap_or_else(|| t.author_id.unwrap_or_default()),
                 text: t.text,
+                impressions: metrics.map(|m| m.impression_count).unwrap_or(0),
                 likes: metrics.map(|m| m.like_count).unwrap_or(0),
                 retweets: metrics.map(|m| m.retweet_count).unwrap_or(0),
                 replies: metrics.map(|m| m.reply_count).unwrap_or(0),
