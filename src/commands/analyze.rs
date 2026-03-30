@@ -9,6 +9,8 @@ use std::sync::Arc;
 struct AnalyzeDisplay {
     #[serde(flatten)]
     result: PreflightResult,
+    #[serde(skip)]
+    premium: bool,
 }
 
 impl Tableable for AnalyzeDisplay {
@@ -44,7 +46,7 @@ impl Tableable for AnalyzeDisplay {
         ]);
         table.add_row(vec![
             Cell::new("Characters"),
-            Cell::new(format!("{}/280", self.result.features.char_count)),
+            Cell::new(format!("{}/{}", self.result.features.char_count, if self.premium { "25000" } else { "280" })),
         ]);
         table.add_row(vec![
             Cell::new("Hook Strength"),
@@ -170,17 +172,21 @@ impl Tableable for AnalyzeDisplay {
 }
 
 pub async fn execute(
-    _ctx: Arc<AppContext>,
+    app: Arc<AppContext>,
     format: OutputFormat,
     text: &str,
     goal: Option<&str>,
 ) -> Result<(), XmasterError> {
+    let premium = app.config.account.premium;
+    let voice = if app.config.style.voice.is_empty() { None } else { Some(app.config.style.voice.clone()) };
     let ctx = AnalyzeContext {
         goal: goal.map(|g| g.to_string()),
+        premium,
+        author_voice: voice,
         ..Default::default()
     };
     let result = preflight::analyze(text, &ctx);
-    let display = AnalyzeDisplay { result };
+    let display = AnalyzeDisplay { result, premium };
     output::render(format, &display, None);
     Ok(())
 }

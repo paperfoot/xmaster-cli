@@ -84,6 +84,7 @@ pub async fn execute(
     // ── Pre-flight on the hook (first tweet) ──
     let thread_ctx = AnalyzeContext {
         goal: Some("impressions".to_string()),
+        premium: ctx.config.account.premium,
         ..Default::default()
     };
     let analysis = preflight::analyze(&texts[0], &thread_ctx);

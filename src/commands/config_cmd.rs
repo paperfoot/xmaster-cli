@@ -15,10 +15,9 @@ struct ConfigDisplay {
     api_secret: String,
     access_token: String,
     access_token_secret: String,
-    bearer_token: String,
     xai_key: String,
     timeout: u64,
-    default_count: usize,
+    premium: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     voice: Option<String>,
 }
@@ -32,10 +31,9 @@ impl Tableable for ConfigDisplay {
         table.add_row(vec!["API Secret", &self.api_secret]);
         table.add_row(vec!["Access Token", &self.access_token]);
         table.add_row(vec!["Access Token Secret", &self.access_token_secret]);
-        table.add_row(vec!["Bearer Token", &self.bearer_token]);
         table.add_row(vec!["xAI Key", &self.xai_key]);
         table.add_row(vec!["Timeout (s)", &self.timeout.to_string()]);
-        table.add_row(vec!["Default Count", &self.default_count.to_string()]);
+        table.add_row(vec!["Premium", if self.premium { "yes" } else { "no" }]);
         if let Some(ref v) = self.voice {
             table.add_row(vec!["Voice", v]);
         }
@@ -131,10 +129,9 @@ pub async fn show(_ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
         api_secret: mask(&cfg.keys.api_secret),
         access_token: mask(&cfg.keys.access_token),
         access_token_secret: mask(&cfg.keys.access_token_secret),
-        bearer_token: mask(&cfg.keys.bearer_token),
         xai_key: mask(&cfg.keys.xai),
         timeout: cfg.settings.timeout,
-        default_count: cfg.settings.count,
+        premium: cfg.account.premium,
         voice,
     };
     output::render(format, &display, None);
@@ -255,12 +252,12 @@ pub async fn set(format: OutputFormat, key: &str, value: &str) -> Result<(), Xma
 /// All valid config key paths that `config set` accepts.
 const VALID_CONFIG_KEYS: &[&str] = &[
     "keys.api_key", "keys.api_secret", "keys.access_token", "keys.access_token_secret",
-    "keys.bearer_token", "keys.xai",
+    "keys.xai",
     "keys.oauth2_client_id", "keys.oauth2_client_secret",
     "keys.oauth2_access_token", "keys.oauth2_refresh_token",
     "keys.web_ct0", "keys.web_auth_token", "keys.graphql_create_tweet_id",
-    "settings.timeout", "settings.count",
-    "account.premium", "account.premium_tier",
+    "settings.timeout",
+    "account.premium",
     "style.voice",
 ];
 

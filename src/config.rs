@@ -24,9 +24,6 @@ pub struct AccountConfig {
     /// Whether the user has X Premium. Set via: xmaster config set account.premium true
     #[serde(default)]
     pub premium: bool,
-    /// Premium tier: "basic", "premium", "premium_plus". Default: "premium"
-    #[serde(default)]
-    pub premium_tier: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -47,8 +44,6 @@ pub struct Keys {
     pub access_token: String,
     #[serde(default)]
     pub access_token_secret: String,
-    #[serde(default)]
-    pub bearer_token: String,
     #[serde(default)]
     pub xai: String,
     // OAuth 2.0 PKCE (required for bookmarks endpoint)
@@ -74,25 +69,18 @@ pub struct Keys {
 pub struct Settings {
     #[serde(default = "default_timeout")]
     pub timeout: u64,
-    #[serde(default = "default_count")]
-    pub count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             timeout: default_timeout(),
-            count: default_count(),
         }
     }
 }
 
 fn default_timeout() -> u64 {
     15
-}
-
-fn default_count() -> usize {
-    10
 }
 
 pub fn config_dir() -> PathBuf {

@@ -46,6 +46,8 @@ pub struct AnalyzeContext {
     pub has_poll: bool,
     pub target_text: Option<String>,
     pub author_voice: Option<String>,
+    /// Whether the user has X Premium (drives char limit: 25k vs 280).
+    pub premium: bool,
 }
 
 impl AnalyzeContext {
@@ -176,30 +178,21 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score -= 30;
     }
 
-    if features.char_count > 25_000 {
+    let char_limit = if ctx.premium { 25_000 } else { 280 };
+    if features.char_count > char_limit {
         issues.push(Issue {
             severity: Severity::Critical,
             code: "over_limit".into(),
             message: format!(
-                "Post is {} characters (X Premium limit: 25,000)",
-                features.char_count
+                "Post is {} characters (limit: {})",
+                features.char_count, char_limit
             ),
             fix: Some(format!(
                 "Remove {} characters",
-                features.char_count - 25_000
+                features.char_count - char_limit
             )),
         });
         score -= 30;
-    } else if features.char_count > 280 {
-        issues.push(Issue {
-            severity: Severity::Info,
-            code: "long_post".into(),
-            message: format!(
-                "Post is {} characters (over 280; requires X Premium)",
-                features.char_count
-            ),
-            fix: None,
-        });
     }
 
     if features.has_link && features.link_position.as_deref() == Some("body") {
@@ -1002,16 +995,25 @@ mod tests {
     }
 
     #[test]
-    fn over_280_is_info_long_post() {
+    fn over_280_is_critical_without_premium() {
         let long = "a".repeat(300);
         let result = analyze(&long, &default_ctx());
-        assert!(result.issues.iter().any(|i| i.code == "long_post"));
+        assert!(result.issues.iter().any(|i| i.code == "over_limit"));
     }
 
     #[test]
-    fn over_25000_is_critical() {
+    fn over_280_ok_with_premium() {
+        let long = "a".repeat(300);
+        let ctx = AnalyzeContext { premium: true, ..Default::default() };
+        let result = analyze(&long, &ctx);
+        assert!(!result.issues.iter().any(|i| i.code == "over_limit"));
+    }
+
+    #[test]
+    fn over_25000_is_critical_even_with_premium() {
         let long = "a".repeat(25_001);
-        let result = analyze(&long, &default_ctx());
+        let ctx = AnalyzeContext { premium: true, ..Default::default() };
+        let result = analyze(&long, &ctx);
         assert!(result.issues.iter().any(|i| i.code == "over_limit"));
     }
 
@@ -1093,15 +1095,23 @@ mod tests {
     }
 
     #[test]
-    fn at_281_is_long_post_info() {
+    fn at_281_is_over_limit_without_premium() {
         let long = "x".repeat(281);
         let result = analyze(&long, &default_ctx());
         let issue = result
             .issues
             .iter()
-            .find(|i| i.code == "long_post")
+            .find(|i| i.code == "over_limit")
             .unwrap();
-        assert_eq!(issue.severity, Severity::Info);
+        assert_eq!(issue.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn at_281_is_fine_with_premium() {
+        let long = "x".repeat(281);
+        let ctx = AnalyzeContext { premium: true, ..Default::default() };
+        let result = analyze(&long, &ctx);
+        assert!(!result.issues.iter().any(|i| i.code == "over_limit"));
     }
 
     #[test]

@@ -81,7 +81,8 @@ pub async fn execute(
         media_kind,
         has_poll: poll.is_some(),
         target_text: None,
-        author_voice: None,
+        author_voice: if ctx.config.style.voice.is_empty() { None } else { Some(ctx.config.style.voice.clone()) },
+        premium: ctx.config.account.premium,
     };
     let analysis = preflight::analyze(text, &analyze_ctx);
     let mut warnings = Vec::new();

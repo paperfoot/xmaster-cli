@@ -320,6 +320,7 @@ impl PostScheduler {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| XmasterError::Config(e.to_string()))?;
 
+        let is_premium = ctx.config.account.premium;
         let api = XApi::new(ctx);
         let mut result = FireResult {
             fired: 0,
@@ -424,12 +425,13 @@ impl PostScheduler {
                         } else {
                             preflight::PostMode::Standalone
                         };
-                        let ctx = AnalyzeContext {
+                        let analyze_ctx = AnalyzeContext {
                             mode: Some(mode),
                             has_media,
+                            premium: is_premium,
                             ..AnalyzeContext::default()
                         };
-                        let pf = preflight::analyze(content, &ctx);
+                        let pf = preflight::analyze(content, &analyze_ctx);
                         let analysis_json = serde_json::to_string(&pf).ok();
                         let content_type = if is_reply { "reply" } else if is_quote { "quote" } else { "scheduled" };
                         let _ = store.record_published_post(
