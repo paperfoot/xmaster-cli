@@ -143,6 +143,11 @@ impl XaiSearch {
     // -----------------------------------------------------------------------
 
     /// Search X posts by keywords, hashtags, or topics.
+    ///
+    /// Automatically parses `from:username` operators out of the query and
+    /// maps them to the xAI `allowed_x_handles` filter for deterministic
+    /// author restriction.  The remaining keywords become the natural-language
+    /// prompt sent to Grok.
     pub async fn search_posts(
         &self,
         query: &str,
@@ -151,19 +156,48 @@ impl XaiSearch {
         from_date: Option<&str>,
         to_date: Option<&str>,
     ) -> Result<XaiSearchResult, XmasterError> {
+        let (handles, clean_query) = parse_from_handles(query);
+
         let lang_part = language
             .map(|l| format!(" Filter to {l} language posts only."))
             .unwrap_or_default();
 
-        let prompt = format!(
-            "Search X for posts about: {query}\n\
-             Return up to {count} recent and relevant posts.{lang_part}\n\
-             For each post include: author @username, display name, post text, \
-             date/time, and engagement metrics (likes, reposts, replies) if available.\n\
-             Format the output as markdown."
-        );
+        // If only from: handles with no extra keywords, ask for latest posts
+        // by that user rather than a topical search.
+        let prompt = if clean_query.is_empty() {
+            let who = handles.iter()
+                .map(|h| format!("@{h}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Return the {count} most recent posts by {who} on X, \
+                 newest first.{lang_part}\n\
+                 For each post include: author @username, display name, post text, \
+                 date/time, and engagement metrics (likes, reposts, replies) if available.\n\
+                 Format the output as markdown."
+            )
+        } else {
+            let handle_hint = if handles.is_empty() {
+                String::new()
+            } else {
+                let who = handles.iter()
+                    .map(|h| format!("@{h}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" Only include posts by {who}.")
+            };
+            format!(
+                "Search X for the most recent posts about: {clean_query}\n\
+                 Return up to {count} results, newest first.{handle_hint}{lang_part}\n\
+                 For each post include: author @username, display name, post text, \
+                 date/time, and engagement metrics (likes, reposts, replies) if available.\n\
+                 Format the output as markdown."
+            )
+        };
 
-        let x_config = build_x_search_config(from_date, to_date, None, None);
+        let handle_refs: Vec<String> = handles.clone();
+        let allowed = if handle_refs.is_empty() { None } else { Some(handle_refs.as_slice()) };
+        let x_config = build_x_search_config(from_date, to_date, allowed, None);
         let resp = self.call_responses_api(&prompt, x_config).await?;
 
         Ok(XaiSearchResult {
@@ -299,4 +333,27 @@ fn extract_citations(resp: &XaiResponse) -> Vec<String> {
         }
     }
     urls
+}
+
+/// Parse `from:username` operators out of a query string.
+///
+/// Returns `(handles, remaining_query)` where `handles` is a list of
+/// usernames (without the `@` prefix) and `remaining_query` is the query
+/// with all `from:` tokens stripped and whitespace normalised.
+fn parse_from_handles(query: &str) -> (Vec<String>, String) {
+    let mut handles = Vec::new();
+    let mut remaining = Vec::new();
+
+    for token in query.split_whitespace() {
+        if let Some(handle) = token.strip_prefix("from:") {
+            let h = handle.trim_start_matches('@');
+            if !h.is_empty() {
+                handles.push(h.to_string());
+            }
+        } else {
+            remaining.push(token);
+        }
+    }
+
+    (handles, remaining.join(" "))
 }

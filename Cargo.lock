@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "xmaster"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "aes",
  "assert_cmd",
