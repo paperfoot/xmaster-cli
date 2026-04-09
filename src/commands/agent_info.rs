@@ -145,6 +145,7 @@ pub fn execute(format: OutputFormat) {
             // Intelligence
             "analyze".into(), "engage recommend".into(), "engage feed".into(),
             "engage hot-targets".into(),
+            "likers".into(), "retweeters".into(), "quotes".into(), "users".into(),
             "track run".into(), "track status".into(),
             "track followers".into(), "track growth".into(),
             "report daily".into(), "report weekly".into(),
@@ -246,6 +247,9 @@ pub fn execute(format: OutputFormat) {
             "After replying to targets, run 'xmaster track run' to capture reply-backs (when the target replies to you). The reply-back signal is tracked in engagement_actions and surfaces in 'engage recommend'".into(),
             "'xmaster track run' now AUTO-PROMOTES hot reply targets into the watchlist — any account where your reply got >=100 imps, >=1 profile click, or a reply-back (last 14d, >=1k followers) is added automatically. Check 'watchlist_auto_promoted' in the track run metadata to see who got added".into(),
             "'xmaster engage hot-targets --days 7 --json' ranks the accounts you've replied to by avg impressions, profile clicks, and reply-back rate. Use it to find which targets reward your reply effort the most, then prioritise re-engaging them".into(),
+            "Use 'xmaster likers <id>' / 'xmaster retweeters <id>' / 'xmaster quotes <id>' to inspect who engaged with a specific post — each returns a clean user/tweet list. 'quotes' also caches the quote tweets into your discovered_posts library for later 'xmaster inspire' browsing".into(),
+            "Batch-lookup many users at once with 'xmaster users alice bob carol' — one HTTP call for up to 100 usernames. Use this whenever you need to hydrate a list of accounts; never loop per-user".into(),
+            "'xmaster lists members <list_id>' returns the users in a given list (max 100 per call). Useful for auditing community membership or extracting target sets from curated lists".into(),
         ],
         handoffs: vec![
             Handoff {

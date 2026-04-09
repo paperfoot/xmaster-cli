@@ -369,6 +369,94 @@ pub async fn timeline(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// List members — `xmaster lists members <list_id>`
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ListMembersResult {
+    list_id: String,
+    count: usize,
+    members: Vec<ListMemberRow>,
+}
+
+#[derive(Serialize)]
+struct ListMemberRow {
+    id: String,
+    username: String,
+    name: String,
+    followers: u64,
+    verified: bool,
+}
+
+impl Tableable for ListMembersResult {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["@Username", "Name", "Followers", "Verified"]);
+        for m in &self.members {
+            table.add_row(vec![
+                format!("@{}", m.username),
+                m.name.clone(),
+                m.followers.to_string(),
+                if m.verified { "✓" } else { "—" }.to_string(),
+            ]);
+        }
+        table
+    }
+}
+
+impl CsvRenderable for ListMembersResult {
+    fn csv_headers() -> Vec<&'static str> {
+        vec!["id", "username", "name", "followers", "verified"]
+    }
+    fn csv_rows(&self) -> Vec<Vec<String>> {
+        self.members
+            .iter()
+            .map(|m| {
+                vec![
+                    m.id.clone(),
+                    m.username.clone(),
+                    m.name.clone(),
+                    m.followers.to_string(),
+                    m.verified.to_string(),
+                ]
+            })
+            .collect()
+    }
+}
+
+pub async fn members(
+    ctx: Arc<AppContext>,
+    format: OutputFormat,
+    list_id: &str,
+    count: usize,
+) -> Result<(), XmasterError> {
+    let api = XApi::new(ctx.clone());
+    let users = api.get_list_members(list_id, count).await?;
+
+    let rows: Vec<ListMemberRow> = users
+        .into_iter()
+        .map(|u| {
+            let metrics = u.public_metrics.as_ref();
+            ListMemberRow {
+                id: u.id,
+                username: u.username,
+                name: u.name,
+                followers: metrics.map(|m| m.followers_count).unwrap_or(0),
+                verified: u.verified.unwrap_or(false),
+            }
+        })
+        .collect();
+
+    let display = ListMembersResult {
+        list_id: list_id.to_string(),
+        count: rows.len(),
+        members: rows,
+    };
+    output::render(format, &display, None);
+    Ok(())
+}
+
 pub async fn mine(
     ctx: Arc<AppContext>,
     format: OutputFormat,

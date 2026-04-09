@@ -268,8 +268,41 @@ pub enum Commands {
         /// Tweet ID or URL
         id: String,
         /// Max replies to fetch
-        #[arg(long, short, default_value = "20")]
+        #[arg(long, short, alias = "limit", default_value = "20")]
         count: usize,
+    },
+
+    /// List users who liked a tweet
+    Likers {
+        /// Tweet ID or URL
+        id: String,
+        /// Max users to fetch (1-100)
+        #[arg(long, short, alias = "limit", default_value = "50")]
+        count: usize,
+    },
+
+    /// List users who retweeted a tweet
+    Retweeters {
+        /// Tweet ID or URL
+        id: String,
+        /// Max users to fetch (1-100)
+        #[arg(long, short, alias = "limit", default_value = "50")]
+        count: usize,
+    },
+
+    /// List quote tweets of a tweet (persisted into discovered_posts)
+    Quotes {
+        /// Tweet ID or URL
+        id: String,
+        /// Max quotes to fetch (10-100)
+        #[arg(long, short, alias = "limit", default_value = "50")]
+        count: usize,
+    },
+
+    /// Batch-lookup multiple users by username in a single call
+    Users {
+        /// Usernames (without @)
+        usernames: Vec<String>,
     },
 
     /// Show API rate limit status
@@ -584,13 +617,21 @@ pub enum ListCommands {
         /// List ID
         list_id: String,
         /// Number of tweets
-        #[arg(long, short, default_value = "10")]
+        #[arg(long, short, alias = "limit", default_value = "10")]
+        count: usize,
+    },
+    /// List the members of a list
+    Members {
+        /// List ID
+        list_id: String,
+        /// Number of members to fetch (1-100)
+        #[arg(long, short, alias = "limit", default_value = "50")]
         count: usize,
     },
     /// List your owned lists
     Mine {
         /// Number of results
-        #[arg(long, short, default_value = "20")]
+        #[arg(long, short, alias = "limit", default_value = "20")]
         count: usize,
     },
 }

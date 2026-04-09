@@ -1166,6 +1166,98 @@ impl XApi {
         self.request_data(Method::GET, &url, None).await
     }
 
+    /// Batch user lookup by username. Chunks into groups of 100 internally.
+    /// Wraps GET /2/users/by?usernames=u1,u2,...
+    pub async fn get_users_by_usernames(
+        &self,
+        usernames: &[String],
+    ) -> Result<Vec<UserResponse>, XmasterError> {
+        if usernames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<UserResponse> = Vec::with_capacity(usernames.len());
+        for chunk in usernames.chunks(100) {
+            let names = chunk.join(",");
+            let url = format!(
+                "{BASE}/users/by?usernames={names}&{fields}",
+                fields = Self::user_fields_param()
+            );
+            let (users, _includes): (Vec<UserResponse>, _) =
+                self.request_list::<UserResponse>(Method::GET, &url, None).await?;
+            out.extend(users);
+        }
+        Ok(out)
+    }
+
+    // -- Tweet engagement lookups -------------------------------------------
+
+    /// Users who liked a given tweet. Wraps GET /2/tweets/:id/liking_users.
+    pub async fn get_tweet_likers(
+        &self,
+        tweet_id: &str,
+        count: usize,
+    ) -> Result<Vec<UserResponse>, XmasterError> {
+        let max = count.clamp(1, 100);
+        let url = format!(
+            "{BASE}/tweets/{tweet_id}/liking_users?max_results={max}&{fields}",
+            fields = Self::user_fields_param()
+        );
+        let (users, _includes) =
+            self.request_list::<UserResponse>(Method::GET, &url, None).await?;
+        Ok(users)
+    }
+
+    /// Users who retweeted a given tweet. Wraps GET /2/tweets/:id/retweeted_by.
+    pub async fn get_tweet_retweeters(
+        &self,
+        tweet_id: &str,
+        count: usize,
+    ) -> Result<Vec<UserResponse>, XmasterError> {
+        let max = count.clamp(1, 100);
+        let url = format!(
+            "{BASE}/tweets/{tweet_id}/retweeted_by?max_results={max}&{fields}",
+            fields = Self::user_fields_param()
+        );
+        let (users, _includes) =
+            self.request_list::<UserResponse>(Method::GET, &url, None).await?;
+        Ok(users)
+    }
+
+    /// Quote tweets of a given tweet. Wraps GET /2/tweets/:id/quote_tweets.
+    pub async fn get_tweet_quotes(
+        &self,
+        tweet_id: &str,
+        count: usize,
+    ) -> Result<Vec<TweetData>, XmasterError> {
+        let max = count.clamp(10, 100);
+        let url = format!(
+            "{BASE}/tweets/{tweet_id}/quote_tweets?max_results={max}&{tf}&{exp}&{uf}",
+            tf = Self::tweet_fields(),
+            exp = Self::tweet_expansions(),
+            uf = Self::user_fields_param(),
+        );
+        let (mut tweets, includes) =
+            self.request_list::<TweetData>(Method::GET, &url, None).await?;
+        Self::merge_authors(&mut tweets, &includes);
+        Ok(tweets)
+    }
+
+    /// Members of a list. Wraps GET /2/lists/:id/members.
+    pub async fn get_list_members(
+        &self,
+        list_id: &str,
+        count: usize,
+    ) -> Result<Vec<UserResponse>, XmasterError> {
+        let max = count.clamp(1, 100);
+        let url = format!(
+            "{BASE}/lists/{list_id}/members?max_results={max}&{fields}",
+            fields = Self::user_fields_param()
+        );
+        let (users, _includes) =
+            self.request_list::<UserResponse>(Method::GET, &url, None).await?;
+        Ok(users)
+    }
+
     // -- Timelines ----------------------------------------------------------
 
     #[allow(dead_code)]

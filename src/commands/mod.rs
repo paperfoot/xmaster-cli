@@ -25,6 +25,8 @@ pub mod skill_cmd;
 pub mod replies;
 pub mod read_post;
 pub mod inspire;
+pub mod tweet_engagement;
+pub mod quotes;
 
 use crate::cli::{Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
 use crate::context::AppContext;
@@ -129,12 +131,19 @@ pub async fn dispatch(
             ListCommands::Timeline { list_id, count } => {
                 lists::timeline(ctx, format, list_id, *count).await
             }
+            ListCommands::Members { list_id, count } => {
+                lists::members(ctx, format, list_id, *count).await
+            }
             ListCommands::Mine { count } => lists::mine(ctx, format, *count).await,
         },
         Commands::HideReply { id } => moderation::hide_reply(ctx, format, id).await,
         Commands::UnhideReply { id } => moderation::unhide_reply(ctx, format, id).await,
         Commands::Read { id } => read_post::execute(ctx, format, id).await,
         Commands::Replies { id, count } => replies::execute(ctx, format, id, *count).await,
+        Commands::Likers { id, count } => tweet_engagement::likers(ctx, format, id, *count).await,
+        Commands::Retweeters { id, count } => tweet_engagement::retweeters(ctx, format, id, *count).await,
+        Commands::Quotes { id, count } => quotes::execute(ctx, format, id, *count).await,
+        Commands::Users { usernames } => user::bulk(ctx, format, usernames).await,
         Commands::RateLimits => rate_limits::execute(ctx, format).await,
         Commands::Block { username } => moderation::block(ctx, format, username).await,
         Commands::Unblock { username } => moderation::unblock(ctx, format, username).await,
