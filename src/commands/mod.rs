@@ -204,7 +204,13 @@ pub async fn dispatch(
         Commands::SearchAi { query, count, from_date, to_date } => {
             search_ai::execute(ctx, format, query, *count, from_date.as_deref(), to_date.as_deref()).await
         }
-        Commands::Trending { region, category } => search_ai::trending(ctx, format, region.as_deref(), category.as_deref()).await,
+        Commands::Trending { region, category, personalized } => {
+            if *personalized {
+                search_ai::personalized_trends(ctx, format).await
+            } else {
+                search_ai::trending(ctx, format, region.as_deref(), category.as_deref()).await
+            }
+        }
         Commands::User { username } => user::info(ctx, format, username).await,
         Commands::Me => user::me(ctx, format).await,
         Commands::Bookmarks { action } => match action {

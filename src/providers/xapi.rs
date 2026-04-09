@@ -165,6 +165,15 @@ pub struct UserResponse {
 pub type UserData = UserResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrendData {
+    pub name: String,
+    #[serde(default)]
+    pub tweet_count: Option<u64>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMetrics {
     #[serde(default)]
     pub followers_count: u64,
@@ -1384,6 +1393,31 @@ impl XApi {
             self.request_list::<TweetData>(Method::GET, &url, None).await?;
         Self::merge_authors(&mut tweets, &includes);
         Ok(tweets)
+    }
+
+    /// Personalized trends for the authenticated user.
+    /// Wraps GET /2/users/personalized_trends (requires X Premium).
+    pub async fn get_personalized_trends(
+        &self,
+    ) -> Result<Vec<TrendData>, XmasterError> {
+        let url = format!("{BASE}/users/personalized_trends");
+        let val = self.request(Method::GET, &url, None).await?;
+        let trends = val
+            .get("data")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let parsed: Vec<TrendData> = trends
+            .into_iter()
+            .filter_map(|t| {
+                Some(TrendData {
+                    name: t.get("trend_name").or_else(|| t.get("name"))?.as_str()?.to_string(),
+                    tweet_count: t.get("post_count").and_then(|v| v.as_u64()),
+                    description: t.get("category").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                })
+            })
+            .collect();
+        Ok(parsed)
     }
 
     // -- Search -------------------------------------------------------------

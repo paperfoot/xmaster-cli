@@ -175,6 +175,9 @@ pub enum Commands {
         /// Category filter
         #[arg(long)]
         category: Option<String>,
+        /// Use personalized trends (requires X Premium)
+        #[arg(long)]
+        personalized: bool,
     },
 
     /// Get user info
