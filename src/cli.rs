@@ -427,6 +427,32 @@ pub enum EngageCommands {
         #[arg(long, short, default_value = "10")]
         count: usize,
     },
+    /// Rank accounts you've already replied to by downstream reply performance.
+    ///
+    /// Aggregates your sent replies from the last N days, groups by target
+    /// username, and computes avg impressions, avg profile clicks, reply-back
+    /// rate, and a composite score. Use this to find which accounts reward
+    /// your reply effort with the most reach — then prioritize re-engaging.
+    HotTargets {
+        /// Look back this many days
+        #[arg(long, default_value = "7")]
+        days: i64,
+        /// Minimum avg impressions across samples (HAVING filter)
+        #[arg(long, default_value = "100")]
+        min_imps: i64,
+        /// Minimum avg profile clicks across samples (HAVING filter)
+        #[arg(long, default_value = "0")]
+        min_profile_clicks: i64,
+        /// Minimum reply count per target (HAVING filter)
+        #[arg(long, default_value = "1")]
+        min_samples: i64,
+        /// Number of results
+        #[arg(long, short, default_value = "10")]
+        count: usize,
+        /// Sort order: score | avg-impressions | avg-profile-clicks | reply-back-rate
+        #[arg(long, default_value = "score")]
+        sort: String,
+    },
 }
 
 #[derive(Subcommand)]

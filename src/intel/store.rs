@@ -29,6 +29,28 @@ pub struct WatchlistEntry {
     pub added_at: i64,
 }
 
+/// A reply target that earned a spot in the watchlist based on reply outcomes.
+/// Returned by `find_hot_reply_targets` for automatic promotion.
+#[derive(Debug, Clone, Serialize)]
+pub struct HotReplyTarget {
+    pub username: String,
+    pub user_id: Option<String>,
+    pub target_followers: i64,
+}
+
+/// Aggregated stats for a reply target across all replies in a time window.
+/// Returned by `rank_hot_reply_targets` for the `engage hot-targets` command.
+#[derive(Debug, Clone, Serialize)]
+pub struct HotTargetStats {
+    pub username: String,
+    pub sample_count: i64,
+    pub avg_impressions: f64,
+    pub avg_profile_clicks: f64,
+    pub reply_back_rate: f64,
+    pub last_reply_at: i64,
+    pub score: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingReply {
     pub id: i64,
@@ -1081,6 +1103,131 @@ impl IntelStore {
             )
     }
 
+    /// Find reply targets that deserve promotion to watchlist based on recent reply outcomes.
+    ///
+    /// Selection criteria (per-row OR): impressions ≥ min, profile_clicks ≥ min, or got_reply_back = 1.
+    /// Guardrail: target_followers ≥ min_target_followers.
+    /// Freshness: only considers replies in the last `max_age_hours`.
+    /// Excludes targets already on the watchlist.
+    ///
+    /// NOTE: `performed_at` is CAST to INTEGER because legacy rows in production
+    /// DBs were stored with TEXT affinity despite the schema declaring INTEGER.
+    /// Same class of bug as `metric_snapshots.snapshot_at` — see latest_snapshot_full.
+    pub fn find_hot_reply_targets(
+        &self,
+        min_impressions: i64,
+        min_profile_clicks: i64,
+        min_target_followers: i64,
+        max_age_hours: i64,
+    ) -> Result<Vec<HotReplyTarget>, rusqlite::Error> {
+        let cutoff = Utc::now().timestamp() - max_age_hours * 3600;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT LOWER(ea.target_username),
+                    ea.target_user_id,
+                    COALESCE(ea.target_followers, 0)
+             FROM engagement_actions ea
+             LEFT JOIN metric_snapshots ms
+               ON ms.tweet_id = ea.reply_tweet_id
+              AND ms.id = (
+                  SELECT MAX(ms2.id) FROM metric_snapshots ms2
+                  WHERE ms2.tweet_id = ea.reply_tweet_id
+              )
+             LEFT JOIN watchlist_accounts wa
+               ON wa.username = LOWER(ea.target_username)
+             WHERE ea.action_type = 'reply'
+               AND ea.target_username IS NOT NULL
+               AND ea.reply_tweet_id IS NOT NULL
+               AND CAST(ea.performed_at AS INTEGER) >= ?1
+               AND COALESCE(ea.target_followers, 0) >= ?2
+               AND wa.username IS NULL
+               AND (COALESCE(ms.impressions, 0) >= ?3
+                 OR COALESCE(ms.profile_clicks, 0) >= ?4
+                 OR COALESCE(ea.got_reply_back, 0) = 1)
+             ORDER BY COALESCE(ea.target_followers, 0) DESC"
+        )?;
+        let rows = stmt.query_map(
+            params![cutoff, min_target_followers, min_impressions, min_profile_clicks],
+            |row| {
+                Ok(HotReplyTarget {
+                    username: row.get(0)?,
+                    user_id: row.get(1)?,
+                    target_followers: row.get(2)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// Aggregate reply-outcome stats per target username over the last `days`.
+    ///
+    /// Filters by min_samples, min_avg_impressions, min_avg_profile_clicks (HAVING).
+    /// Returns rows sorted by composite score descending. Caller can re-sort.
+    ///
+    /// NOTE: `performed_at` is CAST to INTEGER for the same legacy TEXT-affinity
+    /// reason documented on `find_hot_reply_targets` and `latest_snapshot_full`.
+    pub fn rank_hot_reply_targets(
+        &self,
+        days: i64,
+        min_samples: i64,
+        min_avg_impressions: f64,
+        min_avg_profile_clicks: f64,
+    ) -> Result<Vec<HotTargetStats>, rusqlite::Error> {
+        let cutoff = Utc::now().timestamp() - days * 24 * 3600;
+        let mut stmt = self.conn.prepare(
+            "SELECT LOWER(ea.target_username) AS username,
+                    COUNT(*) AS sample_count,
+                    AVG(COALESCE(ms.impressions, 0)) AS avg_imps,
+                    AVG(COALESCE(ms.profile_clicks, 0)) AS avg_clicks,
+                    AVG(CASE WHEN ea.got_reply_back = 1 THEN 1.0 ELSE 0.0 END) AS reply_back_rate,
+                    CAST(MAX(CAST(ea.performed_at AS INTEGER)) AS INTEGER) AS last_reply_at
+             FROM engagement_actions ea
+             LEFT JOIN metric_snapshots ms
+               ON ms.tweet_id = ea.reply_tweet_id
+              AND ms.id = (
+                  SELECT MAX(ms2.id) FROM metric_snapshots ms2
+                  WHERE ms2.tweet_id = ea.reply_tweet_id
+              )
+             WHERE ea.action_type = 'reply'
+               AND ea.target_username IS NOT NULL
+               AND ea.reply_tweet_id IS NOT NULL
+               AND CAST(ea.performed_at AS INTEGER) >= ?1
+             GROUP BY LOWER(ea.target_username)
+             HAVING sample_count >= ?2
+                AND avg_imps >= ?3
+                AND avg_clicks >= ?4"
+        )?;
+        let mut rows: Vec<HotTargetStats> = stmt
+            .query_map(
+                params![cutoff, min_samples, min_avg_impressions, min_avg_profile_clicks],
+                |row| {
+                    let avg_imps: f64 = row.get(2)?;
+                    let avg_clicks: f64 = row.get(3)?;
+                    let reply_back_rate: f64 = row.get(4)?;
+                    // Composite score: normalized blend of reach + profile clicks + reciprocity.
+                    // Normalization caps avoid one huge outlier dominating.
+                    let imps_norm = (avg_imps / 1000.0).min(1.0);
+                    let clicks_norm = (avg_clicks / 10.0).min(1.0);
+                    let score = 0.55 * imps_norm + 0.25 * clicks_norm + 0.20 * reply_back_rate;
+                    Ok(HotTargetStats {
+                        username: row.get(0)?,
+                        sample_count: row.get(1)?,
+                        avg_impressions: avg_imps,
+                        avg_profile_clicks: avg_clicks,
+                        reply_back_rate,
+                        last_reply_at: row.get(5)?,
+                        score,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(rows)
+    }
+
     /// Top reciprocators: accounts that reply back most often, filtered by min followers.
     pub fn get_top_reciprocators(
         &self,
@@ -1346,5 +1493,278 @@ mod tests {
         // Query: by author
         let results = store.query_discovered_posts(None, Some("testuser"), None, 10).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    // -- hot reply targets (items D + E) -------------------------------------
+
+    /// Helper: log an outgoing reply-post + the matching engagement_action.
+    /// Mirrors the production flow where `record_published_post` writes the post row.
+    fn log_outgoing_reply(
+        store: &IntelStore,
+        target_tweet_id: &str,
+        target_user_id: Option<&str>,
+        target_username: &str,
+        target_followers: i64,
+        reply_tweet_id: &str,
+    ) {
+        store
+            .log_post(reply_tweet_id, "reply body", "text", Some(target_tweet_id), None, None, None, None)
+            .unwrap();
+        store
+            .log_reply(
+                target_tweet_id,
+                target_user_id,
+                Some(target_username),
+                Some(target_followers),
+                reply_tweet_id,
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn find_hot_reply_targets_returns_high_impression_reply() {
+        let store = test_store();
+        log_outgoing_reply(&store, "target_tweet_1", Some("uid_42"), "hottarget", 5000, "my_reply_1");
+        store
+            .log_metric_snapshot("my_reply_1", 10, 2, 1, 500, 0, 0, 3, 15)
+            .unwrap();
+
+        let promoted = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].username, "hottarget");
+        assert_eq!(promoted[0].user_id.as_deref(), Some("uid_42"));
+        assert_eq!(promoted[0].target_followers, 5000);
+    }
+
+    #[test]
+    fn find_hot_reply_targets_skips_low_follower_targets() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", None, "smallfry", 500, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 1000, 0, 0, 5, 10)
+            .unwrap();
+
+        let promoted = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert!(promoted.is_empty(), "should filter target below min_target_followers");
+    }
+
+    #[test]
+    fn find_hot_reply_targets_skips_already_watchlisted() {
+        let store = test_store();
+        store
+            .add_watchlist("alreadyhere", Some("uid_1"), None, 10_000)
+            .unwrap();
+        log_outgoing_reply(&store, "t1", Some("uid_1"), "alreadyhere", 10_000, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 1000, 0, 0, 5, 10)
+            .unwrap();
+
+        let promoted = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert!(promoted.is_empty(), "should not re-promote watchlist members");
+    }
+
+    #[test]
+    fn find_hot_reply_targets_promotes_on_profile_clicks_alone() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", None, "clickytarget", 2000, "r1");
+        // Low impressions but 2 profile_clicks
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 10, 0, 0, 2, 5)
+            .unwrap();
+
+        let promoted = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].username, "clickytarget");
+    }
+
+    #[test]
+    fn find_hot_reply_targets_promotes_on_reply_back() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", None, "replier", 5000, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 10, 0, 0, 0, 3)
+            .unwrap();
+        let action_id: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM engagement_actions WHERE reply_tweet_id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        store.set_reply_back(action_id, true).unwrap();
+
+        let promoted = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].username, "replier");
+    }
+
+    #[test]
+    fn find_hot_reply_targets_skips_stale_replies() {
+        let store = test_store();
+        store
+            .log_post("r1", "old reply body", "text", Some("t1"), None, None, None, None)
+            .unwrap();
+        let old_ts = chrono::Utc::now().timestamp() - 30 * 24 * 3600;
+        store
+            .conn
+            .execute(
+                "INSERT INTO engagement_actions
+                    (action_type, target_tweet_id, target_user_id, target_username,
+                     performed_at, target_followers, reply_tweet_id, reply_style)
+                 VALUES ('reply', 't1', NULL, LOWER('oldtarget'), ?1, 5000, 'r1', NULL)",
+                params![old_ts],
+            )
+            .unwrap();
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 10_000, 0, 0, 10, 30)
+            .unwrap();
+
+        let promoted = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert!(promoted.is_empty(), "should skip replies older than max_age_hours");
+    }
+
+    #[test]
+    fn rank_hot_reply_targets_aggregates_by_username() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", None, "target_a", 3000, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 100, 0, 0, 1, 5)
+            .unwrap();
+        log_outgoing_reply(&store, "t2", None, "target_a", 3000, "r2");
+        store
+            .log_metric_snapshot("r2", 0, 0, 0, 300, 0, 0, 3, 5)
+            .unwrap();
+
+        let ranked = store.rank_hot_reply_targets(7, 1, 0.0, 0.0).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].username, "target_a");
+        assert_eq!(ranked[0].sample_count, 2);
+        assert!((ranked[0].avg_impressions - 200.0).abs() < 0.01);
+        assert!((ranked[0].avg_profile_clicks - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn rank_hot_reply_targets_respects_min_samples() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", None, "target_a", 3000, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 1000, 0, 0, 5, 5)
+            .unwrap();
+
+        let ranked = store.rank_hot_reply_targets(7, 2, 0.0, 0.0).unwrap();
+        assert!(ranked.is_empty(), "single sample should be filtered by min_samples=2");
+    }
+
+    #[test]
+    fn rank_hot_reply_targets_computes_reply_back_rate() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", None, "target_a", 3000, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 100, 0, 0, 0, 5)
+            .unwrap();
+        let id1: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM engagement_actions WHERE reply_tweet_id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        store.set_reply_back(id1, true).unwrap();
+
+        log_outgoing_reply(&store, "t2", None, "target_a", 3000, "r2");
+        store
+            .log_metric_snapshot("r2", 0, 0, 0, 100, 0, 0, 0, 5)
+            .unwrap();
+        let id2: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM engagement_actions WHERE reply_tweet_id = 'r2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        store.set_reply_back(id2, false).unwrap();
+
+        let ranked = store.rank_hot_reply_targets(7, 1, 0.0, 0.0).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert!((ranked[0].reply_back_rate - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn hot_reply_targets_end_to_end_promotion_loop() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", Some("uid_new"), "newhot", 5000, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 500, 0, 0, 3, 15)
+            .unwrap();
+
+        let hot = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert_eq!(hot.len(), 1);
+
+        for row in &hot {
+            store
+                .add_watchlist(&row.username, row.user_id.as_deref(), None, row.target_followers)
+                .unwrap();
+        }
+
+        let wl = store.list_watchlist().unwrap();
+        assert_eq!(wl.len(), 1);
+        assert_eq!(wl[0].username, "newhot");
+        assert_eq!(wl[0].user_id.as_deref(), Some("uid_new"));
+        assert_eq!(wl[0].followers, 5000);
+        assert!(wl[0].topic.is_none(), "auto-promotion should preserve NULL topic");
+
+        // Second call should skip because target is now watchlisted
+        let hot_again = store
+            .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
+            .unwrap();
+        assert!(hot_again.is_empty());
+    }
+
+    #[test]
+    fn rank_hot_reply_targets_applies_days_filter() {
+        let store = test_store();
+        log_outgoing_reply(&store, "t1", None, "fresh_target", 3000, "r1");
+        store
+            .log_metric_snapshot("r1", 0, 0, 0, 1000, 0, 0, 5, 5)
+            .unwrap();
+        store
+            .log_post("r2", "stale reply body", "text", Some("t2"), None, None, None, None)
+            .unwrap();
+        let old_ts = chrono::Utc::now().timestamp() - 20 * 24 * 3600;
+        store
+            .conn
+            .execute(
+                "INSERT INTO engagement_actions
+                    (action_type, target_tweet_id, target_user_id, target_username,
+                     performed_at, target_followers, reply_tweet_id, reply_style)
+                 VALUES ('reply', 't2', NULL, LOWER('stale_target'), ?1, 3000, 'r2', NULL)",
+                params![old_ts],
+            )
+            .unwrap();
+        store
+            .log_metric_snapshot("r2", 0, 0, 0, 1000, 0, 0, 5, 5)
+            .unwrap();
+
+        let ranked = store.rank_hot_reply_targets(7, 1, 0.0, 0.0).unwrap();
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].username, "fresh_target");
     }
 }

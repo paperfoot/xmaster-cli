@@ -6,7 +6,8 @@ use crate::providers::xapi::XApi;
 use std::sync::Arc;
 
 /// Snapshot all recent posts (designed for cron). Default: last 48 hours.
-/// Also checks pending replies for reply-backs.
+/// Also checks pending replies for reply-backs and auto-promotes hot reply
+/// targets into the watchlist so they can be re-engaged.
 pub async fn track_run(
     ctx: Arc<AppContext>,
     format: OutputFormat,
@@ -17,13 +18,52 @@ pub async fn track_run(
     // Check pending replies for reply-backs (silent, never fails the run)
     let reply_backs_checked = check_reply_backs(&ctx).await;
 
+    // Auto-promote high-performing reply targets into the watchlist
+    // (silent on errors, never fails the run)
+    let promoted = auto_promote_hot_reply_targets();
+
     let mut meta = serde_json::json!({});
     if reply_backs_checked > 0 {
         meta["reply_backs_checked"] = reply_backs_checked.into();
     }
+    if !promoted.is_empty() {
+        meta["watchlist_auto_promoted_count"] = promoted.len().into();
+        meta["watchlist_auto_promoted"] = promoted.into();
+    }
 
     output::render(format, &summary, Some(meta));
     Ok(())
+}
+
+/// Run the store-layer hot-target selector and insert each winner into the
+/// watchlist. Returns the list of usernames that were freshly promoted so the
+/// caller can surface it in the track-run output metadata.
+///
+/// Thresholds (biased toward high-signal events at low sample volume):
+///   impressions >= 100 OR profile_clicks >= 1 OR got_reply_back = 1
+/// Guardrail: target_followers >= 1_000
+/// Freshness: last 14 days
+/// Already-watchlisted targets are excluded by the SQL join.
+fn auto_promote_hot_reply_targets() -> Vec<String> {
+    let store = match crate::intel::store::IntelStore::open() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let hot = match store.find_hot_reply_targets(100, 1, 1_000, 24 * 14) {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+
+    hot.into_iter()
+        .filter_map(|row| {
+            // Preserve existing topic if any; new auto-promoted rows get topic=NULL.
+            store
+                .add_watchlist(&row.username, row.user_id.as_deref(), None, row.target_followers)
+                .ok()
+                .map(|_| row.username)
+        })
+        .collect()
 }
 
 /// Check if targets replied back to our replies.

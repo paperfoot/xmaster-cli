@@ -352,6 +352,113 @@ pub async fn watchlist_remove(format: OutputFormat, username: &str) -> Result<()
 }
 
 // ---------------------------------------------------------------------------
+// Hot targets — rank accounts by downstream reply performance
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct HotTargetRow {
+    rank: usize,
+    username: String,
+    sample_count: i64,
+    avg_impressions: f64,
+    avg_profile_clicks: f64,
+    reply_back_rate: f64,
+    score: f64,
+    last_reply_at: String,
+}
+
+#[derive(Serialize)]
+struct HotTargetsResult {
+    period_days: i64,
+    sort: String,
+    targets: Vec<HotTargetRow>,
+    suggested_next_commands: Vec<String>,
+}
+
+impl Tableable for HotTargetsResult {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut t = comfy_table::Table::new();
+        t.set_header(vec!["Rank", "@Username", "Replies", "Avg Imps", "Avg PClicks", "Reply-Back %", "Score"]);
+        for row in &self.targets {
+            t.add_row(vec![
+                row.rank.to_string(),
+                format!("@{}", row.username),
+                row.sample_count.to_string(),
+                format!("{:.0}", row.avg_impressions),
+                format!("{:.1}", row.avg_profile_clicks),
+                format!("{:.0}%", row.reply_back_rate * 100.0),
+                format!("{:.2}", row.score),
+            ]);
+        }
+        t
+    }
+}
+
+pub async fn hot_targets(
+    format: OutputFormat,
+    days: i64,
+    min_imps: i64,
+    min_profile_clicks: i64,
+    min_samples: i64,
+    count: usize,
+    sort: &str,
+) -> Result<(), XmasterError> {
+    let store = IntelStore::open().map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+    let mut rows = store
+        .rank_hot_reply_targets(days, min_samples, min_imps as f64, min_profile_clicks as f64)
+        .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+
+    // Optional caller-requested re-sort — default `score` is already applied by the store.
+    match sort {
+        "avg-impressions" => rows.sort_by(|a, b| b.avg_impressions.partial_cmp(&a.avg_impressions).unwrap_or(std::cmp::Ordering::Equal)),
+        "avg-profile-clicks" => rows.sort_by(|a, b| b.avg_profile_clicks.partial_cmp(&a.avg_profile_clicks).unwrap_or(std::cmp::Ordering::Equal)),
+        "reply-back-rate" => rows.sort_by(|a, b| b.reply_back_rate.partial_cmp(&a.reply_back_rate).unwrap_or(std::cmp::Ordering::Equal)),
+        "score" | _ => { /* already sorted by store */ }
+    }
+
+    rows.truncate(count);
+
+    if rows.is_empty() {
+        return Err(XmasterError::NotFound(format!(
+            "No hot reply targets in the last {days} days (min_samples={min_samples}, min_imps={min_imps}). \
+             Reply to more posts and run `xmaster track run` to capture metrics, then try again."
+        )));
+    }
+
+    let targets: Vec<HotTargetRow> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| HotTargetRow {
+            rank: i + 1,
+            username: r.username,
+            sample_count: r.sample_count,
+            avg_impressions: r.avg_impressions,
+            avg_profile_clicks: r.avg_profile_clicks,
+            reply_back_rate: r.reply_back_rate,
+            score: r.score,
+            last_reply_at: chrono::DateTime::<chrono::Utc>::from_timestamp(r.last_reply_at, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    let next_commands = targets
+        .iter()
+        .take(3)
+        .map(|t| format!("xmaster engage recommend --topic '@{}'  # re-engage top target", t.username))
+        .collect();
+
+    let result = HotTargetsResult {
+        period_days: days,
+        sort: sort.to_string(),
+        targets,
+        suggested_next_commands: next_commands,
+    };
+    output::render(format, &result, None);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // engage feed — find fresh posts from big accounts to reply to NOW
 // ---------------------------------------------------------------------------
 

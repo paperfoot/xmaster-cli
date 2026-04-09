@@ -101,6 +101,9 @@ pub async fn dispatch(
                 WatchlistCommands::List => engage_recommend::watchlist_list(format).await,
                 WatchlistCommands::Remove { username } => engage_recommend::watchlist_remove(format, username).await,
             },
+            EngageCommands::HotTargets { days, min_imps, min_profile_clicks, min_samples, count, sort } => {
+                engage_recommend::hot_targets(format, *days, *min_imps, *min_profile_clicks, *min_samples, *count, sort).await
+            }
         },
         Commands::Update { check } => update::execute(*check).await,
         Commands::Star => {

@@ -144,6 +144,7 @@ pub fn execute(format: OutputFormat) {
             "lists".into(),
             // Intelligence
             "analyze".into(), "engage recommend".into(), "engage feed".into(),
+            "engage hot-targets".into(),
             "track run".into(), "track status".into(),
             "track followers".into(), "track growth".into(),
             "report daily".into(), "report weekly".into(),
@@ -243,6 +244,8 @@ pub fn execute(format: OutputFormat) {
             "Use 'xmaster engage watchlist add <username> --topic \"your niche\"' to pin important accounts without following. 'xmaster engage watchlist list' shows them. Watchlist accounts are prioritised by 'engage feed'".into(),
             "'xmaster engage feed \"your niche\"' checks watchlist accounts first (saves API calls) and silently auto-adds high-follower discovered authors (>=10k) back into the watchlist — so the watchlist grows itself as you discover targets".into(),
             "After replying to targets, run 'xmaster track run' to capture reply-backs (when the target replies to you). The reply-back signal is tracked in engagement_actions and surfaces in 'engage recommend'".into(),
+            "'xmaster track run' now AUTO-PROMOTES hot reply targets into the watchlist — any account where your reply got >=100 imps, >=1 profile click, or a reply-back (last 14d, >=1k followers) is added automatically. Check 'watchlist_auto_promoted' in the track run metadata to see who got added".into(),
+            "'xmaster engage hot-targets --days 7 --json' ranks the accounts you've replied to by avg impressions, profile clicks, and reply-back rate. Use it to find which targets reward your reply effort the most, then prioritise re-engaging them".into(),
         ],
         handoffs: vec![
             Handoff {
@@ -299,6 +302,22 @@ pub fn execute(format: OutputFormat) {
                     "xmaster engage watchlist list".into(),
                 ],
                 reason: "Engage with the curated feed, then check which accounts feed silently auto-added to your watchlist".into(),
+            },
+            Handoff {
+                after_command: "track run".into(),
+                next_commands: vec![
+                    "xmaster engage hot-targets --days 7".into(),
+                    "xmaster engage watchlist list".into(),
+                ],
+                reason: "track run auto-promotes hot reply targets. Check hot-targets to see the full ranking and watchlist list to confirm the new entries".into(),
+            },
+            Handoff {
+                after_command: "engage hot-targets".into(),
+                next_commands: vec![
+                    "xmaster engage feed".into(),
+                    "xmaster reply <id> \"...\"".into(),
+                ],
+                reason: "Once you know which targets reward your replies most, fetch fresh posts from them via engage feed and reply immediately".into(),
             },
         ],
         writing_style: style,
