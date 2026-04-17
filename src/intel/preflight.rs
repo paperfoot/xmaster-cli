@@ -256,7 +256,11 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score -= 15;
     }
 
-    if features.char_count < 30 && !features.has_media && !features.has_question {
+    if features.char_count < 30
+        && !features.has_media
+        && !features.has_question
+        && !ctx.is_reply()
+    {
         issues.push(Issue {
             severity: Severity::Info,
             code: "too_short".into(),
@@ -332,35 +336,131 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score += 5;
     }
 
-    // --- Author diversity penalty warning ---
-    // The algorithm only shows 2-3 of your posts per feed session.
-    // Posting more than 3x in 6h dilutes your average performance without
-    // adding reach. Check the store for recent posting velocity.
-    if let Ok(store) = crate::intel::store::IntelStore::open() {
-        if let Ok(velocity) = store.get_recent_post_velocity() {
-            if velocity.posts_6h >= 3 {
-                issues.push(Issue {
-                    severity: Severity::Warning,
-                    code: "author_diversity_penalty".into(),
-                    message: format!(
-                        "{} posts in the last 6h — author diversity scorer limits you to 2-3 per feed session, extra posts dilute your average without adding reach",
-                        velocity.posts_6h
-                    ),
-                    fix: Some("Wait at least 2 hours between posts — fewer, better posts outperform high volume".into()),
-                });
-                score -= 15;
-            } else if velocity.posts_1h >= 1 {
-                issues.push(Issue {
-                    severity: Severity::Info,
-                    code: "recent_post".into(),
-                    message: format!(
-                        "You posted {} time(s) in the last hour — the algorithm's 30-60 min distribution gate means your previous post may still be in its critical traction window",
-                        velocity.posts_1h
-                    ),
-                    fix: Some("Consider waiting — posting now may split attention from your previous post's traction window".into()),
-                });
-                score -= 5;
+    // --- Author diversity + daily cap warnings ---
+    // The algorithm only shows 2-3 of your posts per feed session, and 2026
+    // spam-flag heuristics treat >4 standalone posts/day as suspicious. Check
+    // the store for recent posting velocity. Replies are exempt from the daily
+    // cap — heavy replying is fine (the Feb 2026 algorithm update rewards it).
+    if !ctx.is_reply() {
+        if let Ok(store) = crate::intel::store::IntelStore::open() {
+            if let Ok(velocity) = store.get_recent_post_velocity() {
+                if velocity.standalone_24h >= 4 {
+                    issues.push(Issue {
+                        severity: Severity::Critical,
+                        code: "daily_cap_exceeded".into(),
+                        message: format!(
+                            "{} standalone posts in last 24h — 2026 spam heuristic flags >4/day, harming future reach. Posting now risks account-score damage",
+                            velocity.standalone_24h
+                        ),
+                        fix: Some("Stop posting today. Reply to others instead — replies don't count toward the cap and drive the highest signal (reply_engaged_by_author ~150x a like)".into()),
+                    });
+                    score -= 30;
+                } else if velocity.posts_6h >= 3 {
+                    issues.push(Issue {
+                        severity: Severity::Warning,
+                        code: "author_diversity_penalty".into(),
+                        message: format!(
+                            "{} posts in the last 6h — author diversity scorer limits you to 2-3 per feed session, extra posts dilute your average without adding reach",
+                            velocity.posts_6h
+                        ),
+                        fix: Some("Wait at least 2 hours between posts — fewer, better posts outperform high volume".into()),
+                    });
+                    score -= 15;
+                } else if velocity.posts_1h >= 1 {
+                    issues.push(Issue {
+                        severity: Severity::Info,
+                        code: "recent_post".into(),
+                        message: format!(
+                            "You posted {} time(s) in the last hour — the algorithm's 30-60 min distribution gate means your previous post may still be in its critical traction window",
+                            velocity.posts_1h
+                        ),
+                        fix: Some("Consider waiting — posting now may split attention from your previous post's traction window".into()),
+                    });
+                    score -= 5;
+                }
             }
+        }
+    }
+
+    // --- Reply-quality checks (only for replies) ---
+    // 2026 algorithm update: short generic replies get no push. A reply that
+    // reads as low-effort signals low-quality engagement and is suppressed.
+    // These checks only apply in reply mode — standalone posts are scored
+    // differently above.
+    if ctx.is_reply() {
+        let generic_phrases = [
+            "great post", "great point", "great take", "well said", "this",
+            "agreed", "i agree", "100%", "exactly", "so true", "facts",
+            "love this", "love it", "nice", "based", "fire", "good point",
+            "thanks for sharing", "preach", "yes", "yep", "truth", "real",
+        ];
+        let trimmed_lower = trimmed.to_lowercase();
+        let stripped: String = trimmed_lower
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect();
+        let stripped_compact = stripped.trim();
+
+        // Emoji/symbol-only (no alphabetic chars at all)
+        if !trimmed.chars().any(|c| c.is_alphabetic()) {
+            issues.push(Issue {
+                severity: Severity::Critical,
+                code: "reply_emoji_only".into(),
+                message: "Emoji-or-symbols-only reply — X treats these as noise, minimal algorithmic lift".into(),
+                fix: Some("Add substance: an observation, question, or specific reaction".into()),
+            });
+            score -= 25;
+        }
+        // Generic / low-effort phrase match
+        else if generic_phrases.iter().any(|p| stripped_compact == *p) {
+            issues.push(Issue {
+                severity: Severity::Critical,
+                code: "reply_generic".into(),
+                message: "Generic agreement reply — short replies get no algorithmic push in 2026, and the original author won't engage-back with them".into(),
+                fix: Some("Add a specific observation, counter-point, or question tied to the post's content".into()),
+            });
+            score -= 25;
+        }
+        // Too short to be substantive (< 25 chars is almost never a meaningful reply)
+        else if features.char_count < 25 {
+            issues.push(Issue {
+                severity: Severity::Warning,
+                code: "reply_too_short".into(),
+                message: format!(
+                    "Reply is {} chars — 2026 update: short replies get no push and rarely earn a reply-back (the ~150x signal)",
+                    features.char_count
+                ),
+                fix: Some("Expand to 1-2 sentences with a specific detail the author can respond to".into()),
+            });
+            score -= 15;
+        }
+    }
+
+    // --- Structural markers that boost share-worthiness / dwell ---
+    // 2026 community guidance: "here's how", "do this", "tbh" before a hot take,
+    // and one-sentence-per-line formatting correlate with higher engagement.
+    // These are small positive nudges, NOT large — they don't replace substance.
+    let has_hot_take_marker = lower.starts_with("tbh ")
+        || lower.contains("\ntbh ")
+        || lower.contains(" tbh ")
+        || lower.starts_with("hot take:")
+        || lower.starts_with("unpopular opinion:");
+    let has_instructional_marker = lower.contains("here's how")
+        || lower.contains("here's why")
+        || lower.contains("do this")
+        || lower.contains("try this");
+    if has_hot_take_marker || has_instructional_marker {
+        score += 3;
+    }
+    // Sentence-per-line density — if >60% of lines are <= 12 words, reward.
+    if features.line_count >= 3 {
+        let short_lines = trimmed
+            .lines()
+            .filter(|l| !l.trim().is_empty() && l.split_whitespace().count() <= 12)
+            .count();
+        let non_empty_lines = trimmed.lines().filter(|l| !l.trim().is_empty()).count();
+        if non_empty_lines > 0 && (short_lines * 100) / non_empty_lines >= 60 {
+            score += 3;
         }
     }
 
@@ -1336,5 +1436,57 @@ mod tests {
         assert!(result.goal_scores.shares <= 100);
         assert!(result.goal_scores.follows <= 100);
         assert!(result.goal_scores.impressions <= 100);
+    }
+
+    fn reply_ctx() -> AnalyzeContext {
+        AnalyzeContext {
+            mode: Some(PostMode::Reply),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reply_generic_phrase_is_critical() {
+        let result = analyze("great post", &reply_ctx());
+        assert!(
+            result.issues.iter().any(|i| i.code == "reply_generic"),
+            "got issues: {:?}",
+            result.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reply_emoji_only_is_critical() {
+        let result = analyze("🔥🔥🔥", &reply_ctx());
+        assert!(result.issues.iter().any(|i| i.code == "reply_emoji_only"));
+    }
+
+    #[test]
+    fn reply_too_short_is_warning() {
+        let result = analyze("yeah makes sense", &reply_ctx());
+        assert!(result.issues.iter().any(|i| i.code == "reply_too_short"));
+    }
+
+    #[test]
+    fn substantive_reply_has_no_reply_quality_issue() {
+        let result = analyze(
+            "Interesting angle — did you consider the latency trade-off when the cache invalidates under load?",
+            &reply_ctx(),
+        );
+        assert!(!result
+            .issues
+            .iter()
+            .any(|i| matches!(i.code.as_str(), "reply_generic" | "reply_emoji_only" | "reply_too_short")));
+    }
+
+    #[test]
+    fn reply_mode_skips_standalone_quality_warnings() {
+        // Short (<30 chars) replies should NOT trigger the "too_short" standalone
+        // warning — they only get reply-specific warnings above.
+        let result = analyze(
+            "Fair point, though I'd weight latency higher here.",
+            &reply_ctx(),
+        );
+        assert!(!result.issues.iter().any(|i| i.code == "too_short"));
     }
 }

@@ -1,6 +1,6 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
-use crate::intel::preflight::{self, AnalyzeContext, PreflightResult, Severity};
+use crate::intel::preflight::{self, AnalyzeContext, PostMode, PreflightResult, Severity};
 use crate::output::{self, OutputFormat, Tableable};
 use serde::Serialize;
 use std::sync::Arc;
@@ -176,11 +176,14 @@ pub async fn execute(
     format: OutputFormat,
     text: &str,
     goal: Option<&str>,
+    reply_to: Option<&str>,
 ) -> Result<(), XmasterError> {
     let premium = app.config.account.premium;
     let voice = if app.config.style.voice.is_empty() { None } else { Some(app.config.style.voice.clone()) };
+    let mode = reply_to.map(|_| PostMode::Reply);
     let ctx = AnalyzeContext {
         goal: goal.map(|g| g.to_string()),
+        mode,
         premium,
         author_voice: voice,
         ..Default::default()

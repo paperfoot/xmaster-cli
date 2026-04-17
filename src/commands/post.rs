@@ -87,11 +87,20 @@ pub async fn execute(
     let analysis = preflight::analyze(text, &analyze_ctx);
     let mut warnings = Vec::new();
 
-    // Always show critical issues (over_limit, empty); skip engagement warnings for replies
+    // Always show critical issues (over_limit, empty); standalone posts get
+    // all warnings; replies suppress most standalone-only warnings but KEEP
+    // reply-quality warnings (too_short, generic, emoji_only) since those are
+    // the whole point of analyzing a reply.
     for issue in &analysis.issues {
+        let is_reply_quality = matches!(
+            issue.code.as_str(),
+            "reply_too_short" | "reply_generic" | "reply_emoji_only"
+        );
         if issue.severity == preflight::Severity::Critical {
             warnings.push(format!("[CRITICAL] {}: {}", issue.code, issue.message));
-        } else if !is_reply && issue.severity == preflight::Severity::Warning {
+        } else if issue.severity == preflight::Severity::Warning
+            && (!is_reply || is_reply_quality)
+        {
             warnings.push(format!("[WARN] {}", issue.message));
         }
     }
@@ -112,26 +121,21 @@ pub async fn execute(
     // The algorithm's author_diversity_scorer applies exponential decay to
     // repeated authors in a feed session. Posting while a previous post is
     // in its 30-60 min traction window actively hurts both posts.
-    if let Ok(store) = IntelStore::open() {
-        if let Ok(v) = store.get_recent_post_velocity() {
-            if let Some(ref accel_id) = v.accelerating_post {
-                let warning = format!(
-                    "Your post {} is still gaining traction — posting now splits the 30-60 min distribution window",
-                    &accel_id[..accel_id.len().min(12)]
-                );
-                warnings.push(format!("[WARN] {warning}"));
-                if format == OutputFormat::Table {
-                    eprintln!("Warning: {warning}");
-                }
-            }
-            if v.posts_6h >= 3 {
-                let warning = format!(
-                    "{} posts in last 6h — author diversity penalty means only your top 2-3 get shown",
-                    v.posts_6h
-                );
-                warnings.push(format!("[WARN] {warning}"));
-                if format == OutputFormat::Table {
-                    eprintln!("Warning: {warning}");
+    // Standalone post-velocity (posts_6h / standalone_24h) is warned by
+    // preflight above, so we only need to add the accelerating-post warning
+    // here — that one isn't computed by preflight.
+    if !is_reply {
+        if let Ok(store) = IntelStore::open() {
+            if let Ok(v) = store.get_recent_post_velocity() {
+                if let Some(ref accel_id) = v.accelerating_post {
+                    let warning = format!(
+                        "Your post {} is still gaining traction — posting now splits the 30-60 min distribution window",
+                        &accel_id[..accel_id.len().min(12)]
+                    );
+                    warnings.push(format!("[WARN] {warning}"));
+                    if format == OutputFormat::Table {
+                        eprintln!("Warning: {warning}");
+                    }
                 }
             }
         }

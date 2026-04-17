@@ -257,6 +257,9 @@ pub async fn dispatch(
             EngageCommands::HotTargets { days, min_imps, min_profile_clicks, min_samples, count, sort } => {
                 engage_recommend::hot_targets(format, *days, *min_imps, *min_profile_clicks, *min_samples, *count, sort).await
             }
+            EngageCommands::Swarm { id, min_followers, max_followers, count } => {
+                engage_recommend::swarm(ctx, format, id, *min_followers, *max_followers, *count).await
+            }
         },
         Commands::Update { check } => update::execute(*check).await,
         Commands::Star => {
@@ -302,7 +305,7 @@ pub async fn dispatch(
         Commands::Unblock { username } => moderation::unblock(ctx, format, username).await,
         Commands::Mute { username } => moderation::mute(ctx, format, username).await,
         Commands::Unmute { username } => moderation::unmute(ctx, format, username).await,
-        Commands::Analyze { text, goal } => analyze::execute(ctx, format, text, goal.as_deref()).await,
+        Commands::Analyze { text, goal, reply_to } => analyze::execute(ctx, format, text, goal.as_deref(), reply_to.as_deref()).await,
         Commands::Inspire { topic, author, min_likes, count } =>
             inspire::execute(ctx, format, topic.as_deref(), author.as_deref(), *min_likes, *count).await,
         Commands::Track { action } => match action {

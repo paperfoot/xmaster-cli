@@ -813,3 +813,155 @@ fn extract_usernames_from_text(text: &str) -> Vec<String> {
 
     usernames
 }
+
+// ---------------------------------------------------------------------------
+// Swarm: small-to-mid reply targets under a big post
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SwarmTarget {
+    pub reply_id: String,
+    pub author: String,
+    pub author_followers: u64,
+    pub text: String,
+    pub age_minutes: i64,
+    pub likes: u64,
+    pub replies_to_reply: u64,
+    pub reply_command: String,
+    pub priority_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SwarmResult {
+    pub target_post_id: String,
+    pub min_followers: u64,
+    pub max_followers: u64,
+    pub total_replies_scanned: usize,
+    pub filtered_too_small: usize,
+    pub filtered_too_big: usize,
+    pub swarm_targets: Vec<SwarmTarget>,
+}
+
+impl Tableable for SwarmResult {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["Age", "Author", "Followers", "Text", "Likes", "Reply cmd"]);
+        for t in &self.swarm_targets {
+            let text_preview: String = t.text.chars().take(60).collect::<String>()
+                + if t.text.chars().count() > 60 { "..." } else { "" };
+            table.add_row(vec![
+                format!("{}m", t.age_minutes),
+                format!("@{}", t.author),
+                format_followers(t.author_followers),
+                text_preview,
+                t.likes.to_string(),
+                t.reply_command.clone(),
+            ]);
+        }
+        table
+    }
+}
+
+/// Find small-to-mid accounts replying under a big post. This is the 2026
+/// peer-to-peer growth layer — the big account's post is the gathering point,
+/// but the reply-to-reply chain under it is where small accounts build
+/// relationships with each other and grow together.
+pub async fn swarm(
+    ctx: Arc<AppContext>,
+    format: OutputFormat,
+    id: &str,
+    min_followers: u64,
+    max_followers: u64,
+    count: usize,
+) -> Result<(), XmasterError> {
+    let api = crate::providers::xapi::XApi::new(ctx.clone());
+    let target_id = crate::cli::parse_tweet_id(id);
+
+    // Fetch as many replies as we can (API max is 100 per call).
+    let fetch_count = (count * 5).clamp(50, 100);
+    let replies = api.get_replies(&target_id, fetch_count).await?;
+    let total_scanned = replies.len();
+
+    let now = chrono::Utc::now();
+    let mut filtered_too_small = 0usize;
+    let mut filtered_too_big = 0usize;
+    let mut targets: Vec<SwarmTarget> = Vec::new();
+
+    for t in replies {
+        let followers = t.author_followers.unwrap_or(0);
+        if followers < min_followers {
+            filtered_too_small += 1;
+            continue;
+        }
+        if followers > max_followers {
+            filtered_too_big += 1;
+            continue;
+        }
+
+        let age_minutes = t
+            .created_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_minutes())
+            .unwrap_or(0);
+
+        let metrics = t.public_metrics.as_ref();
+        let likes = metrics.map(|m| m.like_count).unwrap_or(0);
+        let replies_to_reply = metrics.map(|m| m.reply_count).unwrap_or(0);
+        let author = t.author_username.clone().unwrap_or_else(|| "unknown".into());
+
+        // Priority: fresher replies + thread-starters (already gathering a
+        // conversation) rank higher. Tiny accounts with engaged replies score
+        // higher than accounts at the follower-band ceiling.
+        let freshness = 1.0 - (age_minutes as f64 / 180.0).clamp(0.0, 1.0); // 3h window
+        let conversation_heat = (replies_to_reply as f64 / 5.0).min(1.0);
+        let small_bias = 1.0 - (followers as f64 / max_followers.max(1) as f64).clamp(0.0, 1.0);
+        let priority_score = (0.4 * freshness + 0.35 * conversation_heat + 0.25 * small_bias) as f32;
+
+        targets.push(SwarmTarget {
+            reply_command: format!("xmaster reply {} \"your reply\"", t.id),
+            reply_id: t.id,
+            author,
+            author_followers: followers,
+            text: t.text,
+            age_minutes,
+            likes,
+            replies_to_reply,
+            priority_score,
+        });
+    }
+
+    targets.sort_by(|a, b| {
+        b.priority_score
+            .partial_cmp(&a.priority_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    targets.truncate(count);
+
+    // Silently log these as discovered targets so `inspire` and the hot-target
+    // scorer can use them later.
+    if let Ok(store) = IntelStore::open() {
+        for t in &targets {
+            let _ = store.log_engagement(
+                "swarm_discovered",
+                Some(&t.reply_id),
+                None,
+                Some(&t.author),
+                Some(t.author_followers as i64),
+            );
+        }
+    }
+
+    let result = SwarmResult {
+        target_post_id: target_id,
+        min_followers,
+        max_followers,
+        total_replies_scanned: total_scanned,
+        filtered_too_small,
+        filtered_too_big,
+        swarm_targets: targets,
+    };
+
+    output::render(format, &result, None);
+    Ok(())
+}

@@ -98,6 +98,17 @@ pub async fn execute(
         }
     }
 
+    // 2026 algorithm update: threads drop off after 4 tweets. The feed splits
+    // long threads into separate items, and impressions on tweets 5+ fall ~80%
+    // vs the previous bundle-delivery behaviour (source: community analysis
+    // of the Jan 2026 home-mixer rewrite). Warn the user before posting.
+    if texts.len() > 4 {
+        warnings.push(format!(
+            "[WARN] thread_too_long: {} tweets — 2026 feed split means tweets 5+ drop ~80% reach. Consider: (a) posting the first 4 now, (b) repurposing the rest as a standalone post 2h later, or (c) posting it as an Article (boosted format for Premium accounts)",
+            texts.len()
+        ));
+    }
+
     if format == OutputFormat::Table {
         eprintln!(
             "--- Thread hook pre-flight ({}/100, {}) ---",

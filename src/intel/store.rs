@@ -108,6 +108,9 @@ pub struct RecentVelocity {
     pub posts_1h: i64,
     pub posts_6h: i64,
     pub posts_24h: i64,
+    /// Original posts (non-replies) in the last 24h. The 2026 algorithm treats
+    /// >4 standalone posts/day as a spam-flag risk, but heavy replying is fine.
+    pub standalone_24h: i64,
     pub accelerating_post: Option<String>,
 }
 
@@ -1044,6 +1047,17 @@ impl IntelStore {
             params![now],
             |r| r.get(0),
         )?;
+        // Standalone = everything except replies. Threads count (thread_hook
+        // and thread_reply are both original-authored feed items). Replies to
+        // other people's posts are excluded — the 2026 "2-4/day" cap applies
+        // only to new impressions in the main feed.
+        let standalone_24h: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM posts
+             WHERE posted_at > ?1 - 86400
+               AND content_type != 'reply'",
+            params![now],
+            |r| r.get(0),
+        )?;
 
         // A post is "accelerating" if its latest two snapshots show increasing impressions
         let accelerating_post: Option<String> = self
@@ -1070,6 +1084,7 @@ impl IntelStore {
             posts_1h,
             posts_6h,
             posts_24h,
+            standalone_24h,
             accelerating_post,
         })
     }
@@ -1395,7 +1410,25 @@ mod tests {
         assert_eq!(velocity.posts_1h, 0);
         assert_eq!(velocity.posts_6h, 0);
         assert_eq!(velocity.posts_24h, 0);
+        assert_eq!(velocity.standalone_24h, 0);
         assert!(velocity.accelerating_post.is_none());
+    }
+
+    #[test]
+    fn standalone_24h_excludes_replies() {
+        let store = test_store();
+        store
+            .log_post("p_1", "a standalone post", "text", None, None, None, None, None)
+            .unwrap();
+        store
+            .log_post("p_2", "reply to something", "reply", Some("other_id"), None, None, None, None)
+            .unwrap();
+        store
+            .log_post("p_3", "thread opener", "thread_hook", None, None, None, None, None)
+            .unwrap();
+        let v = store.get_recent_post_velocity().unwrap();
+        assert_eq!(v.posts_24h, 3, "all three rows count toward posts_24h");
+        assert_eq!(v.standalone_24h, 2, "reply must be excluded from standalone_24h");
     }
 
     #[test]

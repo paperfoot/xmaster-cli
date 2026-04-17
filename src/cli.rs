@@ -358,6 +358,10 @@ pub enum Commands {
         /// Optimization goal (replies, impressions)
         #[arg(long)]
         goal: Option<String>,
+        /// Analyze as a REPLY to this tweet ID (applies reply-quality rules:
+        /// catches generic agreement, emoji-only, and too-short replies)
+        #[arg(long)]
+        reply_to: Option<String>,
     },
 
     /// Browse your discovered posts library for content inspiration
@@ -476,6 +480,27 @@ pub enum EngageCommands {
         #[arg(long, default_value = "60")]
         max_age_mins: u64,
         /// Number of posts to return (unified across all topics)
+        #[arg(long, short, alias = "limit", default_value = "10")]
+        count: usize,
+    },
+    /// Find small-to-mid accounts replying under a big post — the 2026
+    /// peer-to-peer growth lane.
+    ///
+    /// Small accounts grow fastest by replying to OTHER SMALL ACCOUNTS under
+    /// big-account posts (community consensus, Q1 2026). This command fetches
+    /// the replies to any post and filters to accounts inside your target
+    /// follower band so you can engage peer-to-peer instead of competing for
+    /// the top-of-thread slot under the big account.
+    Swarm {
+        /// Tweet ID or URL of the big post to swarm under
+        id: String,
+        /// Minimum follower count to include (default 50 — filters brand-new accounts)
+        #[arg(long, default_value = "50")]
+        min_followers: u64,
+        /// Maximum follower count to include (default 5000 — small/mid only)
+        #[arg(long, default_value = "5000")]
+        max_followers: u64,
+        /// Number of swarm targets to return
         #[arg(long, short, alias = "limit", default_value = "10")]
         count: usize,
     },
