@@ -305,8 +305,10 @@ fn report_daily_no_panic() {
         .output()
         .expect("failed to run");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
     assert!(
-        stdout.contains("\"status\"") || stdout.contains("\"version\""),
-        "Should return valid JSON envelope, got: {stdout}"
+        combined.contains("\"status\"") || combined.contains("\"version\""),
+        "Should return valid JSON envelope, got stdout: {stdout}; stderr: {stderr}"
     );
 }
