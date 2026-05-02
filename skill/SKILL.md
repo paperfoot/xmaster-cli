@@ -20,6 +20,17 @@ NEVER post without explicit user approval. Always analyze first.
 4. xmaster post "approved text" --json
 ```
 
+### X Articles
+
+Articles are a separate X feature, not long posts / Note Tweets.
+
+```
+xmaster article preview draft.md --header-image cover.png -o preview.html
+xmaster article draft draft.md --header-image cover.png --json
+```
+
+`article draft` saves an unpublished native X Article draft through X's web Article entity endpoint and requires `xmaster config web-login`.
+
 ### Finding Posts to Reply To
 
 Replies are ~20x a like in the 2026 algorithm. This is the #1 growth lever for small accounts.

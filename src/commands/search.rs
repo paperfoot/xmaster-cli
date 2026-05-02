@@ -82,10 +82,10 @@ pub async fn execute(
     since: Option<&str>,
     before: Option<&str>,
 ) -> Result<(), XmasterError> {
-    let start_time = since.map(|s| crate::commands::timeline::parse_since(s)).transpose()
-        .map_err(|e| XmasterError::Config(e))?;
-    let end_time = before.map(|s| crate::commands::timeline::parse_since(s)).transpose()
-        .map_err(|e| XmasterError::Config(e))?;
+    let start_time = since.map(crate::commands::timeline::parse_since).transpose()
+        .map_err(XmasterError::Config)?;
+    let end_time = before.map(crate::commands::timeline::parse_since).transpose()
+        .map_err(XmasterError::Config)?;
     let api = XApi::new(ctx.clone());
     let tweets = api.search_tweets_paginated(query, mode, count, start_time.as_deref(), end_time.as_deref()).await?;
     if let Ok(store) = IntelStore::open() {

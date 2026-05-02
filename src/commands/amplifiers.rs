@@ -81,7 +81,7 @@ pub async fn execute(
             latest_repost_id: latest_id,
         })
         .collect();
-    amplifiers.sort_by(|a, b| b.repost_count.cmp(&a.repost_count));
+    amplifiers.sort_by_key(|a| std::cmp::Reverse(a.repost_count));
 
     let next_cmds: Vec<String> = amplifiers
         .iter()

@@ -262,8 +262,8 @@ pub async fn set(format: OutputFormat, key: &str, value: &str) -> Result<(), Xma
         let suggestions: Vec<&&str> = VALID_CONFIG_KEYS
             .iter()
             .filter(|k| {
-                k.contains(&key.split('.').last().unwrap_or(key))
-                    || key.contains(&k.split('.').last().unwrap_or(k))
+                k.contains(key.split('.').next_back().unwrap_or(key))
+                    || key.contains(k.split('.').next_back().unwrap_or(k))
             })
             .collect();
         let hint = if suggestions.is_empty() {

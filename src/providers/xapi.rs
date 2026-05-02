@@ -28,6 +28,11 @@ const DEFAULT_GRAPHQL_CREATE_TWEET_ID: &str = "oB-5XsHNAbjvARJEc8CZFw";
 /// Can be overridden via config: keys.graphql_create_note_tweet_id
 const DEFAULT_GRAPHQL_CREATE_NOTE_TWEET_ID: &str = "iCUB42lIfXf9qPKctjE5rQ";
 
+/// Current X web Article entity GraphQL operation IDs (rotated by X deploys).
+/// These are private web endpoints, not public X API v2 endpoints.
+const ARTICLE_ENTITY_DRAFT_CREATE_ID: &str = "g1l5N8BxGewYuCy5USe_bQ";
+const ARTICLE_ENTITY_UPDATE_COVER_MEDIA_ID: &str = "Es8InPh7mEkK9PxclxFAVQ";
+
 // ---------------------------------------------------------------------------
 // Rate limit info
 // ---------------------------------------------------------------------------
@@ -50,6 +55,15 @@ pub struct RateLimitInfo {
 pub struct TweetResponse {
     pub id: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArticleEntityResponse {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub tweet_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +249,42 @@ struct ApiErrorDetail {
 struct MediaUploadResponse {
     media_id_string: Option<String>,
     media_id: Option<u64>,
+}
+
+fn parse_article_entity(
+    result: &Value,
+    code: &'static str,
+) -> Result<ArticleEntityResponse, XmasterError> {
+    let id = result
+        .get("rest_id")
+        .or_else(|| result.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| XmasterError::Api {
+            provider: "x-web",
+            code,
+            message: format!(
+                "No Article entity id in response: {}",
+                crate::utils::safe_truncate(&result.to_string(), 300)
+            ),
+        })?;
+
+    let title = result
+        .get("title")
+        .or_else(|| result.pointer("/metadata/title"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+
+    let tweet_id = result
+        .pointer("/metadata/tweet_results/result/rest_id")
+        .or_else(|| result.pointer("/tweet_results/result/rest_id"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+
+    Ok(ArticleEntityResponse {
+        id: id.to_string(),
+        title,
+        tweet_id,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -913,6 +963,194 @@ impl XApi {
             id: tweet_id.to_string(),
             text: tweet_text.to_string(),
         })
+    }
+
+    pub async fn create_article_draft(
+        &self,
+        title: &str,
+        content_state: Value,
+    ) -> Result<ArticleEntityResponse, XmasterError> {
+        self.require_web_cookies("Article drafts")?;
+
+        let val = self
+            .article_web_graphql(
+                ARTICLE_ENTITY_DRAFT_CREATE_ID,
+                "ArticleEntityDraftCreate",
+                json!({
+                    "content_state": content_state,
+                    "title": title,
+                }),
+            )
+            .await?;
+
+        let result = val
+            .pointer("/data/articleentity_create_draft/article_entity_results/result")
+            .ok_or_else(|| XmasterError::Api {
+                provider: "x-web",
+                code: "no_article_result",
+                message: format!(
+                    "Unexpected Article draft response: {}",
+                    crate::utils::safe_truncate(&val.to_string(), 300)
+                ),
+            })?;
+
+        parse_article_entity(result, "articleentity_create_draft")
+    }
+
+    pub async fn update_article_cover_media(
+        &self,
+        article_entity_id: &str,
+        media_id: Option<&str>,
+        media_category: Option<&str>,
+    ) -> Result<ArticleEntityResponse, XmasterError> {
+        self.require_web_cookies("Article cover updates")?;
+
+        let cover_media = match (media_id, media_category) {
+            (Some(media_id), Some(media_category)) => {
+                json!({ "media_id": media_id, "media_category": media_category })
+            }
+            _ => Value::Null,
+        };
+
+        let val = self
+            .article_web_graphql(
+                ARTICLE_ENTITY_UPDATE_COVER_MEDIA_ID,
+                "ArticleEntityUpdateCoverMedia",
+                json!({
+                    "articleEntityId": article_entity_id,
+                    "coverMedia": cover_media,
+                }),
+            )
+            .await?;
+
+        let result = val
+            .pointer("/data/articleentity_update_cover_media")
+            .ok_or_else(|| XmasterError::Api {
+                provider: "x-web",
+                code: "no_article_result",
+                message: format!(
+                    "Unexpected Article cover response: {}",
+                    crate::utils::safe_truncate(&val.to_string(), 300)
+                ),
+            })?;
+
+        parse_article_entity(result, "articleentity_update_cover_media")
+    }
+
+    fn require_web_cookies(&self, feature: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.has_web_cookies() {
+            return Ok(());
+        }
+
+        Err(XmasterError::AuthMissing {
+            provider: "x-web",
+            message: format!(
+                "{feature} require X web-session cookies. Run: xmaster config web-login"
+            ),
+        })
+    }
+
+    async fn article_web_graphql(
+        &self,
+        query_id: &str,
+        operation_name: &str,
+        variables: Value,
+    ) -> Result<Value, XmasterError> {
+        let keys = &self.ctx.config.keys;
+        let ct0 = &keys.web_ct0;
+        let auth_token = &keys.web_auth_token;
+        let gql_path = format!("/i/api/graphql/{query_id}/{operation_name}");
+        let transaction_id =
+            crate::transaction_id::generate(&self.ctx.client, "POST", &gql_path, ct0, auth_token)
+                .await
+                .map_err(|e| {
+                    warn!("Native transaction ID failed for Article GraphQL: {e}");
+                    e
+                })?;
+
+        let gql_body = json!({
+            "variables": variables,
+            "features": {
+                "profile_label_improvements_pcf_label_in_post_enabled": true,
+                "responsive_web_profile_redirect_enabled": false,
+                "rweb_tipjar_consumption_enabled": true,
+                "verified_phone_label_enabled": false,
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+                "responsive_web_graphql_timeline_navigation_enabled": true,
+            },
+            "fieldToggles": {
+                "withPayments": true,
+                "withAuxiliaryUserLabels": true,
+            },
+            "queryId": query_id,
+        });
+
+        let cookie_header = format!("ct0={ct0}; auth_token={auth_token}");
+        let bearer = format!("Bearer {WEB_BEARER}");
+        let gql_url = format!("https://x.com{gql_path}");
+
+        let resp = self
+            .ctx
+            .client
+            .post(&gql_url)
+            .header("authorization", &bearer)
+            .header("x-csrf-token", ct0)
+            .header("cookie", &cookie_header)
+            .header("content-type", "application/json")
+            .header("x-twitter-active-user", "yes")
+            .header("x-twitter-auth-type", "OAuth2Session")
+            .header("x-client-transaction-id", &transaction_id)
+            .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+            .header("origin", "https://x.com")
+            .header("referer", "https://x.com/compose/articles")
+            .header("x-twitter-client-language", "en")
+            .header("accept", "*/*")
+            .header("accept-language", "en-US,en;q=0.9")
+            .header("sec-ch-ua", "\"Google Chrome\";v=\"146\", \"Chromium\";v=\"146\", \"Not_A Brand\";v=\"24\"")
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"macOS\"")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "same-origin")
+            .body(serde_json::to_string(&gql_body)?)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(XmasterError::Api {
+                provider: "x-web",
+                code: "article_graphql_error",
+                message: format!(
+                    "Article GraphQL {operation_name} failed (HTTP {status}): {}",
+                    crate::utils::safe_truncate(&body_text, 300)
+                ),
+            });
+        }
+
+        let val: Value = serde_json::from_str(&body_text).map_err(|_| XmasterError::Api {
+            provider: "x-web",
+            code: "json_parse",
+            message: format!(
+                "Failed to parse Article GraphQL response: {}",
+                crate::utils::safe_truncate(&body_text, 200)
+            ),
+        })?;
+
+        if let Some(errors) = val.get("errors") {
+            return Err(XmasterError::Api {
+                provider: "x-web",
+                code: "article_graphql_error",
+                message: format!(
+                    "Article GraphQL {operation_name} returned errors: {}",
+                    crate::utils::safe_truncate(&errors.to_string(), 300)
+                ),
+            });
+        }
+
+        Ok(val)
     }
 
     /// Look up any tweet by ID (yours or someone else's). Only requests public metrics.

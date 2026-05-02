@@ -146,7 +146,7 @@ pub fn execute(format: OutputFormat) {
             "search-ai".into(), "trending".into(), "user".into(), "me".into(),
             "followers".into(), "following".into(),
             // Posting
-            "post".into(), "reply".into(), "thread".into(), "delete".into(),
+            "post".into(), "reply".into(), "thread".into(), "article preview".into(), "article draft".into(), "delete".into(),
             // Engagement
             "like".into(), "unlike".into(),
             "retweet".into(), "unretweet".into(), "bookmark".into(), "unbookmark".into(),
@@ -194,6 +194,8 @@ pub fn execute(format: OutputFormat) {
             "scheduling".into(),
             "bookmark_intelligence".into(),
             "engagement_intelligence".into(),
+            "article_preview".into(),
+            "article_draft".into(),
             "self_update".into(),
         ],
         env_prefix: "XMASTER_".into(),
@@ -285,6 +287,8 @@ pub fn execute(format: OutputFormat) {
             "LONG-FORM STRUCTURE (2026 winners): hook in first 280 chars (that's all the feed shows before 'show more'), then short paragraphs (2-4 lines), data points or named subjects every ~500 chars, payoff/CTA at the end. Wall-of-text dies — readers scan, not read. xmaster analyze flags weak-preview, wall-of-text, and low-density issues for long drafts".into(),
             "LONG-FORM EXEMPLARS: 'xmaster inspire --long' surfaces high-impression long-form posts already in your discovered library. Seed it by running 'xmaster search-ai' or 'xmaster timeline --user' on long-form practitioners (e.g. @beaverd, @KobeissiLetter, @thedankoe, @nickshirleyy, @wolfejosh, @ryanhallyall — 2026 contest winners) — every search/timeline auto-populates discovered_posts".into(),
             "LONG-FORM COVER IMAGES: X Articles render with a preview card; covers boost click-through. Generate one via the nanaban CLI (default model is gpt-image-2): `nanaban \"<prompt>\" --ar 3:2` for the standard preview-card aspect ratio. Keep prompts editorial — title-card style, not abstract art".into(),
+            "ARTICLE PREVIEW: Articles are not long posts / Note Tweets. Use `xmaster article preview draft.md --header-image cover.png --author \"Name\" --handle username -o preview.html` to render the separate X Articles surface locally. Markdown maps to the official Article feature set: header image, headings/subheadings, bold, italic, strikethrough, indentation, numbered/bulleted lists, images, video/GIF directives, embedded posts/Articles, and links".into(),
+            "ARTICLE DRAFTS: `xmaster article draft draft.md --header-image cover.png` saves a native, unpublished X Article draft through the current private web Article entity endpoint (`ArticleEntityDraftCreate`). It requires browser cookies from `xmaster config web-login`; it is not the public `/2/tweets` API and it is not CreateNoteTweet".into(),
             "LONG-FORM TIMING: post during the in-network peak (Tue–Thu, 9–11 AM author-local for desk audiences; 7–9 PM for general). Long-form needs more dwell, so a slow-feed window is fine — but the first 30-min velocity rule still applies, so be ready to engage replies. Avoid Mon mornings (timeline rebuild) and Fri afternoon (drop-off)".into(),
             "QUOTE TWEETS are a strong reach multiplier in 2026 — when you're about to reply with a take that extends the idea, use 'xmaster post \"your take\" --quote <id>' instead. Quotes put the post in your followers' feeds; replies mostly reach the OP's audience".into(),
             "PREMIUM impact in 2026: ~2-3x organic reach boost (up from 1.2-1.5x in 2025). If you're posting >2x/week and on X seriously, Premium is now load-bearing for reach, not optional polish".into(),

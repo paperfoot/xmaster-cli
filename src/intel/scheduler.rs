@@ -417,7 +417,7 @@ impl PostScheduler {
                     if let Ok(store) = IntelStore::open() {
                         let is_reply = reply_to.is_some();
                         let is_quote = quote.is_some();
-                        let has_media = media_ids.as_ref().map_or(false, |m| !m.is_empty());
+                        let has_media = media_ids.as_ref().is_some_and(|m| !m.is_empty());
                         let mode = if is_reply {
                             preflight::PostMode::Reply
                         } else if is_quote {

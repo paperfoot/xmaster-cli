@@ -99,6 +99,8 @@ impl XmasterError {
             Self::AuthMissing { provider, .. } => {
                 if *provider == "xai" {
                     "Set XMASTER_KEYS__XAI env var or run: xmaster config set keys.xai <key>".into()
+                } else if *provider == "x-web" {
+                    "Run: xmaster config web-login (captures browser cookies for X web-only features)".into()
                 } else {
                     "Set X API credentials via env vars (XMASTER_KEYS__API_KEY, etc.) or run: xmaster config set keys.api_key <key>".into()
                 }

@@ -437,7 +437,8 @@ pub async fn hot_targets(
         "avg-impressions" => rows.sort_by(|a, b| b.avg_impressions.partial_cmp(&a.avg_impressions).unwrap_or(std::cmp::Ordering::Equal)),
         "avg-profile-clicks" => rows.sort_by(|a, b| b.avg_profile_clicks.partial_cmp(&a.avg_profile_clicks).unwrap_or(std::cmp::Ordering::Equal)),
         "reply-back-rate" => rows.sort_by(|a, b| b.reply_back_rate.partial_cmp(&a.reply_back_rate).unwrap_or(std::cmp::Ordering::Equal)),
-        "score" | _ => { /* already sorted by store */ }
+        "score" => { /* already sorted by store */ }
+        _ => { /* unknown sort: keep store score order */ }
     }
 
     rows.truncate(count);
@@ -666,7 +667,7 @@ pub async fn feed(
     let search_tweets = if watchlist_tweets.len() < count && !topics.is_empty() {
         // Budget per topic: split `count*5` evenly, min 10 per topic so even
         // a 5-topic fanout with count=10 still pulls 10/topic not 10/total.
-        let per_topic_cap = (count * 5 / topics.len()).max(10).min(100);
+        let per_topic_cap = (count * 5 / topics.len()).clamp(10, 100);
         let mut collected = Vec::new();
         for topic in &topics {
             let tweets = api
@@ -689,7 +690,7 @@ pub async fn feed(
     // Combine: watchlist first, then search results, dedupe by tweet id.
     let mut seen_ids = std::collections::HashSet::new();
     let mut tweets = Vec::new();
-    for t in watchlist_tweets.into_iter().chain(search_tweets.into_iter()) {
+    for t in watchlist_tweets.into_iter().chain(search_tweets) {
         if seen_ids.insert(t.id.clone()) {
             tweets.push(t);
         }

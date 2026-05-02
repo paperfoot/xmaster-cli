@@ -557,6 +557,7 @@ impl IntelStore {
     // -- writes --------------------------------------------------------------
 
     /// Log a published post, extracting features automatically.
+    #[allow(clippy::too_many_arguments)]
     pub fn log_post(
         &self,
         tweet_id: &str,
@@ -763,10 +764,10 @@ impl IntelStore {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let mut bind_idx = 1usize;
-        if let Some(_) = topic_idx { stmt.raw_bind_parameter(bind_idx, topic.unwrap())?; bind_idx += 1; }
-        if let Some(_) = author_idx { stmt.raw_bind_parameter(bind_idx, author.unwrap())?; bind_idx += 1; }
-        if let Some(_) = likes_idx { stmt.raw_bind_parameter(bind_idx, min_likes.unwrap())?; bind_idx += 1; }
-        if let Some(_) = chars_idx { stmt.raw_bind_parameter(bind_idx, min_chars.unwrap())?; bind_idx += 1; }
+        if topic_idx.is_some() { stmt.raw_bind_parameter(bind_idx, topic.unwrap())?; bind_idx += 1; }
+        if author_idx.is_some() { stmt.raw_bind_parameter(bind_idx, author.unwrap())?; bind_idx += 1; }
+        if likes_idx.is_some() { stmt.raw_bind_parameter(bind_idx, min_likes.unwrap())?; bind_idx += 1; }
+        if chars_idx.is_some() { stmt.raw_bind_parameter(bind_idx, min_chars.unwrap())?; bind_idx += 1; }
         stmt.raw_bind_parameter(bind_idx, limit as i64)?;
 
         let mut rows = Vec::new();

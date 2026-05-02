@@ -29,8 +29,9 @@ pub mod tweet_engagement;
 pub mod quotes;
 pub mod amplifiers;
 pub mod volume;
+pub mod article;
 
-use crate::cli::{Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
+use crate::cli::{ArticleCommands, Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::OutputFormat;
@@ -66,6 +67,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Update { .. } => "update",
         Commands::Star => "star",
         Commands::Thread { .. } => "thread",
+        Commands::Article { .. } => "article",
         Commands::Reply { .. } => "reply",
         Commands::Metrics { .. } => "metrics",
         Commands::Lists { .. } => "lists",
@@ -127,49 +129,66 @@ fn check_command_access(cmd_name: &str) -> Result<(), XmasterError> {
 #[cfg(test)]
 mod access_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_access_env() {
+        std::env::remove_var("XMASTER_ALLOW_COMMANDS");
+        std::env::remove_var("XMASTER_DENY_COMMANDS");
+    }
 
     #[test]
     fn deny_blocks_command() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
         std::env::set_var("XMASTER_DENY_COMMANDS", "post,delete");
         let r = check_command_access("post");
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("blocked"));
-        std::env::remove_var("XMASTER_DENY_COMMANDS");
+        clear_access_env();
     }
 
     #[test]
     fn deny_allows_unlisted() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
         std::env::set_var("XMASTER_DENY_COMMANDS", "post,delete");
         assert!(check_command_access("search").is_ok());
-        std::env::remove_var("XMASTER_DENY_COMMANDS");
+        clear_access_env();
     }
 
     #[test]
     fn allow_restricts_to_listed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
         std::env::set_var("XMASTER_ALLOW_COMMANDS", "search,read,metrics");
         assert!(check_command_access("search").is_ok());
         let r = check_command_access("post");
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("not in"));
-        std::env::remove_var("XMASTER_ALLOW_COMMANDS");
+        clear_access_env();
     }
 
     #[test]
     fn introspection_always_allowed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
         std::env::set_var("XMASTER_DENY_COMMANDS", "agent-info,config");
         assert!(check_command_access("agent-info").is_ok());
         assert!(check_command_access("config").is_ok());
-        std::env::remove_var("XMASTER_DENY_COMMANDS");
+        clear_access_env();
     }
 
     #[test]
     fn deny_takes_precedence_over_allow() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
         std::env::set_var("XMASTER_ALLOW_COMMANDS", "post,search");
         std::env::set_var("XMASTER_DENY_COMMANDS", "post");
         let r = check_command_access("post");
         assert!(r.is_err());
-        std::env::remove_var("XMASTER_ALLOW_COMMANDS");
-        std::env::remove_var("XMASTER_DENY_COMMANDS");
+        clear_access_env();
     }
 }
 
@@ -267,6 +286,49 @@ pub async fn dispatch(
             Ok(())
         }
         Commands::Thread { texts, media } => thread::execute(ctx, format, texts, media).await,
+        Commands::Article { action } => match action {
+            ArticleCommands::Preview {
+                input,
+                output,
+                title,
+                subtitle,
+                header_image,
+                author,
+                handle,
+                avatar,
+                audience,
+                open,
+            } => {
+                article::preview(
+                    format,
+                    input,
+                    output.as_deref(),
+                    title.as_deref(),
+                    subtitle.as_deref(),
+                    header_image.as_deref(),
+                    author,
+                    handle,
+                    avatar.as_deref(),
+                    audience,
+                    *open,
+                )
+                .await
+            }
+            ArticleCommands::Draft {
+                input,
+                title,
+                header_image,
+            } => {
+                article::draft(
+                    ctx,
+                    format,
+                    input,
+                    title.as_deref(),
+                    header_image.as_deref(),
+                )
+                .await
+            }
+        },
         Commands::Reply { id, text, media } => {
             post::execute(ctx, format, text, Some(id.as_str()), None, media, None, 1440).await
         }

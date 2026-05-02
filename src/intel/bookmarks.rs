@@ -463,7 +463,7 @@ impl BookmarkStore {
             }
         }
 
-        groups.sort_by(|a, b| b.count.cmp(&a.count));
+        groups.sort_by_key(|group| std::cmp::Reverse(group.count));
 
         Ok(BookmarkDigest {
             period_days: days,

@@ -17,17 +17,12 @@ pub const ALGORITHM_SOURCE: &str = "xai-org/x-algorithm (January 2026, Grok-base
 // Context passed into analyze()
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub enum PostMode {
+    #[default]
     Standalone,
     Reply,
     Quote,
-}
-
-impl Default for PostMode {
-    fn default() -> Self {
-        Self::Standalone
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,7 +407,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             score -= 25;
         }
         // Generic / low-effort phrase match
-        else if generic_phrases.iter().any(|p| stripped_compact == *p) {
+        else if generic_phrases.contains(&stripped_compact) {
             issues.push(Issue {
                 severity: Severity::Critical,
                 code: "reply_generic".into(),
@@ -1121,28 +1116,20 @@ fn suggest_improvements(
                     .push("Add more depth — longer dwell time increases distribution".into());
             }
         }
-        Some("shares") => {
-            if proxies.share_via_dm < 0.15 {
-                suggestions.push(
-                    "Add practical value (how-to, data, framework) — it drives DM shares (~25x weight)".into(),
-                );
-            }
+        Some("shares") if proxies.share_via_dm < 0.15 => {
+            suggestions.push(
+                "Add practical value (how-to, data, framework) — it drives DM shares (~25x weight)".into(),
+            );
         }
-        Some("follows") => {
-            if proxies.profile_click < 0.20 {
-                suggestions.push(
-                    "Add a curiosity gap or credentials — profile clicks are the gateway to follows"
-                        .into(),
-                );
-            }
+        Some("follows") if proxies.profile_click < 0.20 => {
+            suggestions.push(
+                "Add a curiosity gap or credentials — profile clicks are the gateway to follows".into(),
+            );
         }
-        Some("quotes") => {
-            if proxies.quote < 0.15 {
-                suggestions.push(
-                    "Make it quotable — contrarian takes, data points, or short punchy claims"
-                        .into(),
-                );
-            }
+        Some("quotes") if proxies.quote < 0.15 => {
+            suggestions.push(
+                "Make it quotable — contrarian takes, data points, or short punchy claims".into(),
+            );
         }
         _ => {}
     }

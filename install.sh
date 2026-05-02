@@ -31,12 +31,12 @@ if [ -z "$LATEST" ]; then
   exit 1
 fi
 
-URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}-${TARGET}.tar.gz"
+ASSET="${BINARY}-${TARGET}"
+URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
 echo "Downloading xmaster ${LATEST} for ${TARGET}..."
 
 TMPDIR=$(mktemp -d)
-curl -fsSL "$URL" -o "${TMPDIR}/xmaster.tar.gz"
-tar -xzf "${TMPDIR}/xmaster.tar.gz" -C "${TMPDIR}"
+curl -fsSL "$URL" -o "${TMPDIR}/${BINARY}"
 
 # Install to ~/.local/bin or /usr/local/bin
 if [ -d "$HOME/.local/bin" ]; then

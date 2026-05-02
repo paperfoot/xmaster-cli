@@ -124,6 +124,8 @@ Every command returns JSON when piped (or with `--json`). Exit codes are semanti
 | `post` | Post text, media, replies, quotes, polls | `xmaster post "Hello world"` |
 | `reply` | Reply to a post (auto-bypasses API restrictions) | `xmaster reply 1234567890 "Great point"` |
 | `thread` | Post a multi-tweet thread | `xmaster thread "First" "Second" "Third"` |
+| `article preview` | Generate an X Articles-style HTML preview from Markdown | `xmaster article preview draft.md --header-image cover.png -o preview.html` |
+| `article draft` | Save a native X Article draft without publishing | `xmaster article draft draft.md --header-image cover.png` |
 | `delete` | Delete a post | `xmaster delete 1234567890` |
 | `like` | Like a tweet (ID or URL) | `xmaster like 1234567890` |
 | `unlike` | Unlike a tweet | `xmaster unlike 1234567890` |
@@ -140,6 +142,8 @@ xmaster post "Check this" --media photo.jpg             # Attach media (up to 4)
 xmaster post "Best language?" --poll "Rust,Go,Python"   # Create a poll
 xmaster like https://x.com/user/status/1234567890       # URLs work too
 ```
+
+`article preview` and `article draft` are for X Articles, not long posts / Note Tweets. Drafts use Markdown and map to the native Article surface: `#` title, `##`/`###` headings, `**bold**`, `*italic*`, `~~strikethrough~~`, indentation/quotes, numbered/bulleted lists, links, images, video/GIF directives, and embedded X posts. Use `::video[Caption](clip.mp4)`, `::gif[Caption](loop.gif)`, `::post(https://x.com/user/status/123)`, or `::article(https://x.com/i/article/123)` for media and embeds that Markdown does not model directly. Native draft creation uses X's private web Article entity endpoint (`ArticleEntityDraftCreate`) with browser cookies from `xmaster config web-login`; it saves a draft and does not publish.
 
 ### Reading and Discovery
 

@@ -15,6 +15,7 @@ fn shows_help() {
         .success()
         .stdout(predicate::str::contains("199 Biotechnologies"))
         .stdout(predicate::str::contains("post"))
+        .stdout(predicate::str::contains("article"))
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("like"));
 }
@@ -166,6 +167,62 @@ fn unknown_command_fails() {
         .arg("nonexistent")
         .assert()
         .failure();
+}
+
+#[test]
+fn article_preview_generates_html_without_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let draft = dir.path().join("draft.md");
+    let output = dir.path().join("preview.html");
+    std::fs::write(
+        &draft,
+        "# Partial Reprogramming\n\n![Cover](cover.png)\n\n## Why it matters\n\nText with **bold**, *italic*, ~~strike~~, and [X](https://x.com).\n\n- image support\n- list support\n\n::post(https://x.com/user/status/1234567890)\n",
+    )
+    .unwrap();
+
+    xmaster()
+        .args([
+            "article",
+            "preview",
+            draft.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--author",
+            "Boris Djordjevic",
+            "--handle",
+            "longevityboris",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("preview.html"));
+
+    let html = std::fs::read_to_string(output).unwrap();
+    assert!(html.contains("Partial Reprogramming"));
+    assert!(html.contains("class=\"article-cover\""));
+    assert!(html.contains("<strong>bold</strong>"));
+    assert!(html.contains("<em>italic</em>"));
+    assert!(html.contains("<s>strike</s>"));
+    assert!(html.contains("<ul>"));
+    assert!(html.contains("Embedded post"));
+}
+
+#[test]
+fn article_draft_requires_web_cookies_without_publishing() {
+    let dir = tempfile::tempdir().unwrap();
+    let draft = dir.path().join("draft.md");
+    std::fs::write(
+        &draft,
+        "# Native Article\n\nText with **bold** and [X](https://x.com).\n",
+    )
+    .unwrap();
+
+    xmaster()
+        .env("XMASTER_CONFIG_DIR", "/tmp/xmaster-test-no-web-cookies")
+        .args(["article", "draft", draft.to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("web-login"));
 }
 
 // ─── Global Flags ───────────────────────────────────────────────

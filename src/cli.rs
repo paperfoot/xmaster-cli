@@ -231,6 +231,12 @@ pub enum Commands {
         media: Vec<String>,
     },
 
+    /// X Articles tools (separate from long posts / Note Tweets)
+    Article {
+        #[command(subcommand)]
+        action: ArticleCommands,
+    },
+
     /// Reply to a tweet (shorthand for post --reply-to)
     Reply {
         /// Tweet ID or URL to reply to
@@ -444,6 +450,53 @@ pub enum SkillCommands {
     Update,
     /// Show where the skill is installed
     Status,
+}
+
+#[derive(Subcommand)]
+pub enum ArticleCommands {
+    /// Generate an X Articles-style HTML preview from a Markdown draft
+    Preview {
+        /// Markdown draft path, or "-" to read from stdin
+        input: String,
+        /// Output HTML path (default: <input>.preview.html)
+        #[arg(long, short)]
+        output: Option<String>,
+        /// Article title (default: first H1 in the Markdown draft)
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional article subtitle/deck
+        #[arg(long)]
+        subtitle: Option<String>,
+        /// Header/cover image path or URL (default: first image block, if it appears first)
+        #[arg(long)]
+        header_image: Option<String>,
+        /// Display author name
+        #[arg(long, default_value = "Author")]
+        author: String,
+        /// Display handle, with or without @
+        #[arg(long, default_value = "handle")]
+        handle: String,
+        /// Optional avatar image path or URL
+        #[arg(long)]
+        avatar: Option<String>,
+        /// Article audience badge: public or subscribers
+        #[arg(long, default_value = "public")]
+        audience: String,
+        /// Open the generated HTML preview after writing it
+        #[arg(long, default_value = "false")]
+        open: bool,
+    },
+    /// Create a native X Article draft from Markdown without publishing it
+    Draft {
+        /// Markdown draft path, or "-" to read from stdin
+        input: String,
+        /// Article title (default: first H1 in the Markdown draft)
+        #[arg(long)]
+        title: Option<String>,
+        /// Header/cover image path (default: first image block, if it appears first)
+        #[arg(long)]
+        header_image: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

@@ -122,10 +122,10 @@ pub async fn timeline(
     before: Option<&str>,
     sort: Option<&str>,
 ) -> Result<(), XmasterError> {
-    let start_time = since.map(|s| parse_since(s)).transpose()
-        .map_err(|e| XmasterError::Config(e))?;
-    let end_time = before.map(|s| parse_since(s)).transpose()
-        .map_err(|e| XmasterError::Config(e))?;
+    let start_time = since.map(parse_since).transpose()
+        .map_err(XmasterError::Config)?;
+    let end_time = before.map(parse_since).transpose()
+        .map_err(XmasterError::Config)?;
 
     let api = XApi::new(ctx.clone());
     let tweets = match user {
@@ -143,9 +143,9 @@ pub async fn timeline(
     // Client-side sort
     if let Some(sort_by) = sort {
         match sort_by {
-            "impressions" | "views" => list.tweets.sort_by(|a, b| b.impressions.cmp(&a.impressions)),
-            "likes" => list.tweets.sort_by(|a, b| b.likes.cmp(&a.likes)),
-            "retweets" | "rts" => list.tweets.sort_by(|a, b| b.retweets.cmp(&a.retweets)),
+            "impressions" | "views" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.impressions)),
+            "likes" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.likes)),
+            "retweets" | "rts" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.retweets)),
             "date" => {} // already sorted by date from API
             _ => {}
         }
@@ -170,4 +170,3 @@ pub async fn mentions(
     output::render_csv(format, &tweets_to_list(tweets), None);
     Ok(())
 }
-
