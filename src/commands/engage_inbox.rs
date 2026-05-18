@@ -43,11 +43,8 @@ struct InboxTotals {
 
 #[derive(Debug, Serialize)]
 struct EngagementHeuristic {
-    name: String,
-    source: String,
-    source_url: String,
-    rationale: String,
-    caveat: String,
+    name: &'static str,
+    rationale: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,11 +279,9 @@ fn recommend_direct_reply(tweet: &TweetData) -> InboxRecommendation {
         likes: likes(tweet),
         created_at: tweet.created_at.clone(),
         reason: if question {
-            "Question on your post; answering quickly is a strong empirical reciprocity loop"
-                .into()
+            "Question on your post — answer quickly to build the reply-back loop".into()
         } else {
-            "Direct comment on your post; author reply-back is an empirically powerful relationship signal"
-                .into()
+            "Direct comment on your post — author reply-back is a strong reciprocity signal".into()
         },
         text: tweet.text.clone(),
     }
@@ -395,10 +390,7 @@ fn status_url(id: &str) -> String {
 
 fn author_reply_back_heuristic() -> EngagementHeuristic {
     EngagementHeuristic {
-        name: "author_reply_back".into(),
-        source: "Empirical reciprocity heuristic. The May 15 2026 xai-org/x-algorithm release (home-mixer/scorers/ranking_scorer.rs) does NOT contain a separate `reply_engaged_by_author` signal — the 2023 Twitter open-source heavy-ranker term is absent. Author reply-back remains a powerful relationship loop in practice, but it is not a published algorithm weight in 2026.".into(),
-        source_url: "https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/ranking_scorer.rs".into(),
-        rationale: "Authors who reply back create reciprocal engagement loops, build relationships with high-signal accounts, and accumulate the dwell + follow_author signals that Phoenix DOES weight positively. xmaster prioritises replies where this loop is most likely to fire.".into(),
-        caveat: "This is a relationship heuristic, not a published algorithm weight. Use the priority ordering to prioritise which replies to answer first; do not assume a fixed numeric multiplier vs likes.".into(),
+        name: "author_reply_back",
+        rationale: "Replying back to people who replied to you builds a reciprocal engagement loop and accumulates dwell + follow_author signals. Priority ordering, not a fixed weight.",
     }
 }

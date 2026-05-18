@@ -70,20 +70,17 @@ struct Handoff {
 
 #[derive(Serialize)]
 struct AlgorithmInfo {
-    source: String,
-    weights: Vec<SignalWeight>,
-    time_decay_halflife_minutes: u32,
-    out_of_network_reply_penalty: f64,
-    media_hierarchy: Vec<String>,
-    best_posting_hours: String,
-    best_posting_days: String,
+    source: &'static str,
+    signals: Vec<AlgorithmSignal>,
+    media_hierarchy: Vec<&'static str>,
+    best_posting_hours: &'static str,
+    best_posting_days: &'static str,
 }
 
 #[derive(Serialize)]
-struct SignalWeight {
-    signal: String,
-    weight: f64,
-    ratio_to_like: String,
+struct AlgorithmSignal {
+    signal: &'static str,
+    polarity: &'static str, // "positive" | "continuous" | "negative"
 }
 
 impl Tableable for AgentInfo {
@@ -95,11 +92,13 @@ impl Tableable for AgentInfo {
         table.add_row(vec!["Description", &self.description]);
         table.add_row(vec!["Commands", &format!("{} commands", self.commands.len())]);
         table.add_row(vec!["Capabilities", &self.capabilities.join(", ")]);
-        table.add_row(vec!["Algorithm Source", &self.algorithm.source]);
-        table.add_row(vec!["Top Signal", "Follow from post, DM share, Reply (ordering only — magnitudes are runtime params)"]);
-        table.add_row(vec!["Signals", "22 total (17 positive/continuous + 5 negative) — magnitudes all runtime-params; numbers shown are 2023-leak estimates"]);
-        table.add_row(vec!["Best Times", &self.algorithm.best_posting_hours]);
-        table.add_row(vec!["Best Days", &self.algorithm.best_posting_days]);
+        table.add_row(vec!["Algorithm Source", self.algorithm.source]);
+        let pos = self.algorithm.signals.iter().filter(|s| s.polarity == "positive").count();
+        let cont = self.algorithm.signals.iter().filter(|s| s.polarity == "continuous").count();
+        let neg = self.algorithm.signals.iter().filter(|s| s.polarity == "negative").count();
+        table.add_row(vec!["Signals", &format!("{} total ({pos} positive, {cont} continuous, {neg} negative)", self.algorithm.signals.len())]);
+        table.add_row(vec!["Best Times", self.algorithm.best_posting_hours]);
+        table.add_row(vec!["Best Days", self.algorithm.best_posting_days]);
         table.add_row(vec![
             "Measurable Signals",
             &self.measurement_coverage.measurable.join(", "),
@@ -215,45 +214,39 @@ pub fn execute(format: OutputFormat) {
             error: "{ version, status: \"error\", error: { code, message, suggestion } }",
         },
         algorithm: AlgorithmInfo {
-            source: "xai-org/x-algorithm (May 15, 2026 release, Grok-based transformer). The signal LIST is confirmed from home-mixer/scorers/ranking_scorer.rs (22 weighted terms: 17 positive/continuous + 5 negative). EVERY MAGNITUDE BELOW IS A 2023-LEAK-ERA HISTORICAL ESTIMATE kept for relative ordering only — production weights are fetched at request time via the unpublished xai_feature_switches::Params module and are A/B-tested live with no stable public value.".into(),
-            weights: vec![
-                // 22 scorer terms from home-mixer/scorers/ranking_scorer.rs (May 15, 2026).
-                // Magnitudes are HISTORICAL 2023-leak estimates, not live X production values.
-                // The 2023 reply_engaged_by_author signal is ABSENT from the May 2026 source —
-                // do not use it as a tactical anchor.
-                SignalWeight { signal: "follow_author".into(), weight: 30.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "share_via_dm".into(), weight: 25.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "share_via_copy_link".into(), weight: 20.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "share".into(), weight: 15.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "reply".into(), weight: 13.5, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "profile_click".into(), weight: 12.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "click".into(), weight: 11.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "dwell".into(), weight: 10.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "cont_dwell_time".into(), weight: 8.0, ratio_to_like: "historical 2023 estimate; continuous in May 2026 scorer".into() },
-                SignalWeight { signal: "cont_click_dwell_time".into(), weight: 6.0, ratio_to_like: "May 2026 scorer term, no 2023 anchor; runtime-param".into() },
-                SignalWeight { signal: "quote".into(), weight: 8.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "quoted_click".into(), weight: 5.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "quoted_vqv".into(), weight: 3.0, ratio_to_like: "May 2026 scorer term (quoted video quality view); runtime-param".into() },
-                SignalWeight { signal: "photo_expand".into(), weight: 4.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "vqv".into(), weight: 3.0, ratio_to_like: "historical 2023 estimate; gated by MIN_VIDEO_DURATION_MS".into() },
-                SignalWeight { signal: "retweet".into(), weight: 1.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "favorite".into(), weight: 0.5, ratio_to_like: "1x (baseline; demo pipeline uses 1.0 in run_pipeline.py:355-360)".into() },
-                SignalWeight { signal: "not_dwelled".into(), weight: -10.0, ratio_to_like: "May 2026 scorer NEGATIVE term (predicted scroll-past); runtime-param".into() },
-                SignalWeight { signal: "not_interested".into(), weight: -20.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "mute_author".into(), weight: -40.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "block_author".into(), weight: -74.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
-                SignalWeight { signal: "report".into(), weight: -369.0, ratio_to_like: "historical 2023 estimate; live weight runtime-param".into() },
+            source: "xai-org/x-algorithm (May 15, 2026, home-mixer/scorers/ranking_scorer.rs). Weight magnitudes are runtime params, not public.",
+            signals: vec![
+                AlgorithmSignal { signal: "follow_author",         polarity: "positive" },
+                AlgorithmSignal { signal: "share_via_dm",          polarity: "positive" },
+                AlgorithmSignal { signal: "share_via_copy_link",   polarity: "positive" },
+                AlgorithmSignal { signal: "share",                 polarity: "positive" },
+                AlgorithmSignal { signal: "reply",                 polarity: "positive" },
+                AlgorithmSignal { signal: "profile_click",         polarity: "positive" },
+                AlgorithmSignal { signal: "click",                 polarity: "positive" },
+                AlgorithmSignal { signal: "quote",                 polarity: "positive" },
+                AlgorithmSignal { signal: "quoted_click",          polarity: "positive" },
+                AlgorithmSignal { signal: "photo_expand",          polarity: "positive" },
+                AlgorithmSignal { signal: "vqv",                   polarity: "positive" },
+                AlgorithmSignal { signal: "retweet",               polarity: "positive" },
+                AlgorithmSignal { signal: "favorite",              polarity: "positive" },
+                AlgorithmSignal { signal: "dwell",                 polarity: "continuous" },
+                AlgorithmSignal { signal: "cont_dwell_time",       polarity: "continuous" },
+                AlgorithmSignal { signal: "cont_click_dwell_time", polarity: "continuous" },
+                AlgorithmSignal { signal: "quoted_vqv",            polarity: "continuous" },
+                AlgorithmSignal { signal: "not_dwelled",           polarity: "negative" },
+                AlgorithmSignal { signal: "not_interested",        polarity: "negative" },
+                AlgorithmSignal { signal: "mute_author",           polarity: "negative" },
+                AlgorithmSignal { signal: "block_author",          polarity: "negative" },
+                AlgorithmSignal { signal: "report",                polarity: "negative" },
             ],
-            time_decay_halflife_minutes: 0, // No half-life function exists in the May 2026 source. home-mixer/filters/age_filter.rs is a binary Duration cutoff; phoenix/recsys_model.py:33-55,590-604 shows learned post-age buckets (60-min granularity, 4800-min max). Empirical feed decay (~6h) is not algorithmic.
-            out_of_network_reply_penalty: 0.0, // Replaced by OonWeightFactor / TopicOonWeightFactor / NEW_USER_OON_WEIGHT_FACTOR (multiplicative, values unpublished) in home-mixer/scorers/oon_scorer.rs + ranking_scorer.rs:220-239
             media_hierarchy: vec![
-                "text (highest avg engagement, maximises dwell + reply probability)".into(),
-                "native_image (triggers photo_expand_score)".into(),
-                "native_video (requires MIN_VIDEO_DURATION_MS for vqv_score)".into(),
-                "thread (maximises continuous cont_dwell_time_weight)".into(),
+                "text",
+                "native_image",
+                "native_video (>= MIN_VIDEO_DURATION_MS for vqv)",
+                "thread",
             ],
-            best_posting_hours: "8-11 AM local time (empirical, aligns with engagement velocity gate)".into(),
-            best_posting_days: "Tuesday, Wednesday, Thursday (empirical)".into(),
+            best_posting_hours: "8-11 AM local time",
+            best_posting_days: "Tuesday, Wednesday, Thursday",
         },
         measurement_coverage: MeasurementCoverage {
             measurable: vec![
@@ -266,10 +259,10 @@ pub fn execute(format: OutputFormat) {
                 ProxySignal { signal: "share".into(), proxy_method: "quotability + save-worthiness heuristics".into(), confidence: "medium".into() },
                 ProxySignal { signal: "share_via_dm".into(), proxy_method: "insider/practical content markers".into(), confidence: "medium".into() },
                 ProxySignal { signal: "share_via_copy_link".into(), proxy_method: "quotability + data content markers".into(), confidence: "medium".into() },
-                ProxySignal { signal: "dwell".into(), proxy_method: "word count + line breaks (binary 2+ min threshold)".into(), confidence: "high".into() },
+                ProxySignal { signal: "dwell".into(), proxy_method: "word count + line breaks".into(), confidence: "high".into() },
                 ProxySignal { signal: "cont_dwell_time".into(), proxy_method: "estimated read time in seconds".into(), confidence: "medium".into() },
                 ProxySignal { signal: "photo_expand".into(), proxy_method: "media attachment detection".into(), confidence: "high".into() },
-                ProxySignal { signal: "negative_risk".into(), proxy_method: "sentiment + combative tone analysis (Grok does this live since Jan 2026)".into(), confidence: "medium".into() },
+                ProxySignal { signal: "negative_risk".into(), proxy_method: "sentiment + combative tone analysis".into(), confidence: "medium".into() },
             ],
             blind: vec![
                 "report".into(), "block_author".into(), "mute_author".into(),
@@ -280,25 +273,25 @@ pub fn execute(format: OutputFormat) {
         usage_hints: vec![
             "Always run 'xmaster analyze' before posting — it checks for common issues that hurt reach".into(),
             "Use 'xmaster search-ai' over 'xmaster search' — cheaper and smarter (xAI vs X API). Supports from:username for hard author filtering (e.g. 'xmaster search-ai \"from:elonmusk AI\"')".into(),
-            "Reply to larger accounts in your niche — and REPLY BACK when people reply to you. Author reply-back is an empirically strong reciprocity loop, but the May 15 2026 ranking_scorer.rs does NOT contain a `reply_engaged_by_author` term — treat reply-back as a community/relationship heuristic, not a published weight".into(),
-            "Create content people want to DM to friends — share_via_dm is one of the top scoring signals in weighted_scorer.rs".into(),
-            "Never put external links in the main tweet body — non-Premium gets near-zero reach, Premium loses 30-50%. Links go in the first reply".into(),
-            "Space posts 2+ hours apart — home-mixer/scorers/author_diversity_scorer.rs applies exponential decay (1-floor)*decay^position+floor for repeated authors. The decay/floor values are runtime params (unpublished); empirically this means your 3rd+ post in a feed session is heavily discounted, but the '2-3 posts per session' specific cap is not in code".into(),
-            "DAILY CAP (empirical, not in code): ≤4 STANDALONE posts per 24h is xmaster's editorial heuristic — no daily-cap rule exists in the May 15 2026 source. Replies do NOT count against this heuristic. For small accounts, heavy replying is empirically better than heavy posting".into(),
-            "THREADS (May 2026 mechanism): home-mixer/filters/dedup_conversation_filter.rs keeps only the HIGHEST-SCORED tweet per conversation per viewer. Long self-threads dilute their own best candidate — every extra tweet is another candidate competing for the same conversation slot. '~80% drop on tweet 5+' is an empirical pattern, not a coded per-position rule. Keep threads ≤4 or split into separate standalone posts".into(),
-            "ARTICLES (empirical, not in code): no Article-specific scoring is in the open-source release. xmaster's long-form heuristics are editorial advice based on observed contest-winning posts (Jan 2026 $1M Article Contest: @beaverd $1M, @KobeissiLetter $500K, @thedankoe $250K — pattern: timely angle + named subjects + specific numbers + clear payoff)".into(),
-            "LONG-FORM POSTS (>280 chars, Premium): xmaster auto-routes through CreateNoteTweet for Premium accounts. 500-2000 char sweet spot is EMPIRICAL (no length-scoring in the open source). Beyond 2000, prefer Articles (no coded boost, just contest-pattern observation). 'xmaster analyze' runs long-form preview-hook, scannability, and payoff-density checks".into(),
-            "LONG-FORM STRUCTURE (2026 winners): hook in first 280 chars (that's all the feed shows before 'show more'), then short paragraphs (2-4 lines), data points or named subjects every ~500 chars, payoff/CTA at the end. Wall-of-text dies — readers scan, not read. xmaster analyze flags weak-preview, wall-of-text, and low-density issues for long drafts".into(),
-            "LONG-FORM EXEMPLARS: 'xmaster inspire --long' surfaces high-impression long-form posts already in your discovered library. Seed it by running 'xmaster search-ai' or 'xmaster timeline --user' on long-form practitioners (e.g. @beaverd, @KobeissiLetter, @thedankoe, @nickshirleyy, @wolfejosh, @ryanhallyall — 2026 contest winners) — every search/timeline auto-populates discovered_posts".into(),
-            "LONG-FORM COVER IMAGES: X Articles render with a preview card; covers boost click-through. Generate one via the nanaban CLI (default model is gpt-image-2): `nanaban \"<prompt>\" --ar 3:2` for the standard preview-card aspect ratio. Keep prompts editorial — title-card style, not abstract art".into(),
-            "ARTICLE PREVIEW: Articles are not long posts / Note Tweets. Use `xmaster article preview draft.md --header-image cover.png --author \"Name\" --handle username -o preview.html` to render the separate X Articles surface locally. Markdown maps to the official Article feature set: header image, headings/subheadings, bold, italic, strikethrough, indentation, numbered/bulleted lists, images, video/GIF directives, embedded posts/Articles, and links".into(),
-            "ARTICLE DRAFTS: `xmaster article draft draft.md --header-image cover.png` saves a native, unpublished X Article draft through the current private web Article entity endpoint (`ArticleEntityDraftCreate`). It requires browser cookies from `xmaster config web-login`; it is not the public `/2/tweets` API and it is not CreateNoteTweet".into(),
-            "LONG-FORM TIMING: post during the in-network peak (Tue–Thu, 9–11 AM author-local for desk audiences; 7–9 PM for general). Long-form needs more dwell, so a slow-feed window is fine — but the first 30-min velocity rule still applies, so be ready to engage replies. Avoid Mon mornings (timeline rebuild) and Fri afternoon (drop-off)".into(),
-            "QUOTE TWEETS: a quote enters the in-network candidate pool of YOUR followers via home-mixer/sources/thunder_source.rs:33-43 (Thunder serves from following_user_ids). Replies mostly travel through the OP's audience pool. Use 'xmaster post \"your take\" --quote <id>' when extending an idea — the in-network reach is mechanistic, not just empirical".into(),
-            "PREMIUM (empirical, not in code): xmaster's ~2-3x reach claim has NO algorithmic anchor in the open-source release. home-mixer/filters/ineligible_subscription_filter.rs is an ACCESS filter (gates paywalled content viewers can't see), not a score multiplier. Premium reach gains are real but the mechanism is invisible in the open source".into(),
-            "SMALL-ACCOUNT GROWTH (<1k followers, empirical): run replies-heavy. Grox spam classifier at grox/tasks/task_spam_detection.py:17-29 buckets reply chains by BOTH parent and root author follower count (≤100/≤500/≤1000/>1000). A reply under a small-account chain is at higher spam risk than the same reply under a large-account root — so prefer replying to LARGER accounts in your niche. Use 'xmaster engage swarm <big-post-id>' to find peer-to-peer threads, but quality-gate every reply".into(),
-            "REPLY QUALITY (empirical): short generic replies ('great post', '100%', 'this') get no algorithmic push. The May 15 2026 source has no literal phrase/length rule, but Grox has an LLM-based reply ranking classifier (grox/classifiers/content/reply_ranking.py) and a spam-comment classifier — generic replies score badly on both. xmaster analyze flags these in reply mode".into(),
-            "FIRST 30-60 MINUTES (empirical, not in code): no distribution-gate stage exists in the open-source pipeline. Phoenix age enters as learned post-age buckets (60-min granularity, 4800-min max per phoenix/recsys_model.py:33-55), so recency IS a model feature but no specific '1500 candidates / 30-60 min window' rule ships with the open source. Treat as empirical pacing advice".into(),
+            "Reply to larger accounts in your niche, and reply back when people reply to you — author reply-back is a strong reciprocity loop".into(),
+            "Create content people want to DM to friends — share_via_dm is a top scoring signal".into(),
+            "Never put external links in the main tweet body — links reduce reach. Put them in the first reply".into(),
+            "Space posts 2+ hours apart — author_diversity_scorer.rs decays repeated authors per feed pass".into(),
+            "DAILY CAP: ≤4 standalone posts per 24h. Replies don't count — heavy replying beats heavy posting for small accounts".into(),
+            "THREADS: dedup_conversation_filter.rs keeps only the highest-scored tweet per conversation. Long threads dilute their own hook. Keep to ≤4, or split into standalones".into(),
+            "ARTICLES: a strong long-form format. Winners (Jan 2026 $1M Article Contest: @beaverd, @KobeissiLetter, @thedankoe) all hit: timely angle + named subjects + specific numbers + clear payoff".into(),
+            "LONG-FORM POSTS (>280 chars, Premium): xmaster auto-routes through CreateNoteTweet for Premium accounts. 500-2000 char sweet spot. Beyond 2000, prefer Articles. 'xmaster analyze' runs long-form preview-hook, scannability, and payoff-density checks".into(),
+            "LONG-FORM STRUCTURE: hook in first 280 chars (only this surfaces in the feed before 'show more'), then short paragraphs (2-4 lines), data points or named subjects every ~500 chars, payoff/CTA at end. xmaster analyze flags weak-preview, wall-of-text, low-density issues for long drafts".into(),
+            "LONG-FORM EXEMPLARS: 'xmaster inspire --long' surfaces high-impression long-form posts from your local library. Seed it by running 'xmaster timeline --user @beaverd' (etc.) on long-form practitioners — every search/timeline auto-populates discovered_posts".into(),
+            "LONG-FORM COVER IMAGES: generate via the nanaban CLI: `nanaban \"<title-card prompt>\" --ar 3:2`".into(),
+            "ARTICLE PREVIEW: Articles are NOT long posts / Note Tweets. Render locally with `xmaster article preview draft.md --header-image cover.png --author \"Name\" --handle username -o preview.html`. Markdown maps to the official Article feature set (headings, bold, italic, lists, images, video/GIF, embedded posts/Articles, links)".into(),
+            "ARTICLE DRAFTS: `xmaster article draft draft.md --header-image cover.png` saves an unpublished Article draft via the private web endpoint (`ArticleEntityDraftCreate`). Requires `xmaster config web-login` for cookies; NOT `/2/tweets` and NOT CreateNoteTweet".into(),
+            "LONG-FORM TIMING: post in the in-network peak (Tue–Thu, 9–11 AM author-local for desk audiences; 7–9 PM for general). Be ready to engage replies in the first 30 min. Avoid Mon mornings (timeline rebuild) and Fri afternoon (drop-off)".into(),
+            "QUOTE TWEETS: quotes enter the in-network candidate pool of YOUR followers (thunder_source.rs serves from following_user_ids). Replies travel through the OP's audience pool. Use 'xmaster post \"your take\" --quote <id>' when extending an idea".into(),
+            "PREMIUM: ~2-3x organic reach in practice. The mechanism is not in the open source but the effect is real".into(),
+            "SMALL-ACCOUNT GROWTH (<1k followers): replies-heavy. Grox's spam classifier (grox/tasks/task_spam_detection.py) buckets reply chains by BOTH parent and root author follower count (≤100/≤500/≤1000/>1000) — replies under small-account chains carry higher spam risk. Prefer replying to LARGER accounts in your niche; quality-gate every reply".into(),
+            "REPLY QUALITY: short generic replies ('great post', '100%', 'this') score poorly on Grok's reply-ranking classifier and rarely earn a reply-back. xmaster analyze flags these in reply mode".into(),
+            "FIRST 30-60 MINUTES: initial traction window matters — Phoenix age enters as learned post-age buckets. Time posts when your audience is online".into(),
             "Use 'xmaster timeline --sort impressions' to find your best-performing posts".into(),
             "Use 'xmaster timeline --since 24h' to check recent post performance".into(),
             "Use 'xmaster engage recommend --topic \"your niche\"' to find high-ROI reply targets".into(),
