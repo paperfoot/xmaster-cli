@@ -205,7 +205,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         issues.push(Issue {
             severity: Severity::Critical,
             code: "link_in_body".into(),
-            message: "External link in tweet body kills reach — non-Premium accounts get near-zero engagement, Premium accounts lose 30-50% reach (Q1 2026 data)".into(),
+            message: "External link in tweet body — empirical pattern: links in the body track with materially lower reach (no specific multiplier is coded in the May 15 2026 open-source release; the practical convention is to put the link in a reply)".into(),
             fix: Some("Move the link to a reply instead".into()),
         });
         score -= 30;
@@ -508,7 +508,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                     "{} chars — beyond optimal dwell band; readers drop off and the note-tweet preview truncates",
                     features.char_count
                 ),
-                fix: Some("Split into 2 long-form posts 2h apart, or publish as a native Article (Premium feature, currently boosted)".into()),
+                fix: Some("Split into 2 long-form posts 2h apart, or publish as a native Article (Premium feature). Note: no coded Article boost exists in the May 15 2026 source — this is editorial pattern advice".into()),
             });
             score -= 10;
         }

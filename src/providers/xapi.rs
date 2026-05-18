@@ -590,6 +590,13 @@ impl XApi {
     ) -> Result<(Vec<T>, Option<Value>), XmasterError> {
         let val = self.request(method, url, body).await?;
 
+        // Empty response body (e.g. home timeline on free tier, or an
+        // account with no eligible feed) deserializes to Value::Null. Treat
+        // that as an empty result rather than a JSON shape error.
+        if val.is_null() {
+            return Ok((Vec::new(), None));
+        }
+
         // Grab includes before consuming val
         let includes = val.get("includes").cloned();
 

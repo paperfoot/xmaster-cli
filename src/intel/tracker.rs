@@ -714,6 +714,9 @@ impl PostTracker {
     pub fn tracking_status(&self) -> Result<TrackStatus, XmasterError> {
         let now_ts = Utc::now().timestamp();
 
+        // CAST snapshot_at to INTEGER: older DBs (created by tracker.rs's
+        // original CREATE TABLE) may store snapshot_at as TEXT despite the
+        // current schema declaring INTEGER. See note in store.rs:405-409.
         let mut stmt = self
             .conn
             .prepare(
@@ -721,7 +724,7 @@ impl PostTracker {
                         SUBSTR(p.text, 1, 60) AS preview,
                         p.posted_at,
                         (SELECT COUNT(*) FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id) AS snap_count,
-                        (SELECT MAX(ms.snapshot_at) FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id) AS last_snap,
+                        (SELECT CAST(MAX(ms.snapshot_at) AS INTEGER) FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id) AS last_snap,
                         (SELECT ms.impressions FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id ORDER BY ms.id DESC LIMIT 1),
                         (SELECT CASE WHEN ms.impressions > 0
                                      THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0 / ms.impressions
