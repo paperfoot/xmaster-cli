@@ -217,7 +217,7 @@ Posts are stored in local SQLite. No X Ads API needed. The launchd daemon fires 
 | `engage watchlist add` | Track accounts without following | `xmaster engage watchlist add elonmusk` |
 | `engage watchlist list` | List watched accounts | `xmaster engage watchlist list` |
 
-`engage inbox` is the post-launch check: it pulls root replies, quote tweets, and replies under those quote tweets, then ranks likely reply-back opportunities. It uses the historical open Twitter heavy-ranker `reply_engaged_by_author` weight (75.0 vs likes at 0.5, roughly 150x) as a prioritization heuristic, not a guaranteed live X constant.
+`engage inbox` is the post-launch check: it pulls root replies, quote tweets, and replies under those quote tweets, then ranks likely reply-back opportunities as a reciprocity heuristic.
 
 The opportunity scorer ranks targets by reciprocity, reply ROI, size fit (adaptive to your follower count), topicality, and freshness.
 

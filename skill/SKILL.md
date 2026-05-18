@@ -42,9 +42,7 @@ xmaster engage feed "longevity biotech" --min-followers 5000 --max-age-mins 60
 # After publishing, inspect the full conversation surface:
 xmaster engage inbox <post_id> --json
 # Checks root replies, quote tweets, and replies under quote tweets.
-# Prioritizes author reply-back opportunities using the historical
-# open Twitter heavy-ranker heuristic: reply_engaged_by_author 75.0
-# vs likes 0.5 (~150x). Treat as a heuristic, not a live guarantee.
+# Prioritizes author reply-back opportunities (reciprocity heuristic).
 
 # Or find accounts to build relationships with:
 xmaster engage recommend --topic "longevity" --min-followers 1000

@@ -727,7 +727,7 @@ impl IntelStore {
 
     /// Query the discovered posts library with optional filters.
     /// `min_chars` filters by raw text length — pass `Some(500)` to surface
-    /// long-form / Article-candidate exemplars (2026 dwell-time sweet spot).
+    /// long-form / Article-candidate exemplars (>=500 chars).
     pub fn query_discovered_posts(
         &self,
         topic: Option<&str>,

@@ -371,9 +371,7 @@ pub enum Commands {
     },
 
     /// Browse your discovered posts library for content inspiration.
-    /// Use --long to surface long-form / Article-candidate exemplars (>=500 chars,
-    /// 2026 dwell-time sweet spot — see `agent-info` for the X $1M Article Contest
-    /// winners and the writing patterns that drove their reach).
+    /// Use --long to surface long-form / Article-candidate exemplars (>=500 chars).
     Inspire {
         /// Filter by topic (searches post text)
         #[arg(long)]
