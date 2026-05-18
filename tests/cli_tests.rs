@@ -333,3 +333,88 @@ fn report_daily_no_panic() {
         "Should return valid JSON envelope, got stdout: {stdout}; stderr: {stderr}"
     );
 }
+
+// ─── Algorithm honesty regression guards (v1.6.7) ───────────────
+// These tests prevent reintroduction of false 2023-era / pre-May-15-2026
+// claims about the X algorithm. If you find yourself wanting to disable one
+// of these, re-read the May 15 2026 source FIRST: a claim like
+// `reply_engaged_by_author ~150x` simply does not appear in the open release.
+
+#[test]
+fn agent_info_does_not_claim_150x_anywhere() {
+    let output = xmaster()
+        .arg("agent-info")
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("~150x"),
+        "agent-info must not advertise ~150x as a live algorithm weight (signal does not exist in May 15 2026 source). Got: {stdout}"
+    );
+}
+
+#[test]
+fn agent_info_does_not_claim_360_min_halflife() {
+    let output = xmaster()
+        .arg("agent-info")
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\"time_decay_halflife_minutes\": 360"),
+        "agent-info must not claim a 360-minute time-decay halflife — no such function exists in the May 15 2026 source (only AgeFilter binary cutoff + Phoenix learned post-age buckets)"
+    );
+}
+
+#[test]
+fn agent_info_lists_may_2026_scorer_terms() {
+    // The May 15 2026 ranking_scorer.rs has 22 weighted terms. xmaster should
+    // expose all the ones it claims to model, including the three the 2023
+    // leak did not contain.
+    let output = xmaster()
+        .arg("agent-info")
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for term in &["not_dwelled", "quoted_vqv", "cont_click_dwell_time"] {
+        assert!(
+            stdout.contains(term),
+            "agent-info JSON must list May 2026 scorer term `{term}` — it was missing before v1.6.7. Got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn analyze_no_question_message_does_not_claim_150x() {
+    // Score a post without a question and confirm the "no question" message
+    // does not advertise a fabricated ~150x weight.
+    let output = xmaster()
+        .args(["analyze", "Just shipped a new feature.", "--json"])
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("150x") && !stdout.contains("reply_engaged_by_author"),
+        "preflight analyze output must not cite reply_engaged_by_author / 150x — that signal is not in May 15 2026 source. Got: {stdout}"
+    );
+}
+
+#[test]
+fn analyze_long_post_no_fake_algo_doc_citation() {
+    // Trigger the long-form code path and verify no `algo doc 06` or
+    // `OpenTweet 2026` fake citation appears in any issue message.
+    let long_text = "a".repeat(900);
+    let output = xmaster()
+        .args(["analyze", &long_text, "--json"])
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("algo doc 06"),
+        "preflight must not cite fake `algo doc 06 §7` source. Got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("OpenTweet 2026"),
+        "preflight must not cite fake `OpenTweet 2026` source. Got: {stdout}"
+    );
+}

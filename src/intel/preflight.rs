@@ -1,17 +1,28 @@
 use serde::Serialize;
 
 /// Heuristic post quality analysis. Checks for common patterns that hurt or
-/// help reach based on estimated 2026 X algorithm signals. This is NOT a direct
-/// algorithm score — it's a quality lint.
+/// help reach based on the May 15, 2026 X algorithm signals. This is NOT a
+/// direct algorithm score — it's a quality lint.
 ///
-/// Reference: xai-org/x-algorithm (January 2026, Grok-based transformer).
-/// Exact weight constants are NOT published. Estimates below from code structure
-/// + empirical data.
+/// Reference: xai-org/x-algorithm (May 15, 2026 release, Grok-based transformer).
+/// Exact weight magnitudes are NOT published — every weight is fetched at
+/// request time via the unpublished `xai_feature_switches::Params` module and
+/// is A/B-tested live. The signal LIST below is confirmed from
+/// home-mixer/scorers/ranking_scorer.rs (22 terms total).
 ///
-/// Top positive signals (estimated): follow_author (~30x), share_via_dm (~25x),
-///   reply (~20x), share_via_copy_link (~20x), quote (~18x), profile_click (~12x)
-/// Negative signals: report (~-369x), block (~-74x), mute (~-40x), not_interested (~-20x)
-pub const ALGORITHM_SOURCE: &str = "xai-org/x-algorithm (January 2026, Grok-based)";
+/// Positive/continuous (17): follow_author, share_via_dm, share_via_copy_link,
+///   share, reply, profile_click, click, dwell, cont_dwell_time,
+///   cont_click_dwell_time, quote, quoted_click, quoted_vqv, photo_expand,
+///   vqv (gated by min video duration), retweet, favorite.
+/// Negative (5): not_dwelled (predicted scroll-past penalty), not_interested,
+///   mute_author, block_author, report.
+///
+/// Note: the 2023 author-reply-back signal that xmaster previously cited as
+/// the strongest positive weight does NOT appear anywhere in the May 15 2026
+/// source. Reply-back from the original author is still an empirically
+/// powerful reciprocity loop, but treat it as a relationship heuristic, not a
+/// published algorithm weight.
+pub const ALGORITHM_SOURCE: &str = "xai-org/x-algorithm (May 15, 2026, Grok-based)";
 
 // ---------------------------------------------------------------------------
 // Context passed into analyze()
@@ -281,7 +292,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         issues.push(Issue {
             severity: Severity::Info,
             code: "no_question".into(),
-            message: "No question mark — questions drive replies (reply_engaged_by_author is +75, the single highest signal)".into(),
+            message: "No question mark — questions drive replies, one of the top positive Phoenix scorer terms (`reply_score` in ranking_scorer.rs)".into(),
             fix: Some("Consider ending with a question to invite discussion".into()),
         });
         score -= 5;
@@ -331,11 +342,14 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score += 5;
     }
 
-    // --- Author diversity + daily cap warnings ---
-    // The algorithm only shows 2-3 of your posts per feed session, and 2026
-    // spam-flag heuristics treat >4 standalone posts/day as suspicious. Check
-    // the store for recent posting velocity. Replies are exempt from the daily
-    // cap — heavy replying is fine (the Feb 2026 algorithm update rewards it).
+    // --- Author diversity + daily cap warnings (empirical heuristics, not coded rules) ---
+    // home-mixer/scorers/author_diversity_scorer.rs applies exponential decay
+    // (1-floor)*decay^position+floor for repeated authors — decay/floor are
+    // runtime params, so the practical "2-3 posts per session" framing is an
+    // empirical translation, not a hard cap. The ">4 posts/day spam-flag" and
+    // "30-60 min distribution gate" similarly are NOT in the open-source source —
+    // they are xmaster's editorial pacing heuristics. Replies are exempt
+    // either way (no posting cadence rule applies to replies in the source).
     if !ctx.is_reply() {
         if let Ok(store) = crate::intel::store::IntelStore::open() {
             if let Ok(velocity) = store.get_recent_post_velocity() {
@@ -344,10 +358,10 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                         severity: Severity::Critical,
                         code: "daily_cap_exceeded".into(),
                         message: format!(
-                            "{} standalone posts in last 24h — 2026 spam heuristic flags >4/day, harming future reach. Posting now risks account-score damage",
+                            "{} standalone posts in last 24h — xmaster's editorial heuristic flags >4/day as likely diminishing returns (NOT a coded rule in the May 15 2026 source)",
                             velocity.standalone_24h
                         ),
-                        fix: Some("Stop posting today. Reply to others instead — replies don't count toward the cap and drive the highest signal (reply_engaged_by_author ~150x a like)".into()),
+                        fix: Some("Reply to others instead — replies don't count toward this heuristic and reply-engagement is a top positive Phoenix scorer term".into()),
                     });
                     score -= 30;
                 } else if velocity.posts_6h >= 3 {
@@ -355,7 +369,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                         severity: Severity::Warning,
                         code: "author_diversity_penalty".into(),
                         message: format!(
-                            "{} posts in the last 6h — author diversity scorer limits you to 2-3 per feed session, extra posts dilute your average without adding reach",
+                            "{} posts in the last 6h — author_diversity_scorer.rs applies exponential decay for repeated-author candidates per feed pass; extra posts compete with your own earlier ones for diminishing reach",
                             velocity.posts_6h
                         ),
                         fix: Some("Wait at least 2 hours between posts — fewer, better posts outperform high volume".into()),
@@ -366,7 +380,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                         severity: Severity::Info,
                         code: "recent_post".into(),
                         message: format!(
-                            "You posted {} time(s) in the last hour — the algorithm's 30-60 min distribution gate means your previous post may still be in its critical traction window",
+                            "You posted {} time(s) in the last hour — empirical pattern: your previous post may still be in its initial traction window. No coded distribution-gate exists in the open-source release",
                             velocity.posts_1h
                         ),
                         fix: Some("Consider waiting — posting now may split attention from your previous post's traction window".into()),
@@ -422,7 +436,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 severity: Severity::Warning,
                 code: "reply_too_short".into(),
                 message: format!(
-                    "Reply is {} chars — 2026 update: short replies get no push and rarely earn a reply-back (the ~150x signal)",
+                    "Reply is {} chars — short replies score poorly on Grok's reply-quality classifier (grox/classifiers/content/reply_ranking.py) and rarely earn a reply-back, which is an empirically powerful reciprocity loop",
                     features.char_count
                 ),
                 fix: Some("Expand to 1-2 sentences with a specific detail the author can respond to".into()),
@@ -460,11 +474,15 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
     }
 
     // --- Long-form (note tweet / Article candidate) heuristics ---
-    // Triggered above 500 chars. Single long-form posts now get a distribution
-    // edge over multi-tweet threads (algo doc 06 §7, OpenTweet 2026), and X is
-    // actively boosting Articles (Jan 2026 $1M Article Contest, won by data-dense
-    // investigative pieces — @beaverd, @KobeissiLetter, @thedankoe). The dwell
-    // band of 500–2000 chars is the empirical sweet spot.
+    // Triggered above 500 chars. EMPIRICAL pattern observed in contest-winning
+    // posts: a single long-form post can capture more dwell than a multi-tweet
+    // thread because home-mixer/filters/dedup_conversation_filter.rs only
+    // surfaces the highest-scored tweet per conversation. There is NO Article-
+    // specific score boost in the open-source May 15 2026 source (the only
+    // reference is article_id: None placeholders in update_served_history_side_effect.rs).
+    // The 500-2000 char sweet spot is editorial advice from observed
+    // contest winners (Jan 2026 $1M Article Contest: @beaverd, @KobeissiLetter,
+    // @thedankoe — data-dense investigations), NOT a coded length-scorer.
     if features.char_count > 500 {
         // a) Sweet-spot reward (500–2000 chars).
         if features.char_count <= 2000 {
@@ -476,10 +494,10 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 severity: Severity::Info,
                 code: "long_form_above_band".into(),
                 message: format!(
-                    "{} chars — past the 500–2000 dwell sweet spot. Still works as a note tweet, but consider publishing as an Article (boosted in 2026, won the $1M contest)",
+                    "{} chars — past the 500-2000 empirical dwell sweet spot. Still works as a note tweet, but Article format (cover preview card) typically gets better click-through on long-form content",
                     features.char_count
                 ),
-                fix: Some("Trim to <=2000 chars, or publish via the Articles feature for the boost + cover image preview-card".into()),
+                fix: Some("Trim to <=2000 chars, or publish via the Articles feature for the cover-image preview card. Note: no coded Article boost exists in the May 15 2026 source — this is editorial pattern advice".into()),
             });
         }
         if features.char_count > 5000 {
@@ -1090,7 +1108,7 @@ fn suggest_improvements(
         Some("replies") => {
             if !features.has_question {
                 suggestions.push(
-                    "Add a question — questions are the #1 driver of replies (~20x weight)".into(),
+                    "Add a question — questions are the #1 driver of replies, which is one of the top positive Phoenix scorer terms".into(),
                 );
             }
             if proxies.reply < 0.30 {
@@ -1118,7 +1136,7 @@ fn suggest_improvements(
         }
         Some("shares") if proxies.share_via_dm < 0.15 => {
             suggestions.push(
-                "Add practical value (how-to, data, framework) — it drives DM shares (~25x weight)".into(),
+                "Add practical value (how-to, data, framework) — DM shares are one of the strongest positive Phoenix scorer terms".into(),
             );
         }
         Some("follows") if proxies.profile_click < 0.20 => {
@@ -1148,7 +1166,7 @@ fn suggest_improvements(
 
     if features.content_type_guess == "data" || features.content_type_guess == "how-to" {
         suggestions.push(
-            "This looks DM-shareable — insider data and how-tos drive share_via_dm (~25x signal)"
+            "This looks DM-shareable — insider data and how-tos drive share_via_dm, one of the top positive Phoenix scorer terms"
                 .into(),
         );
     }

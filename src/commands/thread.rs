@@ -98,13 +98,15 @@ pub async fn execute(
         }
     }
 
-    // 2026 algorithm update: threads drop off after 4 tweets. The feed splits
-    // long threads into separate items, and impressions on tweets 5+ fall ~80%
-    // vs the previous bundle-delivery behaviour (source: community analysis
-    // of the Jan 2026 home-mixer rewrite). Warn the user before posting.
+    // May 15 2026 mechanism: home-mixer/filters/dedup_conversation_filter.rs
+    // keeps only the HIGHEST-SCORED tweet per conversation per viewer. Long
+    // self-threads dilute their own best candidate — every extra tweet is
+    // another candidate competing for the same conversation slot. The
+    // empirical late-tweet drop-off pattern is real but the mechanism
+    // is dedup-by-conversation, not per-position decay.
     if texts.len() > 4 {
         warnings.push(format!(
-            "[WARN] thread_too_long: {} tweets — 2026 feed split means tweets 5+ drop ~80% reach. Consider: (a) posting the first 4 now, (b) repurposing the rest as a standalone post 2h later, or (c) posting it as an Article (boosted format for Premium accounts)",
+            "[WARN] thread_too_long: {} tweets — dedup_conversation_filter.rs keeps only the highest-scored tweet per conversation per viewer, so extra thread tweets compete with your hook for the same slot. Consider: (a) posting the first 4 now, (b) repurposing the rest as a standalone post 2h later, or (c) publishing as an Article",
             texts.len()
         ));
     }

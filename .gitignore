@@ -39,3 +39,9 @@ tarpaulin-report.html
 .team-runs/
 docs/x-algorithm-analysis/*.tar.gz
 thoughts/
+
+# Ritalin obligation ledger (local proofs, not committed)
+.ritalin/
+
+# Background task harness markers
+.task-incomplete

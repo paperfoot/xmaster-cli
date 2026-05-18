@@ -6,9 +6,6 @@ use crate::providers::xapi::{TweetData, TweetLookup, XApi};
 use serde::Serialize;
 use std::sync::Arc;
 
-const REPLY_ENGAGED_BY_AUTHOR_WEIGHT: f64 = 75.0;
-const LIKE_WEIGHT: f64 = 0.5;
-
 #[derive(Debug, Serialize)]
 struct EngageInboxResult {
     source_tweet_id: String,
@@ -49,9 +46,7 @@ struct EngagementHeuristic {
     name: String,
     source: String,
     source_url: String,
-    reply_engaged_by_author_weight: f64,
-    like_weight: f64,
-    ratio_to_like: String,
+    rationale: String,
     caveat: String,
 }
 
@@ -236,7 +231,7 @@ pub async fn execute(
         source_tweet_id,
         root_metrics,
         totals,
-        heuristic: reply_engaged_by_author_heuristic(),
+        heuristic: author_reply_back_heuristic(),
         recommendations,
         quote_threads,
         suggested_next_commands,
@@ -287,9 +282,10 @@ fn recommend_direct_reply(tweet: &TweetData) -> InboxRecommendation {
         likes: likes(tweet),
         created_at: tweet.created_at.clone(),
         reason: if question {
-            "Question on your post; answer fast to create an author reply-back loop".into()
+            "Question on your post; answering quickly is a strong empirical reciprocity loop"
+                .into()
         } else {
-            "Direct comment on your post; author reply-back is a high-value engagement signal"
+            "Direct comment on your post; author reply-back is an empirically powerful relationship signal"
                 .into()
         },
         text: tweet.text.clone(),
@@ -397,17 +393,12 @@ fn status_url(id: &str) -> String {
     format!("https://x.com/i/status/{id}")
 }
 
-fn reply_engaged_by_author_heuristic() -> EngagementHeuristic {
+fn author_reply_back_heuristic() -> EngagementHeuristic {
     EngagementHeuristic {
-        name: "reply_engaged_by_author".into(),
-        source: "Twitter open-source heavy-ranker README, April 5 2023 weights".into(),
-        source_url: "https://github.com/twitter/the-algorithm-ml/blob/main/projects/home/recap/README.md".into(),
-        reply_engaged_by_author_weight: REPLY_ENGAGED_BY_AUTHOR_WEIGHT,
-        like_weight: LIKE_WEIGHT,
-        ratio_to_like: format!(
-            "~{}x a like",
-            (REPLY_ENGAGED_BY_AUTHOR_WEIGHT / LIKE_WEIGHT).round() as u64
-        ),
-        caveat: "Historical open-model weight, not a guaranteed live X production constant; use it to prioritize replies, not as an exact score.".into(),
+        name: "author_reply_back".into(),
+        source: "Empirical reciprocity heuristic. The May 15 2026 xai-org/x-algorithm release (home-mixer/scorers/ranking_scorer.rs) does NOT contain a separate `reply_engaged_by_author` signal — the 2023 Twitter open-source heavy-ranker term is absent. Author reply-back remains a powerful relationship loop in practice, but it is not a published algorithm weight in 2026.".into(),
+        source_url: "https://github.com/xai-org/x-algorithm/blob/main/home-mixer/scorers/ranking_scorer.rs".into(),
+        rationale: "Authors who reply back create reciprocal engagement loops, build relationships with high-signal accounts, and accumulate the dwell + follow_author signals that Phoenix DOES weight positively. xmaster prioritises replies where this loop is most likely to fire.".into(),
+        caveat: "This is a relationship heuristic, not a published algorithm weight. Use the priority ordering to prioritise which replies to answer first; do not assume a fixed numeric multiplier vs likes.".into(),
     }
 }
