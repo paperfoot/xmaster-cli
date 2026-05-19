@@ -178,6 +178,19 @@ pub async fn execute(
     goal: Option<&str>,
     reply_to: Option<&str>,
 ) -> Result<(), XmasterError> {
+    // Auto-detect: if the input is a tweet ID or X URL, fetch the actual
+    // content. For Article wrappers (text = single t.co), enrich via
+    // FxTwitter and analyze the Article body instead of the t.co link.
+    // Friction-free: agents don't need a separate command to score a post.
+    let resolved_text = if let Some(id) = parse_tweet_reference(text) {
+        match resolve_post_content(&app, &id).await {
+            Ok(content) => content,
+            Err(_) => text.to_string(), // fall back to raw text on failure
+        }
+    } else {
+        text.to_string()
+    };
+
     let premium = app.config.account.premium;
     let voice = if app.config.style.voice.is_empty() { None } else { Some(app.config.style.voice.clone()) };
     let mode = reply_to.map(|_| PostMode::Reply);
@@ -188,8 +201,56 @@ pub async fn execute(
         author_voice: voice,
         ..Default::default()
     };
-    let result = preflight::analyze(text, &ctx);
+    let result = preflight::analyze(&resolved_text, &ctx);
     let display = AnalyzeDisplay { result, premium };
     output::render(format, &display, None);
     Ok(())
+}
+
+/// Detects whether the input refers to a tweet (numeric ID or X URL).
+/// Returns the bare tweet ID if so. None for free-form text.
+fn parse_tweet_reference(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    // URL form: https://x.com/<user>/status/<id> or twitter.com variant
+    if let Some(idx) = trimmed.find("/status/") {
+        let tail = &trimmed[idx + "/status/".len()..];
+        let id: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if id.len() >= 15 {
+            return Some(id);
+        }
+    }
+    // Numeric ID form (X tweet IDs are 18-19 digits today; allow 15+)
+    if trimmed.len() >= 15
+        && trimmed.len() <= 25
+        && trimmed.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
+/// Fetch a post by ID. If the body is an Article wrapper, enrich with
+/// FxTwitter so preflight scores the actual Article content, not the t.co.
+async fn resolve_post_content(
+    app: &Arc<AppContext>,
+    tweet_id: &str,
+) -> Result<String, XmasterError> {
+    let api = crate::providers::xapi::XApi::new(app.clone());
+    let tweet = api.get_tweet(tweet_id).await?;
+    if !app.config.settings.disable_fxtwitter
+        && crate::providers::fxtwitter::text_looks_like_article_wrapper(&tweet.text)
+    {
+        if let Ok(Some(article)) = crate::providers::fxtwitter::fetch_article(&tweet.id).await {
+            // Title + body — gives preflight everything it needs to score the
+            // long-form correctly (hook strength, payoff density, POV, etc.).
+            let mut combined = String::new();
+            if !article.title.is_empty() {
+                combined.push_str(&article.title);
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&article.body);
+            return Ok(combined);
+        }
+    }
+    Ok(tweet.text)
 }

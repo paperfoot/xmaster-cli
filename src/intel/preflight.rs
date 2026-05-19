@@ -1001,7 +1001,28 @@ fn extract_features(text: &str) -> FeatureVector {
     let has_link = text.contains("http://") || text.contains("https://");
     let link_position = if has_link { Some("body".into()) } else { None };
 
-    let hashtag_count = text.matches('#').count();
+    // Count real X hashtags only: `#` followed by alphanumeric (not space,
+    // not another `#`). Skips markdown `## ` header prefixes that surface in
+    // long-form / Article bodies fetched via FxTwitter.
+    let hashtag_count = {
+        let chars: Vec<char> = text.chars().collect();
+        let mut count = 0;
+        for (i, &c) in chars.iter().enumerate() {
+            if c != '#' {
+                continue;
+            }
+            // Previous char must NOT be `#` (skip ## / ### markdown)
+            if i > 0 && chars[i - 1] == '#' {
+                continue;
+            }
+            // Next char must be alphanumeric and NOT `#` (real hashtag)
+            match chars.get(i + 1) {
+                Some(&next) if next.is_alphanumeric() => count += 1,
+                _ => {}
+            }
+        }
+        count
+    };
     let has_question = text.contains('?');
     let has_numbers = text.chars().any(|c| c.is_ascii_digit());
     let starts_with_i = text.starts_with("I ") || text.starts_with("I'");
@@ -1768,5 +1789,30 @@ mod tests {
         }
         // Sanity: at least one issue fires
         assert!(!result.issues.is_empty());
+    }
+
+    #[test]
+    fn hashtag_count_ignores_markdown_headers() {
+        // v1.7.1 fix: long-form Article bodies surfaced by FxTwitter use
+        // markdown header prefixes (## / ### ) for header-two/three blocks.
+        // The hashtag check must NOT count these as real X hashtags.
+        let text = "## Introduction\n\nSome words here.\n\n### Subsection\n\nMore content.";
+        let result = analyze(text, &default_ctx());
+        assert!(
+            !result.issues.iter().any(|i| i.code == "excessive_hashtags"),
+            "markdown headers should not trigger excessive_hashtags; got: {:?}",
+            result.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hashtag_count_still_catches_real_hashtags() {
+        let text = "Loving #rust #programming #cli #dev — all the fun";
+        let result = analyze(text, &default_ctx());
+        assert!(
+            result.issues.iter().any(|i| i.code == "excessive_hashtags"),
+            "real hashtags should still trigger; got: {:?}",
+            result.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
     }
 }

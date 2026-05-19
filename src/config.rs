@@ -103,12 +103,21 @@ pub struct Keys {
 pub struct Settings {
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Disable FxTwitter Article-enrichment fallback. Default false (enabled).
+    /// FxTwitter is the third-party service xmaster uses to read X Article
+    /// bodies — the public v2 API doesn't expose them. Set true to opt out;
+    /// `xmaster read`/`metrics`/`timeline` will still work but won't surface
+    /// Article content.
+    /// Set via: xmaster config set settings.disable_fxtwitter true
+    #[serde(default)]
+    pub disable_fxtwitter: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             timeout: default_timeout(),
+            disable_fxtwitter: false,
         }
     }
 }

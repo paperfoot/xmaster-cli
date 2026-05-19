@@ -3,6 +3,7 @@ use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::store::IntelStore;
 use crate::output::{self, OutputFormat, Tableable};
+use crate::providers::fxtwitter::{self, Article};
 use crate::providers::xapi::XApi;
 use serde::Serialize;
 use std::sync::Arc;
@@ -21,6 +22,10 @@ struct PostDisplay {
     date: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media_urls: Vec<String>,
+    /// X Article body, surfaced via FxTwitter when the tweet text is just a
+    /// t.co wrapper for an Article. `None` for regular tweets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    article: Option<Article>,
 }
 
 impl Tableable for PostDisplay {
@@ -41,6 +46,14 @@ impl Tableable for PostDisplay {
         for url in &self.media_urls {
             table.add_row(vec!["Media", url]);
         }
+        if let Some(ref art) = self.article {
+            table.add_row(vec!["Article ID", &art.id]);
+            table.add_row(vec!["Article Title", &art.title]);
+            table.add_row(vec![
+                "Article Body".to_string(),
+                format!("{} chars\n\n{}", art.body_chars, &art.body),
+            ]);
+        }
         table
     }
 }
@@ -57,6 +70,17 @@ pub async fn execute(
         let _ = store.record_discovered_post("read", &tweet);
     }
 
+    // Article enrichment: if the tweet text looks like a t.co Article wrapper,
+    // try FxTwitter (no auth, ~2.5s timeout, graceful degradation). Skip when
+    // disabled in config.
+    let article = if !ctx.config.settings.disable_fxtwitter
+        && fxtwitter::text_looks_like_article_wrapper(&tweet.text)
+    {
+        fxtwitter::fetch_article(&tweet.id).await.ok().flatten()
+    } else {
+        None
+    };
+
     let metrics = tweet.public_metrics.as_ref();
     let display = PostDisplay {
         id: tweet.id,
@@ -72,6 +96,7 @@ pub async fn execute(
         bookmarks: metrics.map(|m| m.bookmark_count).unwrap_or(0),
         date: tweet.created_at,
         media_urls: tweet.media_urls,
+        article,
     };
     output::render(format, &display, None);
     Ok(())
