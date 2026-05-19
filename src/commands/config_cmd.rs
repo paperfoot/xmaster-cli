@@ -72,6 +72,88 @@ struct ConfigCheckResult {
     web_reply_fallback: SubsystemStatus,
     database: SubsystemStatus,
     scheduler: SubsystemStatus,
+    bio_audit: BioAudit,
+}
+
+#[derive(Serialize)]
+struct BioAudit {
+    configured: bool,
+    healthy: bool,
+    detail: String,
+    elements: BioElements,
+}
+
+#[derive(Serialize)]
+struct BioElements {
+    /// "I help X do Y by Z" / pattern statement
+    has_position_statement: bool,
+    /// At least one digit (numeric proof — followers, $ raised, years, etc.)
+    has_numeric_proof: bool,
+    /// Mentions a cadence: daily / weekly / every / Tuesday / Monday / etc.
+    has_cadence_promise: bool,
+    /// Owned asset link or pointer: http://, newsletter, podcast, ↓
+    has_owned_asset: bool,
+}
+
+fn audit_bio(bio: &str) -> BioAudit {
+    if bio.is_empty() {
+        return BioAudit {
+            configured: false,
+            healthy: false,
+            detail: "Bio not set — run: xmaster config set account.bio \"<your bio>\"".into(),
+            elements: BioElements {
+                has_position_statement: false,
+                has_numeric_proof: false,
+                has_cadence_promise: false,
+                has_owned_asset: false,
+            },
+        };
+    }
+    let lower = bio.to_lowercase();
+    let position_markers = [
+        "i help ", "i write ", "i build ", "i teach ", "i make ", "i ship ",
+        "i'm building ", "i'm writing ", "i'm a ", "founder of", "founder @",
+        "co-founder", "ceo of", "ceo @", "host of", "host @", "building @",
+    ];
+    let cadence_markers = [
+        "daily", "weekly", "every day", "every week", "every monday", "every tuesday",
+        "every wednesday", "every thursday", "every friday", "every saturday",
+        "every sunday", "each week", "each day", "per week", "per day",
+    ];
+    let owned_asset_markers = [
+        "http://", "https://", "↓", "newsletter", "podcast", "substack",
+        "kit.com", ".so/", ".io/", ".com/", "subscribe at",
+    ];
+    let has_position = position_markers.iter().any(|m| lower.contains(*m));
+    let has_proof = bio.chars().any(|c| c.is_ascii_digit());
+    let has_cadence = cadence_markers.iter().any(|m| lower.contains(*m));
+    let has_owned = owned_asset_markers.iter().any(|m| lower.contains(*m));
+    let missing: Vec<&str> = [
+        ("position statement", has_position),
+        ("numeric proof", has_proof),
+        ("cadence promise", has_cadence),
+        ("owned-asset link", has_owned),
+    ]
+    .iter()
+    .filter_map(|(name, present)| if *present { None } else { Some(*name) })
+    .collect();
+    let healthy = missing.is_empty();
+    let detail = if healthy {
+        format!("All 4 follow-conversion elements present (bio: \"{}\")", crate::utils::safe_truncate(bio, 80))
+    } else {
+        format!("Missing: {} — research finding: high-follow X writers all hit these 4 elements", missing.join(", "))
+    };
+    BioAudit {
+        configured: true,
+        healthy,
+        detail,
+        elements: BioElements {
+            has_position_statement: has_position,
+            has_numeric_proof: has_proof,
+            has_cadence_promise: has_cadence,
+            has_owned_asset: has_owned,
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -104,6 +186,12 @@ impl Tableable for ConfigCheckResult {
                 &s.detail,
             ]);
         }
+        table.add_row(vec![
+            "Bio (4-element formula)",
+            if self.bio_audit.configured { "Yes" } else { "No" },
+            if self.bio_audit.healthy { "Yes" } else { "No" },
+            &self.bio_audit.detail,
+        ]);
         table
     }
 }
@@ -144,6 +232,7 @@ pub async fn get(format: OutputFormat, key: &str) -> Result<(), XmasterError> {
         "style.voice" => cfg.style.voice.clone(),
         "niche.topics" => cfg.niche.topics.clone(),
         "account.premium" => cfg.account.premium.to_string(),
+        "account.bio" => cfg.account.bio.clone(),
         "settings.timeout" => cfg.settings.timeout.to_string(),
         "keys.xai" => mask(&cfg.keys.xai),
         "keys.api_key" => mask(&cfg.keys.api_key),
@@ -299,6 +388,7 @@ const VALID_CONFIG_KEYS: &[&str] = &[
     "keys.web_ct0", "keys.web_auth_token", "keys.graphql_create_tweet_id",
     "settings.timeout",
     "account.premium",
+    "account.bio",
     "style.voice",
 ];
 
@@ -407,6 +497,8 @@ pub async fn check(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
         },
     };
 
+    let bio_audit = audit_bio(&ctx.config.account.bio);
+
     let display = ConfigCheckResult {
         x_auth,
         xai_auth,
@@ -414,6 +506,7 @@ pub async fn check(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
         web_reply_fallback,
         database: db_status,
         scheduler: scheduler_status,
+        bio_audit,
     };
     output::render(format, &display, None);
     Ok(())

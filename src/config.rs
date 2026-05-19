@@ -51,6 +51,10 @@ pub struct AccountConfig {
     /// Whether the user has X Premium. Set via: xmaster config set account.premium true
     #[serde(default)]
     pub premium: bool,
+    /// User's X bio. Used by `config check` to audit the 4-element formula.
+    /// Set via: xmaster config set account.bio "I help X do Y by Z. Proof. Cadence. Link."
+    #[serde(default)]
+    pub bio: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

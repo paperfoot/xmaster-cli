@@ -69,6 +69,18 @@ struct MetricsRow {
     bookmarks: u64,
     profile_clicks: u64,
     url_clicks: u64,
+    /// Profile clicks / impressions × 1000. The leading indicator of follow
+    /// conversion: people clicking your byline. Higher = more readers
+    /// curious about the author. Reference benchmark from creator playbooks:
+    /// >2.0 (per 1000 imp) is healthy, >5.0 is very strong.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_click_rate_per_1k: Option<f64>,
+    /// Bookmark-to-like ratio. Below 1.0 = post is being saved more than
+    /// liked = reference-content signature (the doublenickk pattern: high
+    /// distribution but low follower conversion). >1.0 = personality-led
+    /// engagement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bookmark_to_like_ratio: Option<f64>,
     /// Change since the previous snapshot we stored in metric_snapshots.
     /// `None` on the first-ever call for this tweet.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -420,6 +432,16 @@ pub async fn execute_batch(
                 (None, velocity)
             };
 
+            let profile_click_rate_per_1k = if public.impression_count > 0 {
+                Some(non_public.user_profile_clicks as f64 / public.impression_count as f64 * 1000.0)
+            } else {
+                None
+            };
+            let bookmark_to_like_ratio = if public.like_count > 0 {
+                Some(public.bookmark_count as f64 / public.like_count as f64)
+            } else {
+                None
+            };
             rows.push(MetricsRow {
                 tweet_id: tweet.id,
                 created_at: tweet.created_at,
@@ -433,6 +455,8 @@ pub async fn execute_batch(
                 bookmarks: public.bookmark_count,
                 profile_clicks: non_public.user_profile_clicks,
                 url_clicks: non_public.url_link_clicks,
+                profile_click_rate_per_1k,
+                bookmark_to_like_ratio,
                 delta,
                 velocity,
             });

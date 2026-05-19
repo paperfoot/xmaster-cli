@@ -236,14 +236,22 @@ pub async fn recommend(
             let size_fit = compute_size_fit(c.followers, my_followers);
             let relevance = c.relevance;
 
-            // Opportunity scoring: reply_roi proxy + size_fit + reciprocity + reach + relevance
-            let score = 0.25 * reciprocity + 0.25 * size_fit + 0.20 * reach + 0.20 * relevance + 0.10 * 1.0;
+            // Grox spam-classifier bucket penalty: replies under ≤500-follower
+            // ancestor chains carry higher spam-classification risk for small
+            // accounts. Deprioritize sub-500 targets.
+            let small_account_penalty: f64 = if c.followers < 500 { 0.15 } else { 0.0 };
+
+            // Opportunity scoring: reply_roi proxy + size_fit + reciprocity + reach + relevance,
+            // minus small-account-bucket penalty.
+            let score = 0.25 * reciprocity + 0.25 * size_fit + 0.20 * reach + 0.20 * relevance + 0.10
+                - small_account_penalty;
 
             let mut reasons = Vec::new();
             if reciprocity > 0.3 { reasons.push(format!("replied back {:.0}% of the time", reciprocity * 100.0)); }
             if size_fit > 0.8 { reasons.push("in your ideal follower band".into()); }
             if reach > 0.6 { reasons.push("large audience amplifies your reply".into()); }
             if relevance > 0.5 { reasons.push("topically relevant".into()); }
+            if small_account_penalty > 0.0 { reasons.push("small account (<500 followers) — Grox spam bucket risk".into()); }
 
             RecommendCandidate {
                 rank: 0,
@@ -755,7 +763,11 @@ pub async fn feed(
         let freshness = 1.0 - (p.age_minutes as f64 / max_age_mins as f64).min(1.0);
         let size_fit = compute_size_fit(p.author_followers, my_followers);
         let openness = if p.likes > 0 { (p.replies as f64 / p.likes as f64).min(1.0) } else { 0.5 };
-        p.opportunity_score = (0.30 * freshness + 0.30 * size_fit + 0.25 * openness + 0.15) as f32;
+        // Grox spam-bucket penalty: replying under sub-500-follower chains
+        // carries higher spam-classification risk.
+        let small_account_penalty: f64 = if p.author_followers < 500 { 0.15 } else { 0.0 };
+        p.opportunity_score = (0.30 * freshness + 0.30 * size_fit + 0.25 * openness + 0.15
+            - small_account_penalty) as f32;
     }
     posts.sort_by(|a, b| b.opportunity_score.partial_cmp(&a.opportunity_score).unwrap_or(std::cmp::Ordering::Equal));
     posts.truncate(count);

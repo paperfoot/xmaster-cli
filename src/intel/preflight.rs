@@ -99,6 +99,9 @@ pub struct Issue {
     pub code: String,
     pub message: String,
     pub fix: Option<String>,
+    /// UX grouping (v1.7.0): collapses ~20 individual codes into 6 action categories.
+    /// JSON consumers can keep using `code`; human output groups by `group`.
+    pub group: IssueGroup,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -106,6 +109,22 @@ pub enum Severity {
     Critical,
     Warning,
     Info,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum IssueGroup {
+    /// First-line / preview-hook strength
+    Hook,
+    /// Content depth, payoff, POV
+    Substance,
+    /// Triggers algorithmic suppression
+    Safety,
+    /// Looks like something you've already posted
+    Dedup,
+    /// Posting velocity / cadence
+    Cadence,
+    /// Reply-mode-only
+    Reply,
 }
 
 impl std::fmt::Display for Severity {
@@ -160,6 +179,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "empty_content".into(),
             message: "Tweet is empty or whitespace-only".into(),
             fix: Some("Add tweet text".into()),
+            group: IssueGroup::Substance,
         });
         score -= 30;
     }
@@ -177,6 +197,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 "Remove {} characters",
                 features.char_count - char_limit
             )),
+            group: IssueGroup::Safety,
         });
         score -= 30;
     }
@@ -187,6 +208,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "link_in_body".into(),
             message: "External link in tweet body — links in the body track with lower reach. Put the link in a reply".into(),
             fix: Some("Move the link to a reply instead".into()),
+            group: IssueGroup::Safety,
         });
         score -= 30;
     }
@@ -202,12 +224,45 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 "Weak opening — \"{}...\" doesn't grab attention",
                 crate::utils::safe_truncate(first_line, 30)
             ),
-            fix: Some("Lead with a number, question, or bold claim".into()),
+            fix: Some("Lead with a number, named subject, or status verb. Contest-winning Articles all open with a weighted single line (Kobeissi: 14/30 originals open with BREAKING:; beaverd: $74-billion + named adversary; Koe: second-person directive)".into()),
+            group: IssueGroup::Hook,
         });
         score -= 15;
     }
 
     let lower = trimmed.to_lowercase();
+
+    // --- weak_hook (research-sharpened) ---
+    // Even if the opener isn't on the weak-opener list, fire weak_hook if the
+    // first line carries no "weight" — no number, no proper noun, no status
+    // verb. Contest-winning Articles all open with one of these.
+    let status_verbs = [
+        "breaking:", "breaking ", "surging", "metastasized", "exposed", "leaked",
+        "collapsed", "soaring", "plunging", "obliterated", "demolished", "introducing",
+        "announcing", "launching", "shipping", "released",
+    ];
+    let first_line_lower = first_line.to_lowercase();
+    let first_line_has_number = first_line.chars().any(|c| c.is_ascii_digit());
+    let first_line_has_proper_noun = has_proper_nouns(first_line);
+    let first_line_has_status_verb = status_verbs.iter().any(|v| first_line_lower.contains(v));
+    let first_line_has_weight =
+        first_line_has_number || first_line_has_proper_noun || first_line_has_status_verb;
+    // Only fire if not already flagged by the weak-opener check, and the post is substantive
+    if !first_line_has_weight
+        && !weak_openers.iter().any(|w| first_line.starts_with(w))
+        && features.char_count > 60
+        && !ctx.is_reply()
+    {
+        issues.push(Issue {
+            severity: Severity::Info,
+            code: "weak_hook_no_weight".into(),
+            message: "First line carries no number, named subject, or status verb — Articles that win opens carry weight in the first line".into(),
+            fix: Some("Rewrite line 1 to lead with a quantity ($83B), a named entity (Deloitte), or a status verb (BREAKING / launched / collapsed)".into()),
+            group: IssueGroup::Hook,
+        });
+        score -= 10;
+    }
+
     let bait_phrases = ["like if", "rt if", "follow for"];
     if bait_phrases.iter().any(|b| lower.contains(b)) {
         issues.push(Issue {
@@ -215,6 +270,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "engagement_bait".into(),
             message: "Engagement bait detected — X algorithm penalizes this".into(),
             fix: Some("Remove explicit engagement requests".into()),
+            group: IssueGroup::Safety,
         });
         score -= 15;
     }
@@ -228,7 +284,8 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 features.hashtag_count
             ),
             fix: Some("Keep to 1-2 relevant hashtags max".into()),
-        });
+            group: IssueGroup::Safety,
+            });
         score -= 15;
     }
 
@@ -238,8 +295,64 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "low_specificity".into(),
             message: "No numbers, names, or data — specificity drives engagement".into(),
             fix: Some("Add a concrete number, name, or data point".into()),
+            group: IssueGroup::Substance,
         });
         score -= 15;
+    }
+
+    // --- reference_only_risk (doublenickk trap) ---
+    // High specificity + zero first-person/POV markers + substantive length =
+    // pure reference content. Readers SAVE it but don't FOLLOW because there's
+    // no persona to follow. doublenickk's algorithm Article: 255K impressions,
+    // 1263 bookmarks, only 12.7K followers — bookmark:like 0.58:1 is the
+    // signature.
+    let pov_markers = [
+        " i ", " i'", " i,", " i.", " my ", " me ", " we ", " our ", " i'm",
+        " i've", "i think", "i believe", "i'd argue", "in my view", "imo",
+        "personally", "from where i sit", "i'd say", "hot take", "unpopular",
+    ];
+    let trimmed_lower_padded = format!(" {} ", lower);
+    let pov_count = pov_markers
+        .iter()
+        .filter(|m| trimmed_lower_padded.contains(*m))
+        .count();
+    let has_high_specificity = features.has_numbers && has_proper_nouns(trimmed);
+    if has_high_specificity && pov_count == 0 && features.char_count > 200 && !ctx.is_reply() {
+        issues.push(Issue {
+            severity: Severity::Warning,
+            code: "reference_only_risk".into(),
+            message: "Data without a POV — reads as reference content. Readers will SAVE it but won't FOLLOW you (the doublenickk trap: 255K impressions, 1263 bookmarks, only 12.7K followers).".into(),
+            fix: Some("Add a first-person stance: what's YOUR take on the data? Lead with the claim, then the evidence — not the other way around".into()),
+            group: IssueGroup::Substance,
+        });
+        score -= 10;
+    }
+
+    // --- multiple_ctas ---
+    // Justin Welsh's rule: pick exactly ONE ask. Multiple CTAs degrade all of
+    // them. Count distinct CTA phrases; warn if >1.
+    let cta_phrases: &[&str] = &[
+        "follow me", "follow @", "follow for", "hit follow", "follow if",
+        "subscribe", "sign up", "join the newsletter", "link in bio", "dm me",
+        "reply with", "bookmark this", "save this", "share this", "repost ",
+        "retweet ", "like if", "rt if",
+    ];
+    let cta_hit_count = cta_phrases
+        .iter()
+        .filter(|p| lower.contains(*p))
+        .count();
+    if cta_hit_count > 1 {
+        issues.push(Issue {
+            severity: Severity::Warning,
+            code: "multiple_ctas".into(),
+            message: format!(
+                "{} CTAs detected — pick ONE ask per post (multiple CTAs degrade all of them; Justin Welsh: 0→315k followers using one specific cadence-promise close)",
+                cta_hit_count
+            ),
+            fix: Some("Cut all but one CTA. For save-worthy posts use 'Bookmark this for later' (saves outperform follow asks); for personality posts use 'I share [niche] tactics every [day]. Follow @handle'".into()),
+            group: IssueGroup::Substance,
+        });
+        score -= 10;
     }
 
     if features.char_count < 30
@@ -253,6 +366,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             message: "Very short post — longer content drives more dwell time (a scoring signal)"
                 .into(),
             fix: Some("Consider adding depth — the algorithm rewards dwell time".into()),
+            group: IssueGroup::Substance,
         });
         score -= 5;
     }
@@ -263,6 +377,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "starts_with_mention".into(),
             message: "Starting with @mention limits visibility to mutual followers".into(),
             fix: Some("Put a word before the @mention, e.g. \".@user\"".into()),
+            group: IssueGroup::Safety,
         });
         score -= 15;
     }
@@ -274,6 +389,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "no_question".into(),
             message: "No question mark — questions drive replies, a top positive scorer term".into(),
             fix: Some("Consider ending with a question to invite discussion".into()),
+            group: IssueGroup::Substance,
         });
         score -= 5;
     }
@@ -284,6 +400,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "no_formatting".into(),
             message: "Wall of text — line breaks improve readability and stop-rate".into(),
             fix: Some("Break into 2-3 short lines".into()),
+            group: IssueGroup::Substance,
         });
         score -= 5;
     }
@@ -294,6 +411,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "all_lowercase".into(),
             message: "All lowercase — proper capitalization looks more authoritative".into(),
             fix: None,
+            group: IssueGroup::Substance,
         });
         score -= 5;
     }
@@ -335,7 +453,8 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                             velocity.standalone_24h
                         ),
                         fix: Some("Reply to others instead — replies don't count toward the cap".into()),
-                    });
+                        group: IssueGroup::Cadence,
+            });
                     score -= 30;
                 } else if velocity.posts_6h >= 3 {
                     issues.push(Issue {
@@ -346,7 +465,8 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                             velocity.posts_6h
                         ),
                         fix: Some("Wait at least 2 hours between posts".into()),
-                    });
+                        group: IssueGroup::Cadence,
+            });
                     score -= 15;
                 } else if velocity.posts_1h >= 1 {
                     issues.push(Issue {
@@ -357,6 +477,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                             velocity.posts_1h
                         ),
                         fix: Some("Consider waiting — posting now may split attention".into()),
+                        group: IssueGroup::Cadence,
                     });
                     score -= 5;
                 }
@@ -390,6 +511,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 code: "reply_emoji_only".into(),
                 message: "Emoji-or-symbols-only reply — X treats these as noise, minimal algorithmic lift".into(),
                 fix: Some("Add substance: an observation, question, or specific reaction".into()),
+            group: IssueGroup::Reply,
             });
             score -= 25;
         }
@@ -400,6 +522,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 code: "reply_generic".into(),
                 message: "Generic agreement reply — short replies get no algorithmic push in 2026, and the original author won't engage-back with them".into(),
                 fix: Some("Add a specific observation, counter-point, or question tied to the post's content".into()),
+            group: IssueGroup::Reply,
             });
             score -= 25;
         }
@@ -413,6 +536,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                     features.char_count
                 ),
                 fix: Some("Expand to 1-2 sentences with a specific detail the author can respond to".into()),
+                group: IssueGroup::Reply,
             });
             score -= 15;
         }
@@ -462,6 +586,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                     features.char_count
                 ),
                 fix: Some("Trim to <=2000 chars, or publish via the Articles feature".into()),
+                group: IssueGroup::Substance,
             });
         }
         if features.char_count > 5000 {
@@ -473,6 +598,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                     features.char_count
                 ),
                 fix: Some("Split into 2 long-form posts 2h apart, or publish as a native Article".into()),
+                group: IssueGroup::Substance,
             });
             score -= 10;
         }
@@ -493,6 +619,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 code: "long_form_weak_preview".into(),
                 message: "Long-form preview (first 280 chars) opens weakly — that's all the feed shows before 'show more'".into(),
                 fix: Some("Lead with a number, a contrarian claim, or a named subject. Save soft setup for paragraph 2".into()),
+            group: IssueGroup::Hook,
             });
             score -= 10;
         }
@@ -510,6 +637,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                     features.char_count, breaks
                 ),
                 fix: Some("Break into short paragraphs (2-4 lines each), use bullet/number lists for enumeration, blank line between sections".into()),
+                group: IssueGroup::Substance,
             });
             score -= 10;
         }
@@ -526,6 +654,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 code: "long_form_low_density".into(),
                 message: "Long-form needs payoff density — concrete numbers, named subjects, or specific evidence. Without them readers feel padded out".into(),
                 fix: Some("Add stats, dates, $ amounts, or named people/companies. The 2026 contest winners were data-dense investigations, not reflective essays".into()),
+            group: IssueGroup::Substance,
             });
             score -= 5;
         }
@@ -538,6 +667,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             code: "negative_sentiment".into(),
             message: "Combative or negative tone — Grok predicts P(block) and P(mute) and suppresses pre-emptively".into(),
             fix: Some("Reframe constructively — critique the idea, not the person".into()),
+            group: IssueGroup::Safety,
         });
         score -= 15;
     } else if features.sentiment == "mixed" {
@@ -548,6 +678,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             fix: Some(
                 "Consider softening — the algorithm penalises predicted negative reactions".into(),
             ),
+            group: IssueGroup::Safety,
         });
         score -= 5;
     }
@@ -1547,5 +1678,95 @@ mod tests {
             &reply_ctx(),
         );
         assert!(!result.issues.iter().any(|i| i.code == "too_short"));
+    }
+
+    // --- v1.7.0: research-derived gates ---
+
+    #[test]
+    fn weak_hook_no_weight_fires_for_generic_opener() {
+        // Generic opener with no number, no proper noun, no status verb
+        let result = analyze(
+            "Something to consider when you're working through hard problems lately",
+            &default_ctx(),
+        );
+        assert!(
+            result.issues.iter().any(|i| i.code == "weak_hook_no_weight"),
+            "expected weak_hook_no_weight; got: {:?}",
+            result.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn weak_hook_no_weight_skips_when_number_present() {
+        let result = analyze(
+            "73% of startups fail because they scale prematurely",
+            &default_ctx(),
+        );
+        assert!(!result.issues.iter().any(|i| i.code == "weak_hook_no_weight"));
+    }
+
+    #[test]
+    fn weak_hook_no_weight_skips_when_status_verb_present() {
+        let result = analyze(
+            "BREAKING: the latest data on engagement scoring",
+            &default_ctx(),
+        );
+        assert!(!result.issues.iter().any(|i| i.code == "weak_hook_no_weight"));
+    }
+
+    #[test]
+    fn reference_only_risk_fires_on_data_without_pov() {
+        // High specificity (numbers + proper nouns) + zero first-person/POV markers + >200 chars
+        let text = "Deloitte received $74 billion from Department of Defense contracts in 2024. \
+                    The CMS spent $4.2 billion on Accenture in the same year. \
+                    Boeing pulled in $3.8 billion from FAA. \
+                    Lockheed Martin had the highest single contract at $2.5 billion.";
+        let result = analyze(text, &default_ctx());
+        assert!(
+            result.issues.iter().any(|i| i.code == "reference_only_risk"),
+            "expected reference_only_risk; got: {:?}",
+            result.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reference_only_risk_skips_when_pov_present() {
+        let text = "Deloitte received $74 billion from DoD in 2024. I think this is \
+                    obscene rent-seeking. Most people don't realize how much consulting \
+                    money is just relabelled government spending.";
+        let result = analyze(text, &default_ctx());
+        assert!(!result.issues.iter().any(|i| i.code == "reference_only_risk"));
+    }
+
+    #[test]
+    fn multiple_ctas_fires_on_two_or_more() {
+        let text = "Great thread on shipping speed. Bookmark this for your next launch. \
+                    Also follow me for more like this. DM me if you want the template.";
+        let result = analyze(text, &default_ctx());
+        assert!(
+            result.issues.iter().any(|i| i.code == "multiple_ctas"),
+            "expected multiple_ctas; got: {:?}",
+            result.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn multiple_ctas_skips_on_single_cta() {
+        let text = "Great thread on shipping speed. Bookmark this for your next launch.";
+        let result = analyze(text, &default_ctx());
+        assert!(!result.issues.iter().any(|i| i.code == "multiple_ctas"));
+    }
+
+    #[test]
+    fn every_issue_has_group_field() {
+        // Trigger many issues at once
+        let text = "I just shipped something today";
+        let result = analyze(text, &default_ctx());
+        for issue in &result.issues {
+            // group is non-optional, so this just verifies it compiles + serializes.
+            let _ = issue.group;
+        }
+        // Sanity: at least one issue fires
+        assert!(!result.issues.is_empty());
     }
 }

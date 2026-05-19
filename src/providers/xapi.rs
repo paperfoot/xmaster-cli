@@ -1581,7 +1581,7 @@ impl XApi {
         let user_id = self.get_authenticated_user_id().await?;
         let max = count.clamp(1, 100);
         let url = format!(
-            "{BASE}/users/{user_id}/reverse_chronological_timeline?max_results={max}&{tf}&{exp}&{uf}",
+            "{BASE}/users/{user_id}/timelines/reverse_chronological?max_results={max}&{tf}&{exp}&{uf}",
             tf = Self::tweet_fields(),
             exp = Self::tweet_expansions(),
             uf = Self::user_fields_param(),
