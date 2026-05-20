@@ -182,11 +182,10 @@ pub async fn execute(
     // content. For Article wrappers (text = single t.co), enrich via
     // FxTwitter and analyze the Article body instead of the t.co link.
     // Friction-free: agents don't need a separate command to score a post.
+    // If the input WAS a tweet reference but the fetch failed, surface the
+    // error — don't silently analyze the ID digits as text.
     let resolved_text = if let Some(id) = parse_tweet_reference(text) {
-        match resolve_post_content(&app, &id).await {
-            Ok(content) => content,
-            Err(_) => text.to_string(), // fall back to raw text on failure
-        }
+        resolve_post_content(&app, &id).await?
     } else {
         text.to_string()
     };
