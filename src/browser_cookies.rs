@@ -311,17 +311,29 @@ fn decrypt_chrome_cookie(
 // Firefox — plain SQLite (no encryption!)
 // ---------------------------------------------------------------------------
 
-fn extract_firefox() -> Result<WebCookies, XmasterError> {
+/// Returns the Firefox profiles directory on Linux: ~/.mozilla/firefox/Profiles/
+#[cfg(target_os = "linux")]
+fn firefox_profiles_dir() -> Result<PathBuf, XmasterError> {
     let home = std::env::var("HOME").map_err(|_| XmasterError::Config("HOME not set".into()))?;
-    let profiles_dir = PathBuf::from(&home).join("Library/Application Support/Firefox/Profiles");
+    Ok(PathBuf::from(home).join(".mozilla/firefox/Profiles"))
+}
 
+/// Returns the Firefox profiles directory on macOS: ~/Library/Application Support/Firefox/Profiles/
+#[cfg(target_os = "macos")]
+fn firefox_profiles_dir() -> Result<PathBuf, XmasterError> {
+    let home = std::env::var("HOME").map_err(|_| XmasterError::Config("HOME not set".into()))?;
+    Ok(PathBuf::from(home).join("Library/Application Support/Firefox/Profiles"))
+}
+
+/// Search for a Firefox profile with cookies.sqlite.
+/// Tries profiles ending with .default-release first, then .default.
+fn find_firefox_profile(profiles_dir: &PathBuf) -> Result<PathBuf, XmasterError> {
     if !profiles_dir.exists() {
         return Err(XmasterError::Config("Firefox profiles directory not found".into()));
     }
 
-    // Find the default profile (usually ends with .default-release or .default)
     let mut cookie_db = None;
-    if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
+    if let Ok(entries) = std::fs::read_dir(profiles_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".default-release") || name.ends_with(".default") {
@@ -334,9 +346,14 @@ fn extract_firefox() -> Result<WebCookies, XmasterError> {
         }
     }
 
-    let cookie_db = cookie_db.ok_or_else(|| {
+    cookie_db.ok_or_else(|| {
         XmasterError::Config("No Firefox profile with cookies.sqlite found".into())
-    })?;
+    })
+}
+
+fn extract_firefox() -> Result<WebCookies, XmasterError> {
+    let profiles_dir = firefox_profiles_dir()?;
+    let cookie_db = find_firefox_profile(&profiles_dir)?;
 
     // Copy to temp (Firefox also uses WAL)
     let tmp = std::env::temp_dir().join("xmaster_ff_cookies.sqlite");
