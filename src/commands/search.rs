@@ -22,12 +22,28 @@ struct TweetRow {
     retweets: u64,
     replies: u64,
     date: String,
+    age_minutes: i64,
+}
+
+/// Compact human age: 45m, 6h, 3.0d. Lets the agent (and humans) see at a
+/// glance whether a post is fresh enough to be worth replying to — reply
+/// momentum dies after ~30-60 min.
+fn human_age(minutes: i64) -> String {
+    if minutes < 0 {
+        "0m".into()
+    } else if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 1440 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{:.1}d", minutes as f64 / 1440.0)
+    }
 }
 
 impl Tableable for SearchResults {
     fn to_table(&self) -> comfy_table::Table {
         let mut table = comfy_table::Table::new();
-        table.set_header(vec!["ID", "Author", "Text", "Views", "Likes", "RTs", "Replies", "Date"]);
+        table.set_header(vec!["ID", "Author", "Age", "Text", "Views", "Likes", "RTs", "Replies", "Date"]);
         for t in &self.tweets {
             let truncated: String = if t.text.chars().count() > 80 {
                 t.text.chars().take(77).collect::<String>() + "..."
@@ -37,6 +53,7 @@ impl Tableable for SearchResults {
             table.add_row(vec![
                 t.id.clone(),
                 t.author.clone(),
+                human_age(t.age_minutes),
                 truncated,
                 t.impressions.to_string(),
                 t.likes.to_string(),
@@ -51,7 +68,7 @@ impl Tableable for SearchResults {
 
 impl CsvRenderable for SearchResults {
     fn csv_headers() -> Vec<&'static str> {
-        vec!["id", "author", "text", "impressions", "likes", "retweets", "replies", "date"]
+        vec!["id", "author", "age_minutes", "text", "impressions", "likes", "retweets", "replies", "date"]
     }
 
     fn csv_rows(&self) -> Vec<Vec<String>> {
@@ -61,6 +78,7 @@ impl CsvRenderable for SearchResults {
                 vec![
                     t.id.clone(),
                     t.author.clone(),
+                    t.age_minutes.to_string(),
                     t.text.clone(),
                     t.impressions.to_string(),
                     t.likes.to_string(),
@@ -95,6 +113,10 @@ pub async fn execute(
         query: query.to_string(),
         tweets: tweets.into_iter().map(|t| {
             let metrics = t.public_metrics.as_ref();
+            let age_minutes = t.created_at.as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_minutes())
+                .unwrap_or(0);
             TweetRow {
                 id: t.id,
                 author: t.author_username
@@ -106,6 +128,7 @@ pub async fn execute(
                 retweets: metrics.map(|m| m.retweet_count).unwrap_or(0),
                 replies: metrics.map(|m| m.reply_count).unwrap_or(0),
                 date: t.created_at.unwrap_or_default(),
+                age_minutes,
             }
         }).collect(),
     };
