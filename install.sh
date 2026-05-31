@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install xmaster - enterprise-grade X/Twitter CLI
-# Usage: curl -fsSL https://raw.githubusercontent.com/paperfoot/xmaster-cli/master/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/paperfoot/xmaster-cli/main/install.sh | sh
 set -e
 
 REPO="paperfoot/xmaster-cli"
@@ -10,9 +10,10 @@ BINARY="xmaster"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
+# Asset names match the release workflow: xmaster-<arch>-<os> (e.g. xmaster-aarch64-darwin).
 case "$OS" in
-  Linux)  OS_TAG="unknown-linux-gnu" ;;
-  Darwin) OS_TAG="apple-darwin" ;;
+  Linux)  OS_TAG="linux" ;;
+  Darwin) OS_TAG="darwin" ;;
   *)      echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
@@ -36,7 +37,12 @@ URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
 echo "Downloading xmaster ${LATEST} for ${TARGET}..."
 
 TMPDIR=$(mktemp -d)
-curl -fsSL "$URL" -o "${TMPDIR}/${BINARY}"
+if ! curl -fsSL "$URL" -o "${TMPDIR}/${BINARY}"; then
+  rm -rf "$TMPDIR"
+  echo "No prebuilt binary for ${TARGET}. Install from crates.io instead:"
+  echo "  cargo install xmaster"
+  exit 1
+fi
 
 # Install to ~/.local/bin or /usr/local/bin
 if [ -d "$HOME/.local/bin" ]; then
