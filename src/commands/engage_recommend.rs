@@ -769,7 +769,14 @@ pub async fn feed(
         p.opportunity_score = (0.30 * freshness + 0.30 * size_fit + 0.25 * openness + 0.15
             - small_account_penalty) as f32;
     }
-    posts.sort_by(|a, b| b.opportunity_score.partial_cmp(&a.opportunity_score).unwrap_or(std::cmp::Ordering::Equal));
+    // Primary: opportunity score, bucketed to 2 decimals so a marginally-higher
+    // score can't bury a much fresher post. Secondary: age — fresher wins, because
+    // reply momentum dies after ~30-60 min, so minutes matter on near-ties.
+    posts.sort_by(|a, b| {
+        let sa = (a.opportunity_score * 100.0).round() as i64;
+        let sb = (b.opportunity_score * 100.0).round() as i64;
+        sb.cmp(&sa).then(a.age_minutes.cmp(&b.age_minutes))
+    });
     posts.truncate(count);
 
     // Auto-add high-value accounts from search to watchlist (silent, never fails).
