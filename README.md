@@ -14,7 +14,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/xmaster?style=for-the-badge&logo=rust&logoColor=white&label=crates.io)](https://crates.io/crates/xmaster)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](https://github.com/paperfoot/xmaster-cli/blob/main/LICENSE)
-[![Homebrew](https://img.shields.io/badge/Homebrew-available-orange?style=for-the-badge&logo=homebrew&logoColor=white)](https://github.com/199-biotechnologies/homebrew-tap)
+[![Homebrew](https://img.shields.io/badge/Homebrew-available-orange?style=for-the-badge&logo=homebrew&logoColor=white)](https://github.com/paperfoot/homebrew-tap)
 [![Built with Rust](https://img.shields.io/badge/Built_with-Rust-dea584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 ---
@@ -35,12 +35,12 @@ Most X tools make you pick between the official API and scraping. XMaster gives 
 
 **One-liner (macOS / Linux):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/paperfoot/xmaster-cli/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/paperfoot/xmaster-cli/main/install.sh | sh
 ```
 
 **Homebrew:**
 ```bash
-brew tap 199-biotechnologies/tap
+brew tap paperfoot/tap
 brew install xmaster
 ```
 
