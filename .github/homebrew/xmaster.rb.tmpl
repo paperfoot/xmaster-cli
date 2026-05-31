@@ -1,0 +1,29 @@
+class Xmaster < Formula
+  desc "Enterprise-grade X CLI — post, reply, like, retweet, DM, search, and more"
+  homepage "https://github.com/paperfoot/xmaster-cli"
+  version "@@VERSION@@"
+  license "MIT"
+
+  if OS.mac?
+    if Hardware::CPU.arm?
+      url "https://github.com/paperfoot/xmaster-cli/releases/download/@@TAG@@/xmaster-aarch64-darwin"
+      sha256 "@@SHA_ARM_MAC@@"
+    else
+      url "https://github.com/paperfoot/xmaster-cli/releases/download/@@TAG@@/xmaster-x86_64-darwin"
+      sha256 "@@SHA_X86_MAC@@"
+    end
+  elsif OS.linux?
+    url "https://github.com/paperfoot/xmaster-cli/releases/download/@@TAG@@/xmaster-x86_64-linux"
+    sha256 "@@SHA_X86_LINUX@@"
+  end
+
+  def install
+    binary = Dir["xmaster*"].first
+    bin.install binary => "xmaster"
+  end
+
+  test do
+    assert_match "xmaster", shell_output("#{bin}/xmaster --version")
+    assert_match "success", shell_output("#{bin}/xmaster agent-info")
+  end
+end

@@ -11,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  build:
     strategy:
       matrix:
         include:
@@ -40,7 +40,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Rename artifact
         shell: bash
         run: cp target/${{ matrix.target }}/release/${{ matrix.artifact }} ${{ matrix.asset_name }}
@@ -48,3 +48,29 @@ jobs:
         uses: softprops/action-gh-release@v3.0.0
         with:
           files: ${{ matrix.asset_name }}
+
+  # Publish the new version to crates.io. Idempotent: skips if already published.
+  # Requires the CARGO_REGISTRY_TOKEN secret; warns and skips if it is absent.
+  # Homebrew is bumped separately by the self-polling workflow in paperfoot/homebrew-tap.
+  publish-crate:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN not set — skipping crates.io publish."
+            echo "Add it with: gh secret set CARGO_REGISTRY_TOKEN -R paperfoot/xmaster-cli"
+            exit 0
+          fi
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if curl -fsSL "https://index.crates.io/xm/as/xmaster" | grep -q "\"vers\":\"${VERSION}\""; then
+            echo "xmaster ${VERSION} already on crates.io — skipping."
+          else
+            cargo publish --locked
+          fi
