@@ -100,8 +100,16 @@ pub async fn execute(
     since: Option<&str>,
     before: Option<&str>,
 ) -> Result<(), XmasterError> {
-    let start_time = since.map(crate::commands::timeline::parse_since).transpose()
-        .map_err(XmasterError::Config)?;
+    let start_time: Option<String> = match since {
+        Some(s) => Some(crate::commands::timeline::parse_since(s).map_err(XmasterError::Config)?),
+        // No --since: floor at the last 24h. X recent-search spans 7 days, so
+        // without a floor a low-volume query silently returns week-old posts that
+        // are useless to reply to. Pass --since 7d to widen.
+        None => Some(
+            (chrono::Utc::now() - chrono::Duration::hours(24))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+    };
     let end_time = before.map(crate::commands::timeline::parse_since).transpose()
         .map_err(XmasterError::Config)?;
     let api = XApi::new(ctx.clone());
