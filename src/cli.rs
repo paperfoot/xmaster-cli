@@ -547,8 +547,8 @@ pub enum EngageCommands {
         /// Minimum follower count for authors
         #[arg(long, default_value = "5000")]
         min_followers: u64,
-        /// Maximum age in minutes (default: 60)
-        #[arg(long, default_value = "60")]
+        /// Maximum age in minutes (default: 30 — reply momentum dies after ~30-60 min)
+        #[arg(long, default_value = "30")]
         max_age_mins: u64,
         /// Number of posts to return (unified across all topics)
         #[arg(long, short, alias = "limit", default_value = "10")]

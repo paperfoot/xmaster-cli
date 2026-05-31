@@ -766,7 +766,7 @@ pub async fn feed(
         // Grox spam-bucket penalty: replying under sub-500-follower chains
         // carries higher spam-classification risk.
         let small_account_penalty: f64 = if p.author_followers < 500 { 0.15 } else { 0.0 };
-        p.opportunity_score = (0.30 * freshness + 0.30 * size_fit + 0.25 * openness + 0.15
+        p.opportunity_score = (0.45 * freshness + 0.25 * size_fit + 0.20 * openness + 0.10
             - small_account_penalty) as f32;
     }
     // Primary: opportunity score, bucketed to 2 decimals so a marginally-higher
