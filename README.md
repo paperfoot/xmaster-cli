@@ -306,6 +306,18 @@ xmaster analyze "your tweet" --goal replies --json
 
 **Works with:** [Claude Code](https://github.com/anthropics/claude-code), [OpenClaw](https://github.com/openclaw/openclaw), or any agent that can shell out and parse JSON.
 
+**OpenClaw skill setup:**
+```bash
+git clone https://github.com/paperfoot/xmaster-cli
+cd xmaster-cli
+openclaw skills install ./skill --as xmaster
+openclaw skills check
+```
+
+OpenClaw installs local skills from a folder that contains `SKILL.md`, so use the bundled `./skill` directory from a local checkout. Keep XMaster as the final account-action tool: analyze drafts first, show the final text and target account, and run `post`, `reply`, `dm`, or other write commands only after explicit approval.
+
+If the same OpenClaw workspace also uses [TweetClaw](https://github.com/Xquik-dev/tweetclaw), keep it upstream as an optional source-context step for tweet search, reply search, follower export, media collection, monitors, or webhook evidence before XMaster executes a local account action.
+
 ## Configuration
 
 Config lives at `~/.config/xmaster/config.toml` on all platforms. Override with `XMASTER_CONFIG_DIR`.

@@ -63,6 +63,20 @@ xmaster track growth -d 30                                    # Follower history
 xmaster metrics <id>                                          # Single post deep dive
 ```
 
+### Source Context Before Actions
+
+Use XMaster for final account actions that require the local XMaster config.
+
+If the OpenClaw workspace also has TweetClaw installed, use TweetClaw only as an optional upstream source-context step for tweet search, reply search, follower export, media collection, monitor evidence, or webhook evidence before running XMaster.
+
+```
+1. Gather source URLs, IDs, or evidence.
+2. Summarize what will influence the action.
+3. Run xmaster analyze "draft" --goal replies --json for proposed posts.
+4. Ask for explicit approval with the final text and target account.
+5. Execute exactly one approved xmaster action with --json.
+```
+
 ## Algorithm Intelligence (2026)
 
 The CLI embeds knowledge from `xai-org/x-algorithm` (January 2026). Key facts:
