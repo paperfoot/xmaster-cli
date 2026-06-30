@@ -162,8 +162,8 @@ impl Tableable for SetupResult {
 // ---------------------------------------------------------------------------
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
+    if s.chars().count() > max {
+        format!("{}...", crate::utils::safe_truncate(s, max.saturating_sub(3)))
     } else {
         s.to_string()
     }
@@ -464,4 +464,22 @@ pub async fn setup(format: OutputFormat) -> Result<(), XmasterError> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_does_not_panic_on_multibyte() {
+        let s = "🚀".repeat(10);
+        let out = truncate(&s, 6);
+        assert!(out.ends_with("..."));
+        assert!(out.chars().count() <= 6);
+    }
+
+    #[test]
+    fn truncate_leaves_short_string_unchanged() {
+        assert_eq!(truncate("hello", 60), "hello");
+    }
 }
