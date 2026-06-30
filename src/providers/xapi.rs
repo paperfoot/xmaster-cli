@@ -1328,94 +1328,70 @@ impl XApi {
 
     // -- Engagement ---------------------------------------------------------
 
-    pub async fn like_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+    /// POST a single-id body to the authenticated user's `{collection}`.
+    async fn add_to_collection(
+        &self,
+        collection: &str,
+        body: serde_json::Value,
+    ) -> Result<(), XmasterError> {
         let uid = self.get_authenticated_user_id().await?;
         self.request(
             Method::POST,
-            &format!("{BASE}/users/{uid}/likes"),
-            Some(json!({ "tweet_id": tweet_id })),
+            &format!("{BASE}/users/{uid}/{collection}"),
+            Some(body),
         )
         .await?;
         Ok(())
+    }
+
+    /// DELETE `{id}` from the authenticated user's `{collection}`.
+    async fn remove_from_collection(&self, collection: &str, id: &str) -> Result<(), XmasterError> {
+        let uid = self.get_authenticated_user_id().await?;
+        self.request(
+            Method::DELETE,
+            &format!("{BASE}/users/{uid}/{collection}/{id}"),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn like_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        self.add_to_collection("likes", json!({ "tweet_id": tweet_id }))
+            .await
     }
 
     pub async fn unlike_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
-        let uid = self.get_authenticated_user_id().await?;
-        self.request(
-            Method::DELETE,
-            &format!("{BASE}/users/{uid}/likes/{tweet_id}"),
-            None,
-        )
-        .await?;
-        Ok(())
+        self.remove_from_collection("likes", tweet_id).await
     }
 
     pub async fn retweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
-        let uid = self.get_authenticated_user_id().await?;
-        self.request(
-            Method::POST,
-            &format!("{BASE}/users/{uid}/retweets"),
-            Some(json!({ "tweet_id": tweet_id })),
-        )
-        .await?;
-        Ok(())
+        self.add_to_collection("retweets", json!({ "tweet_id": tweet_id }))
+            .await
     }
 
     pub async fn unretweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
-        let uid = self.get_authenticated_user_id().await?;
-        self.request(
-            Method::DELETE,
-            &format!("{BASE}/users/{uid}/retweets/{tweet_id}"),
-            None,
-        )
-        .await?;
-        Ok(())
+        self.remove_from_collection("retweets", tweet_id).await
     }
 
     pub async fn bookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
-        let uid = self.get_authenticated_user_id().await?;
-        self.request(
-            Method::POST,
-            &format!("{BASE}/users/{uid}/bookmarks"),
-            Some(json!({ "tweet_id": tweet_id })),
-        )
-        .await?;
-        Ok(())
+        self.add_to_collection("bookmarks", json!({ "tweet_id": tweet_id }))
+            .await
     }
 
     pub async fn unbookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
-        let uid = self.get_authenticated_user_id().await?;
-        self.request(
-            Method::DELETE,
-            &format!("{BASE}/users/{uid}/bookmarks/{tweet_id}"),
-            None,
-        )
-        .await?;
-        Ok(())
+        self.remove_from_collection("bookmarks", tweet_id).await
     }
 
     // -- Follow/unfollow ----------------------------------------------------
 
     pub async fn follow_user(&self, target_user_id: &str) -> Result<(), XmasterError> {
-        let uid = self.get_authenticated_user_id().await?;
-        self.request(
-            Method::POST,
-            &format!("{BASE}/users/{uid}/following"),
-            Some(json!({ "target_user_id": target_user_id })),
-        )
-        .await?;
-        Ok(())
+        self.add_to_collection("following", json!({ "target_user_id": target_user_id }))
+            .await
     }
 
     pub async fn unfollow_user(&self, target_user_id: &str) -> Result<(), XmasterError> {
-        let uid = self.get_authenticated_user_id().await?;
-        self.request(
-            Method::DELETE,
-            &format!("{BASE}/users/{uid}/following/{target_user_id}"),
-            None,
-        )
-        .await?;
-        Ok(())
+        self.remove_from_collection("following", target_user_id).await
     }
 
     // -- User lookup --------------------------------------------------------
