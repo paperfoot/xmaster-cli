@@ -1535,15 +1535,6 @@ impl XApi {
 
     // -- Timelines ----------------------------------------------------------
 
-    #[allow(dead_code)]
-    pub async fn get_user_tweets(
-        &self,
-        user_id: &str,
-        count: usize,
-    ) -> Result<Vec<TweetData>, XmasterError> {
-        self.get_user_tweets_paginated(user_id, count, None, None).await
-    }
-
     pub async fn get_user_mentions(
         &self,
         user_id: &str,

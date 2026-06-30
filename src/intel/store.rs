@@ -109,15 +109,6 @@ pub struct SnapshotRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TimingSlot {
-    pub day_of_week: i32,
-    pub hour_of_day: i32,
-    pub avg_impressions: f64,
-    pub avg_engagement_rate: f64,
-    pub sample_count: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct RecentVelocity {
     pub posts_1h: i64,
     pub posts_6h: i64,
@@ -957,97 +948,6 @@ impl IntelStore {
             .optional()
     }
 
-    /// Aggregated timing heatmap: avg engagement by day-of-week / hour-of-day.
-    pub fn get_timing_heatmap(&self) -> Result<Vec<TimingSlot>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT p.day_of_week, p.hour_of_day,
-                    AVG(ms.impressions)                                         AS avg_imp,
-                    AVG(CASE WHEN ms.impressions > 0
-                         THEN (ms.likes + ms.retweets + ms.replies + ms.quotes) * 1.0
-                              / ms.impressions ELSE 0 END)                      AS avg_er,
-                    COUNT(DISTINCT p.tweet_id)                                  AS cnt
-             FROM posts p
-             JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-             GROUP BY p.day_of_week, p.hour_of_day
-             ORDER BY avg_er DESC",
-        )?;
-
-        let rows = stmt.query_map([], |row| {
-            Ok(TimingSlot {
-                day_of_week: row.get(0)?,
-                hour_of_day: row.get(1)?,
-                avg_impressions: row.get(2)?,
-                avg_engagement_rate: row.get(3)?,
-                sample_count: row.get(4)?,
-            })
-        })?;
-
-        rows.collect()
-    }
-
-    /// Top N best posting time slots, optionally filtered by content type.
-    pub fn get_best_posting_times(
-        &self,
-        content_type: Option<&str>,
-        top_n: i64,
-    ) -> Result<Vec<TimingSlot>, rusqlite::Error> {
-        let (sql, use_filter) = match content_type {
-            Some(_) => (
-                "SELECT p.day_of_week, p.hour_of_day,
-                        AVG(ms.impressions) AS avg_imp,
-                        AVG(CASE WHEN ms.impressions > 0
-                             THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0
-                                  / ms.impressions ELSE 0 END) AS avg_er,
-                        COUNT(DISTINCT p.tweet_id) AS cnt
-                 FROM posts p
-                 JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                 WHERE p.content_type = ?1
-                 GROUP BY p.day_of_week, p.hour_of_day
-                 HAVING cnt >= 2
-                 ORDER BY avg_er DESC
-                 LIMIT ?2",
-                true,
-            ),
-            None => (
-                "SELECT p.day_of_week, p.hour_of_day,
-                        AVG(ms.impressions) AS avg_imp,
-                        AVG(CASE WHEN ms.impressions > 0
-                             THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0
-                                  / ms.impressions ELSE 0 END) AS avg_er,
-                        COUNT(DISTINCT p.tweet_id) AS cnt
-                 FROM posts p
-                 JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                 GROUP BY p.day_of_week, p.hour_of_day
-                 HAVING cnt >= 2
-                 ORDER BY avg_er DESC
-                 LIMIT ?1",
-                false,
-            ),
-        };
-
-        let mut stmt = self.conn.prepare(sql)?;
-
-        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<TimingSlot> {
-            Ok(TimingSlot {
-                day_of_week: row.get(0)?,
-                hour_of_day: row.get(1)?,
-                avg_impressions: row.get(2)?,
-                avg_engagement_rate: row.get(3)?,
-                sample_count: row.get(4)?,
-            })
-        };
-
-        let results: Vec<TimingSlot> = if use_filter {
-            stmt.query_map(params![content_type.unwrap(), top_n], map_row)?
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map(params![top_n], map_row)?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-
-        Ok(results)
-    }
-
     /// Posts in the last 1h, 6h, 24h and whether any recent post is accelerating.
     pub fn get_recent_post_velocity(&self) -> Result<RecentVelocity, rusqlite::Error> {
         let now = Utc::now().timestamp();
@@ -1481,13 +1381,6 @@ mod tests {
         assert!(info.is_some());
         let info = info.unwrap();
         assert_eq!(info.total_engagements, 2);
-    }
-
-    #[test]
-    fn timing_heatmap_empty_db() {
-        let store = test_store();
-        let heatmap = store.get_timing_heatmap().unwrap();
-        assert!(heatmap.is_empty());
     }
 
     #[test]
