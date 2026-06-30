@@ -52,6 +52,12 @@ pub enum XmasterError {
     Io(#[from] std::io::Error),
 }
 
+impl From<rusqlite::Error> for XmasterError {
+    fn from(e: rusqlite::Error) -> Self {
+        XmasterError::Config(format!("DB error: {e}"))
+    }
+}
+
 impl XmasterError {
     pub fn exit_code(&self) -> i32 {
         match self {

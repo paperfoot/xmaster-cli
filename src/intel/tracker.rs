@@ -255,8 +255,7 @@ impl PostTracker {
                 "SELECT tweet_id, posted_at FROM posts
                  WHERE posted_at > ?1
                  ORDER BY posted_at DESC",
-            )
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            )?;
 
         let rows: Vec<(String, i64)> = stmt
             .query_map(params![cutoff], |row| {
@@ -269,10 +268,8 @@ impl PostTracker {
                         .unwrap_or(0)
                 });
                 Ok((tweet_id, posted_at))
-            })
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         if rows.is_empty() {
             self.update_timing_stats()?;
@@ -382,8 +379,7 @@ impl PostTracker {
                  JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
                  GROUP BY COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)
                  ORDER BY avg_er DESC",
-            )
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            )?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -397,11 +393,9 @@ impl PostTracker {
                     avg_engagement_rate: row.get(3)?,
                     sample_count: row.get::<_, i64>(4)? as u32,
                 })
-            })
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // -- best posting time ----------------------------------------------------
@@ -412,8 +406,7 @@ impl PostTracker {
     ) -> Result<Option<TimingSlot>, XmasterError> {
         let total: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            .query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))?;
 
         if total < 10 {
             return Ok(None);
@@ -449,8 +442,7 @@ impl PostTracker {
                         })
                     },
                 )
-                .optional()
-                .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?,
+                .optional()?,
             None => self
                 .conn
                 .query_row(
@@ -479,8 +471,7 @@ impl PostTracker {
                         })
                     },
                 )
-                .optional()
-                .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?,
+                .optional()?,
         };
 
         Ok(slot)
@@ -512,8 +503,7 @@ impl PostTracker {
                 params![cutoff],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .optional()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            .optional()?;
 
         let (tweet_id, text, posted_at) = match result {
             Some(r) => r,
@@ -584,8 +574,7 @@ impl PostTracker {
                    AND ms.id = (SELECT MAX(id) FROM metric_snapshots WHERE tweet_id = p.tweet_id)
                  WHERE p.posted_at > ?1
                  ORDER BY er DESC",
-            )
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            )?;
 
         struct PostRow {
             tweet_id: String,
@@ -604,10 +593,8 @@ impl PostTracker {
                     impressions: row.get(3)?,
                     engagement_rate: row.get(4)?,
                 })
-            })
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let total_posts = posts.len() as u32;
         let total_impressions: u64 = posts.iter().map(|p| p.impressions as u64).sum();
@@ -677,8 +664,7 @@ impl PostTracker {
                    AND p.posted_at <= ?2",
                 params![prev_cutoff, cutoff],
                 |row| row.get::<_, Option<f64>>(0),
-            )
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?
+            )?
             .unwrap_or(0.0);
 
         let trend = if prev_avg_er == 0.0 || total_posts == 0 {
@@ -733,8 +719,7 @@ impl PostTracker {
                  FROM posts p
                  ORDER BY p.posted_at DESC
                  LIMIT 50",
-            )
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            )?;
 
         let posts: Vec<TrackedPost> = stmt
             .query_map([], |row| {
@@ -756,10 +741,8 @@ impl PostTracker {
                     latest_impressions: row.get(5)?,
                     latest_engagement_rate: row.get(6)?,
                 })
-            })
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let total = posts.len() as u32;
         Ok(TrackStatus {
@@ -773,8 +756,7 @@ impl PostTracker {
     fn update_timing_stats(&self) -> Result<(), XmasterError> {
         let now = Utc::now().timestamp();
         self.conn
-            .execute_batch("DELETE FROM timing_stats")
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            .execute_batch("DELETE FROM timing_stats")?;
         self.conn
             .execute(
                 "INSERT INTO timing_stats
@@ -791,8 +773,7 @@ impl PostTracker {
                  JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
                  GROUP BY COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)",
                 params![now],
-            )
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            )?;
         Ok(())
     }
 }
@@ -838,14 +819,14 @@ impl PostTracker {
         self.conn.execute(
             "INSERT INTO account_snapshots (snapshot_at, followers, following, tweets) VALUES (?1, ?2, ?3, ?4)",
             params![now_ts, followers, following, tweets],
-        ).map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+        )?;
 
         // Get previous snapshot for change calculation
         let prev: Option<(i64, i64)> = self.conn.query_row(
             "SELECT followers, following FROM account_snapshots WHERE snapshot_at < ?1 ORDER BY snapshot_at DESC LIMIT 1",
             params![now_ts],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional().map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+        ).optional()?;
 
         let (prev_followers, prev_following) = prev.unwrap_or((followers, following));
 
@@ -862,15 +843,14 @@ impl PostTracker {
     /// Store the current follower list for diffing.
     pub fn store_follower_list(&self, followers: &[(String, String, i64)]) -> Result<(), XmasterError> {
         let now_ts = Utc::now().timestamp();
-        let tx = self.conn.unchecked_transaction()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+        let tx = self.conn.unchecked_transaction()?;
         for (user_id, username, follower_count) in followers {
             tx.execute(
                 "INSERT INTO follower_list (snapshot_at, user_id, username, followers) VALUES (?1, ?2, ?3, ?4)",
                 params![now_ts, user_id, username, follower_count],
-            ).map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            )?;
         }
-        tx.commit().map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -881,7 +861,7 @@ impl PostTracker {
             "SELECT MAX(snapshot_at) FROM follower_list",
             [],
             |row| row.get(0),
-        ).optional().map_err(|e| XmasterError::Config(format!("DB error: {e}")))?.flatten();
+        ).optional()?.flatten();
 
         let current_set: std::collections::HashMap<&str, (&str, i64)> = current.iter()
             .map(|(uid, uname, fc)| (uid.as_str(), (uname.as_str(), *fc)))
@@ -894,13 +874,12 @@ impl PostTracker {
             // Get previous follower user_ids
             let mut stmt = self.conn.prepare(
                 "SELECT user_id, username, followers FROM follower_list WHERE snapshot_at = ?1"
-            ).map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            )?;
 
             let prev_rows: Vec<(String, String, i64)> = stmt.query_map(params![ts], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            }).map_err(|e| XmasterError::Config(format!("DB error: {e}")))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
             let prev_set: std::collections::HashSet<String> = prev_rows.iter().map(|(uid, _, _)| uid.clone()).collect();
             let curr_ids: std::collections::HashSet<&str> = current_set.keys().copied().collect();
@@ -938,7 +917,7 @@ impl PostTracker {
         let mut stmt = self.conn.prepare(
             "SELECT snapshot_at, followers, following, tweets FROM account_snapshots
              WHERE snapshot_at > ?1 ORDER BY snapshot_at ASC"
-        ).map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+        )?;
 
         let rows = stmt.query_map(params![cutoff], |row| {
             let ts: i64 = row.get(0)?;
@@ -952,10 +931,9 @@ impl PostTracker {
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default(),
             })
-        }).map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
+        })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| XmasterError::Config(format!("DB error: {e}")))
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
