@@ -1268,10 +1268,7 @@ impl XApi {
                 .cloned()
                 .ok_or_else(|| XmasterError::NotFound(format!("Tweet {id}")))?
         )?;
-        Self::merge_authors(&mut [tweet.clone()], &includes);
-        if let Some(inc) = &includes {
-            Self::merge_authors(std::slice::from_mut(&mut tweet), &Some(inc.clone()));
-        }
+        Self::merge_authors(std::slice::from_mut(&mut tweet), &includes);
         Ok(tweet)
     }
 
