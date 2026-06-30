@@ -127,72 +127,6 @@ fn check_command_access(cmd_name: &str) -> Result<(), XmasterError> {
     Ok(())
 }
 
-#[cfg(test)]
-mod access_tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn clear_access_env() {
-        std::env::remove_var("XMASTER_ALLOW_COMMANDS");
-        std::env::remove_var("XMASTER_DENY_COMMANDS");
-    }
-
-    #[test]
-    fn deny_blocks_command() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_access_env();
-        std::env::set_var("XMASTER_DENY_COMMANDS", "post,delete");
-        let r = check_command_access("post");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("blocked"));
-        clear_access_env();
-    }
-
-    #[test]
-    fn deny_allows_unlisted() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_access_env();
-        std::env::set_var("XMASTER_DENY_COMMANDS", "post,delete");
-        assert!(check_command_access("search").is_ok());
-        clear_access_env();
-    }
-
-    #[test]
-    fn allow_restricts_to_listed() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_access_env();
-        std::env::set_var("XMASTER_ALLOW_COMMANDS", "search,read,metrics");
-        assert!(check_command_access("search").is_ok());
-        let r = check_command_access("post");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("not in"));
-        clear_access_env();
-    }
-
-    #[test]
-    fn introspection_always_allowed() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_access_env();
-        std::env::set_var("XMASTER_DENY_COMMANDS", "agent-info,config");
-        assert!(check_command_access("agent-info").is_ok());
-        assert!(check_command_access("config").is_ok());
-        clear_access_env();
-    }
-
-    #[test]
-    fn deny_takes_precedence_over_allow() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_access_env();
-        std::env::set_var("XMASTER_ALLOW_COMMANDS", "post,search");
-        std::env::set_var("XMASTER_DENY_COMMANDS", "post");
-        let r = check_command_access("post");
-        assert!(r.is_err());
-        clear_access_env();
-    }
-}
-
 pub async fn dispatch(
     ctx: Arc<AppContext>,
     cli: &Cli,
@@ -406,5 +340,71 @@ pub async fn dispatch(
             SkillCommands::Update => skill_cmd::update(format).await,
             SkillCommands::Status => skill_cmd::status(format).await,
         },
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_access_env() {
+        std::env::remove_var("XMASTER_ALLOW_COMMANDS");
+        std::env::remove_var("XMASTER_DENY_COMMANDS");
+    }
+
+    #[test]
+    fn deny_blocks_command() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_DENY_COMMANDS", "post,delete");
+        let r = check_command_access("post");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("blocked"));
+        clear_access_env();
+    }
+
+    #[test]
+    fn deny_allows_unlisted() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_DENY_COMMANDS", "post,delete");
+        assert!(check_command_access("search").is_ok());
+        clear_access_env();
+    }
+
+    #[test]
+    fn allow_restricts_to_listed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_ALLOW_COMMANDS", "search,read,metrics");
+        assert!(check_command_access("search").is_ok());
+        let r = check_command_access("post");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("not in"));
+        clear_access_env();
+    }
+
+    #[test]
+    fn introspection_always_allowed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_DENY_COMMANDS", "agent-info,config");
+        assert!(check_command_access("agent-info").is_ok());
+        assert!(check_command_access("config").is_ok());
+        clear_access_env();
+    }
+
+    #[test]
+    fn deny_takes_precedence_over_allow() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_ALLOW_COMMANDS", "post,search");
+        std::env::set_var("XMASTER_DENY_COMMANDS", "post");
+        let r = check_command_access("post");
+        assert!(r.is_err());
+        clear_access_env();
     }
 }
