@@ -634,6 +634,14 @@ impl XApi {
         "user.fields=created_at,description,public_metrics,verified,profile_image_url,username,name"
     }
 
+    /// GET a tweet-listing endpoint and merge author/media includes.
+    async fn get_tweet_list(&self, url: &str) -> Result<Vec<TweetData>, XmasterError> {
+        let (mut tweets, includes) =
+            self.request_list::<TweetData>(Method::GET, url, None).await?;
+        Self::merge_authors(&mut tweets, &includes);
+        Ok(tweets)
+    }
+
     /// Merge author usernames and media URLs from `includes` into tweet data.
     fn merge_authors(tweets: &mut [TweetData], includes: &Option<Value>) {
         let tweets_len = tweets.len();
@@ -1484,10 +1492,7 @@ impl XApi {
             exp = Self::tweet_expansions(),
             uf = Self::user_fields_param(),
         );
-        let (mut tweets, includes) =
-            self.request_list::<TweetData>(Method::GET, &url, None).await?;
-        Self::merge_authors(&mut tweets, &includes);
-        Ok(tweets)
+        self.get_tweet_list(&url).await
     }
 
     /// Members of a list. Wraps GET /2/lists/:id/members.
@@ -1532,10 +1537,7 @@ impl XApi {
             exp = Self::tweet_expansions(),
             uf = Self::user_fields_param(),
         );
-        let (mut tweets, includes) =
-            self.request_list::<TweetData>(Method::GET, &url, None).await?;
-        Self::merge_authors(&mut tweets, &includes);
-        Ok(tweets)
+        self.get_tweet_list(&url).await
     }
 
     pub async fn get_home_timeline(
@@ -1550,10 +1552,7 @@ impl XApi {
             exp = Self::tweet_expansions(),
             uf = Self::user_fields_param(),
         );
-        let (mut tweets, includes) =
-            self.request_list::<TweetData>(Method::GET, &url, None).await?;
-        Self::merge_authors(&mut tweets, &includes);
-        Ok(tweets)
+        self.get_tweet_list(&url).await
     }
 
     // -- Followers/following ------------------------------------------------
@@ -1599,10 +1598,7 @@ impl XApi {
             exp = Self::tweet_expansions(),
             uf = Self::user_fields_param(),
         );
-        let (mut tweets, includes) =
-            self.request_list::<TweetData>(Method::GET, &url, None).await?;
-        Self::merge_authors(&mut tweets, &includes);
-        Ok(tweets)
+        self.get_tweet_list(&url).await
     }
 
     /// Personalized trends for the authenticated user.
