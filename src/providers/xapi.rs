@@ -1666,30 +1666,27 @@ impl XApi {
         self.search_tweets_paginated(query, mode, count, None, None).await
     }
 
-    pub async fn search_tweets_paginated(
-        &self,
-        query: &str,
-        mode: &str,
-        count: usize,
-        start_time: Option<&str>,
-        end_time: Option<&str>,
-    ) -> Result<Vec<TweetData>, XmasterError> {
-        let encoded_query = percent_encoding::utf8_percent_encode(
-            query,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
-        let sort = match mode {
-            "relevancy" | "relevant" => "relevancy",
-            _ => "recency",
-        };
-        let mut time_params = String::new();
+    /// Build the optional `&start_time` / `&end_time` query fragment.
+    fn time_params(start_time: Option<&str>, end_time: Option<&str>) -> String {
+        let mut s = String::new();
         if let Some(st) = start_time {
-            time_params.push_str(&format!("&start_time={st}"));
+            s.push_str(&format!("&start_time={st}"));
         }
         if let Some(et) = end_time {
-            time_params.push_str(&format!("&end_time={et}"));
+            s.push_str(&format!("&end_time={et}"));
         }
+        s
+    }
 
+    /// Cursor-paginate a tweet listing endpoint up to `count` results.
+    /// `build_url` receives the per-page max_results and returns the request
+    /// URL; this helper appends the pagination_token and merges authors.
+    async fn paginate_tweets(
+        &self,
+        count: usize,
+        min_page_size: usize,
+        build_url: impl Fn(usize) -> String,
+    ) -> Result<Vec<TweetData>, XmasterError> {
         let mut all_tweets = Vec::new();
         let mut next_token: Option<String> = None;
         let max_pages = (count / 100).max(1) + 1;
@@ -1697,14 +1694,9 @@ impl XApi {
         for _ in 0..max_pages {
             let remaining = count - all_tweets.len();
             if remaining == 0 { break; }
-            let page_size = remaining.clamp(10, 100);
+            let page_size = remaining.clamp(min_page_size, 100);
 
-            let mut url = format!(
-                "{BASE}/tweets/search/recent?query={encoded_query}&max_results={page_size}&sort_order={sort}&{tf}&{exp}&{uf}{time_params}",
-                tf = Self::tweet_fields(),
-                exp = Self::tweet_expansions(),
-                uf = Self::user_fields_param(),
-            );
+            let mut url = build_url(page_size);
             if let Some(ref token) = next_token {
                 url.push_str(&format!("&pagination_token={token}"));
             }
@@ -1724,6 +1716,34 @@ impl XApi {
         Ok(all_tweets)
     }
 
+    pub async fn search_tweets_paginated(
+        &self,
+        query: &str,
+        mode: &str,
+        count: usize,
+        start_time: Option<&str>,
+        end_time: Option<&str>,
+    ) -> Result<Vec<TweetData>, XmasterError> {
+        let encoded_query =
+            percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
+        let sort = match mode {
+            "relevancy" | "relevant" => "relevancy",
+            _ => "recency",
+        };
+        let time_params = Self::time_params(start_time, end_time);
+
+        self.paginate_tweets(count, 10, |page_size| {
+            format!(
+                "{BASE}/tweets/search/recent?query={encoded_query}&max_results={page_size}&sort_order={sort}&{tf}&{exp}&{uf}{time_params}",
+                tf = Self::tweet_fields(),
+                exp = Self::tweet_expansions(),
+                uf = Self::user_fields_param(),
+            )
+        })
+        .await
+    }
+
     pub async fn get_user_tweets_paginated(
         &self,
         user_id: &str,
@@ -1731,46 +1751,17 @@ impl XApi {
         start_time: Option<&str>,
         end_time: Option<&str>,
     ) -> Result<Vec<TweetData>, XmasterError> {
-        let mut time_params = String::new();
-        if let Some(st) = start_time {
-            time_params.push_str(&format!("&start_time={st}"));
-        }
-        if let Some(et) = end_time {
-            time_params.push_str(&format!("&end_time={et}"));
-        }
+        let time_params = Self::time_params(start_time, end_time);
 
-        let mut all_tweets = Vec::new();
-        let mut next_token: Option<String> = None;
-        let max_pages = (count / 100).max(1) + 1;
-
-        for _ in 0..max_pages {
-            let remaining = count - all_tweets.len();
-            if remaining == 0 { break; }
-            let page_size = remaining.clamp(5, 100);
-
-            let mut url = format!(
+        self.paginate_tweets(count, 5, |page_size| {
+            format!(
                 "{BASE}/users/{user_id}/tweets?max_results={page_size}&{tf}&{exp}&{uf}{time_params}",
                 tf = Self::tweet_fields(),
                 exp = Self::tweet_expansions(),
                 uf = Self::user_fields_param(),
-            );
-            if let Some(ref token) = next_token {
-                url.push_str(&format!("&pagination_token={token}"));
-            }
-
-            let val = self.request(Method::GET, &url, None).await?;
-            let includes = val.get("includes").cloned();
-            let envelope: ApiResponse<Vec<TweetData>> = serde_json::from_value(val)?;
-            let mut tweets = envelope.data.unwrap_or_default();
-            Self::merge_authors(&mut tweets, &includes);
-            all_tweets.extend(tweets);
-
-            next_token = envelope.meta.and_then(|m| m.next_token);
-            if next_token.is_none() { break; }
-        }
-
-        all_tweets.truncate(count);
-        Ok(all_tweets)
+            )
+        })
+        .await
     }
 
     // -- Direct Messages ----------------------------------------------------
