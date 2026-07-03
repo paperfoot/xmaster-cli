@@ -46,7 +46,6 @@ struct TokenResponse {
     refresh_token: Option<String>,
     #[allow(dead_code)]
     token_type: String,
-    #[allow(dead_code)]
     expires_in: Option<u64>,
     #[allow(dead_code)]
     scope: Option<String>,
@@ -131,7 +130,7 @@ pub async fn authorize(client_id: &str, client_secret: &str) -> Result<(), Xmast
     let tokens = exchange_code(client_id, client_secret, &code, &code_verifier).await?;
 
     // Save to config
-    save_tokens(&tokens.access_token, tokens.refresh_token.as_deref())?;
+    save_tokens(&tokens.access_token, tokens.refresh_token.as_deref(), tokens.expires_in)?;
 
     eprintln!("OAuth 2.0 authorization complete! Tokens saved.");
     Ok(())
@@ -263,7 +262,11 @@ async fn refresh_token_request(
     Ok(tokens)
 }
 
-fn save_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<(), XmasterError> {
+fn save_tokens(
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_in: Option<u64>,
+) -> Result<(), XmasterError> {
     let path = config::config_path();
     let existing = if path.exists() {
         std::fs::read_to_string(&path).unwrap_or_default()
@@ -293,6 +296,16 @@ fn save_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<(), Xm
                 toml::Value::String(rt.to_string()),
             );
         }
+        // X access tokens live ~2h; record the expiry so ensure_oauth2_token
+        // can skip the refresh round-trip while the token is still fresh.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        t.insert(
+            "oauth2_expires_at".to_string(),
+            toml::Value::Integer((now + expires_in.unwrap_or(7200)) as i64),
+        );
     }
 
     let toml_str = toml::to_string_pretty(&doc)
@@ -327,11 +340,26 @@ pub async fn ensure_oauth2_token(config: &AppConfig) -> Result<String, XmasterEr
         });
     }
 
+    // Skip the refresh round-trip while the stored token is still fresh.
+    // Refreshing on every call wasted a network round-trip and — because X
+    // rotates refresh tokens — let concurrent xmaster processes invalidate
+    // each other's stored tokens. Refresh only inside the final 5 minutes.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    if !access_token.is_empty()
+        && config.keys.oauth2_expires_at > 0
+        && now + 300 < config.keys.oauth2_expires_at
+    {
+        return Ok(access_token.clone());
+    }
+
     // If we have a refresh token, try refreshing (access tokens expire every 2 hours)
     if !refresh_token.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
         match refresh_token_request(client_id, client_secret, refresh_token).await {
             Ok(tokens) => {
-                save_tokens(&tokens.access_token, tokens.refresh_token.as_deref())?;
+                save_tokens(&tokens.access_token, tokens.refresh_token.as_deref(), tokens.expires_in)?;
                 return Ok(tokens.access_token);
             }
             Err(e) => {

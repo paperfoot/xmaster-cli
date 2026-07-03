@@ -86,6 +86,10 @@ pub struct Keys {
     pub oauth2_access_token: String,
     #[serde(default)]
     pub oauth2_refresh_token: String,
+    /// Unix epoch when oauth2_access_token expires (0 = unknown). Written on
+    /// every token save so ensure_oauth2_token can skip needless refreshes.
+    #[serde(default)]
+    pub oauth2_expires_at: i64,
     // Web session cookies (fallback for reply restrictions)
     #[serde(default)]
     pub web_ct0: String,
