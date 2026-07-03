@@ -35,6 +35,8 @@ pub struct ScheduledPost {
 pub struct FireResult {
     pub fired: u32,
     pub failed: u32,
+    /// Transient failures re-queued for a later attempt (retry_count < 3).
+    pub retried: u32,
     pub missed: u32,
     pub posts: Vec<FiredPost>,
 }
@@ -317,6 +319,7 @@ impl PostScheduler {
         let mut result = FireResult {
             fired: 0,
             failed: 0,
+            retried: 0,
             missed: 0,
             posts: Vec::new(),
         };
@@ -477,7 +480,9 @@ impl PostScheduler {
                                 params![new_retry, err_msg, id],
                             )
                             .map_err(|e| XmasterError::Config(e.to_string()))?;
-                        result.failed += 1;
+                        // Re-queued for retry, not a terminal failure — the
+                        // per-post status below already says "retry".
+                        result.retried += 1;
                     }
 
                     result.posts.push(FiredPost {
@@ -519,8 +524,12 @@ impl PostScheduler {
 
         let (best_dow, best_hour) = row?;
 
-        // Find the next occurrence of this day/hour in UTC
-        let now = Utc::now();
+        // timing_stats rows are written by tracker.rs::update_timing_stats in
+        // LOCAL day/hour (COALESCE(local_*, *)), so find the next occurrence
+        // in local time and only then convert to a UTC timestamp. Treating
+        // the stored hour as UTC shifted auto-scheduled posts by the user's
+        // whole UTC offset.
+        let now = chrono::Local::now();
         let current_dow = now.weekday().num_days_from_monday() as i32; // 0=Mon
         let current_hour = now.hour() as i32;
 
@@ -534,7 +543,10 @@ impl PostScheduler {
             .date_naive()
             .and_hms_opt(best_hour as u32, 0, 0)?;
         let target_date = target + chrono::Duration::days(days_ahead as i64);
-        Some(target_date.and_utc().timestamp())
+        target_date
+            .and_local_timezone(chrono::Local)
+            .earliest()
+            .map(|dt| dt.timestamp())
     }
 
     // -- internal helpers -----------------------------------------------------

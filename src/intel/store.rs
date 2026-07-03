@@ -833,21 +833,22 @@ impl IntelStore {
 
     /// Fetch the most recent metric snapshot for a tweet with all counters + timestamps.
     /// Returns None if no snapshot exists yet for this tweet_id.
-    ///
-    /// Fetch the most recent metric snapshot for a tweet with all counters + timestamps.
-    /// Returns None if no snapshot exists yet for this tweet_id.
     pub fn latest_snapshot_full(
         &self,
         tweet_id: &str,
     ) -> Result<Option<FullSnapshot>, rusqlite::Error> {
+        // CAST guards: legacy DBs declare snapshot_at TEXT (see the migration
+        // note above), so epochs are stored as text — without the casts the
+        // ordering is lexicographic and row.get::<i64> fails, which silently
+        // dropped delta/velocity from every metrics call on legacy DBs.
         self.conn
             .query_row(
-                "SELECT snapshot_at, minutes_since_post,
+                "SELECT CAST(snapshot_at AS INTEGER), minutes_since_post,
                         likes, retweets, replies,
                         impressions, bookmarks, quotes, profile_clicks
                  FROM metric_snapshots
                  WHERE tweet_id = ?1
-                 ORDER BY snapshot_at DESC
+                 ORDER BY CAST(snapshot_at AS INTEGER) DESC
                  LIMIT 1",
                 params![tweet_id],
                 |row| {
@@ -1593,8 +1594,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("legacy.db");
 
-        // Recreate the legacy table BEFORE IntelStore sees the file, so
-        // CREATE IF NOT EXISTS keeps the TEXT affinity.
+        // Recreate the legacy tables BEFORE IntelStore sees the file, so
+        // CREATE IF NOT EXISTS keeps the TEXT affinity (and, for
+        // metric_snapshots, the missing url_clicks column the migration adds).
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
@@ -1607,6 +1609,19 @@ mod tests {
                     performed_at     TEXT NOT NULL,
                     got_reply_back   BOOLEAN DEFAULT NULL,
                     target_followers INTEGER
+                );
+                CREATE TABLE metric_snapshots (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tweet_id           TEXT NOT NULL,
+                    snapshot_at        TEXT NOT NULL,
+                    minutes_since_post INTEGER NOT NULL,
+                    likes              INTEGER NOT NULL DEFAULT 0,
+                    retweets           INTEGER NOT NULL DEFAULT 0,
+                    replies            INTEGER NOT NULL DEFAULT 0,
+                    impressions        INTEGER NOT NULL DEFAULT 0,
+                    bookmarks          INTEGER NOT NULL DEFAULT 0,
+                    quotes             INTEGER NOT NULL DEFAULT 0,
+                    profile_clicks     INTEGER NOT NULL DEFAULT 0
                 );",
             )
             .unwrap();
@@ -1637,6 +1652,24 @@ mod tests {
         // The cutoff actually filters: nothing is pending with a 0-hour window.
         let none = store.get_pending_replies(0).unwrap();
         assert!(none.is_empty());
+
+        // Same legacy hazard for metric_snapshots.snapshot_at (TEXT affinity):
+        // latest_snapshot_full must CAST or delta/velocity silently vanish.
+        store
+            .log_metric_snapshot("tweet_legacy", 5, 1, 2, 1000, 3, 0, 4, 30, None)
+            .unwrap();
+        let stored: String = store
+            .conn
+            .query_row(
+                "SELECT typeof(snapshot_at) FROM metric_snapshots LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "text");
+        let snap = store.latest_snapshot_full("tweet_legacy").unwrap().unwrap();
+        assert_eq!(snap.impressions, 1000);
+        assert!(snap.snapshot_at > 0);
 
         std::mem::forget(dir);
     }
