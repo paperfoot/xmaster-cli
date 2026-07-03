@@ -101,11 +101,18 @@ impl XaiSearch {
             "store": false,
         });
 
-        // xAI Responses API needs a longer timeout (Grok runs search server-side)
-        let xai_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(XmasterError::Http)?;
+        // xAI Responses API needs a longer timeout (Grok runs search server-side).
+        // Built once per process — same pattern as oauth2.rs.
+        static XAI_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let xai_client = if let Some(c) = XAI_CLIENT.get() {
+            c
+        } else {
+            let c = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(XmasterError::Http)?;
+            XAI_CLIENT.get_or_init(|| c)
+        };
 
         let resp = xai_client
             .post("https://api.x.ai/v1/responses")
