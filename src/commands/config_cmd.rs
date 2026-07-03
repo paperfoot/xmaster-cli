@@ -247,6 +247,7 @@ pub async fn get(format: OutputFormat, key: &str) -> Result<(), XmasterError> {
         "keys.web_ct0" => mask(&cfg.keys.web_ct0),
         "keys.web_auth_token" => mask(&cfg.keys.web_auth_token),
         "keys.graphql_create_tweet_id" => mask(&cfg.keys.graphql_create_tweet_id),
+        "keys.graphql_create_note_tweet_id" => mask(&cfg.keys.graphql_create_note_tweet_id),
         _ => return Err(XmasterError::Config(format!("Unknown config key: {key}"))),
     };
     let display = ConfigGetResult { key: key.to_string(), value };
@@ -386,12 +387,14 @@ const VALID_CONFIG_KEYS: &[&str] = &[
     "keys.xai",
     "keys.oauth2_client_id", "keys.oauth2_client_secret",
     "keys.oauth2_access_token", "keys.oauth2_refresh_token",
-    "keys.web_ct0", "keys.web_auth_token", "keys.graphql_create_tweet_id",
+    "keys.web_ct0", "keys.web_auth_token",
+    "keys.graphql_create_tweet_id", "keys.graphql_create_note_tweet_id",
     "settings.timeout",
     "settings.disable_fxtwitter",
     "account.premium",
     "account.bio",
     "style.voice",
+    "niche.topics",
 ];
 
 pub async fn check(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), XmasterError> {
