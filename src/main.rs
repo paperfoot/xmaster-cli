@@ -57,7 +57,7 @@ async fn main() {
         }
     };
 
-    let format = OutputFormat::detect(cli.json);
+    let format = OutputFormat::detect_full(cli.json, cli.csv);
 
     let config = match load_config() {
         Ok(c) => c,

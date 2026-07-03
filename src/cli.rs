@@ -14,6 +14,10 @@ pub struct Cli {
     /// Output as JSON (auto-enabled when piped)
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Output as CSV (list commands: timeline, search, replies, metrics, ...)
+    #[arg(long, global = true)]
+    pub csv: bool,
 }
 
 #[derive(Subcommand)]
