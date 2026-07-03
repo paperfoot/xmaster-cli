@@ -1664,11 +1664,14 @@ impl XApi {
     pub async fn get_home_timeline(
         &self,
         count: usize,
+        start_time: Option<&str>,
+        end_time: Option<&str>,
     ) -> Result<Vec<TweetData>, XmasterError> {
         let user_id = self.get_authenticated_user_id().await?;
         let max = count.clamp(1, 100);
+        let time_params = Self::time_params(start_time, end_time);
         let url = format!(
-            "{BASE}/users/{user_id}/timelines/reverse_chronological?max_results={max}&{tf}&{exp}&{uf}",
+            "{BASE}/users/{user_id}/timelines/reverse_chronological?max_results={max}&{tf}&{exp}&{uf}{time_params}",
             tf = Self::tweet_fields(),
             exp = Self::tweet_expansions(),
             uf = Self::user_fields_param(),

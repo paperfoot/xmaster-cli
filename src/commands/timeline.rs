@@ -133,7 +133,7 @@ pub async fn timeline(
             let u = api.get_user_by_username(username).await?;
             api.get_user_tweets_paginated(&u.id, count, start_time.as_deref(), end_time.as_deref()).await?
         }
-        None => api.get_home_timeline(count).await?,
+        None => api.get_home_timeline(count, start_time.as_deref(), end_time.as_deref()).await?,
     };
     if let Ok(store) = IntelStore::open() {
         let _ = store.record_discovered_posts("timeline", &tweets);
@@ -147,7 +147,11 @@ pub async fn timeline(
             "likes" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.likes)),
             "retweets" | "rts" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.retweets)),
             "date" => {} // already sorted by date from API
-            _ => {}
+            other => {
+                return Err(XmasterError::Config(format!(
+                    "Unknown --sort value '{other}'. Valid: impressions, likes, retweets, date"
+                )));
+            }
         }
     }
 
