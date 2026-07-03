@@ -750,12 +750,24 @@ impl XApi {
             .request_data(Method::POST, &format!("{BASE}/tweets"), Some(body))
             .await;
 
-        // Auto-fallback: replies to non-mentioners 403 since Feb 2026, and
-        // quote-posting via `quote_tweet_id` was removed from all self-serve
-        // tiers on 2026-04-20. Both work through the GraphQL web endpoint, so
-        // retry there using browser cookies.
+        // Auto-fallback to the GraphQL web endpoint, which handles all three
+        // API-side rejections:
+        // - replies to non-mentioners 403 since Feb 2026
+        // - quote-posting removed from self-serve tiers on 2026-04-20
+        // - >280-char Premium posts, which /2/tweets rejects but the web
+        //   path routes through CreateNoteTweet
         if let Err(ref err) = result {
-            if (reply_to.is_some() || quote_tweet_id.is_some()) && Self::is_write_restricted(err) {
+            let long_premium =
+                text.chars().count() > 280 && self.ctx.config.account.premium;
+            let restricted =
+                (reply_to.is_some() || quote_tweet_id.is_some()) && Self::is_write_restricted(err);
+            // For long premium posts any client-side rejection (not billing,
+            // rate limit, or 5xx) is worth one web retry — the API path has
+            // no note-tweet support at all.
+            let length_rejected = long_premium
+                && matches!(err, XmasterError::Api { .. } | XmasterError::AuthMissing { .. });
+
+            if restricted || length_rejected {
                 if self.ctx.config.has_web_cookies() {
                     warn!("API write blocked (X restriction). Falling back to web session...");
                     return self
@@ -764,7 +776,8 @@ impl XApi {
                 } else {
                     return Err(XmasterError::ReplyRestricted(
                         "X blocks programmatic replies to users who haven't @mentioned you, \
-                        and removed API quote-posting for self-serve tiers (2026-04-20). \
+                        removed API quote-posting for self-serve tiers (2026-04-20), and \
+                        rejects >280-char posts on /2/tweets. \
                         Configure web cookies for automatic fallback."
                             .into(),
                     ));
