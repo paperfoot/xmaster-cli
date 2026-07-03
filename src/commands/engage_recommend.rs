@@ -31,6 +31,13 @@ pub fn default_target_band(my_followers: u64) -> (u64, u64) {
     (min, max)
 }
 
+/// Grox spam-classifier bucket penalty: reply chains under sub-500-follower
+/// accounts get extra spam scrutiny (grox/tasks/task_spam_detection.py buckets
+/// by ancestor follower count), so sub-500 targets are deprioritized.
+fn grox_small_account_penalty(followers: u64) -> f64 {
+    if followers < 500 { 0.15 } else { 0.0 }
+}
+
 fn compute_size_fit(target_followers: u64, my_followers: u64) -> f64 {
     let (min, max) = default_target_band(my_followers);
     if target_followers >= min && target_followers <= max {
@@ -236,10 +243,7 @@ pub async fn recommend(
             let size_fit = compute_size_fit(c.followers, my_followers);
             let relevance = c.relevance;
 
-            // Grox spam-classifier bucket penalty: replies under ≤500-follower
-            // ancestor chains carry higher spam-classification risk for small
-            // accounts. Deprioritize sub-500 targets.
-            let small_account_penalty: f64 = if c.followers < 500 { 0.15 } else { 0.0 };
+            let small_account_penalty = grox_small_account_penalty(c.followers);
 
             // Opportunity scoring: reply_roi proxy + size_fit + reciprocity + reach + relevance,
             // minus small-account-bucket penalty.
@@ -763,9 +767,7 @@ pub async fn feed(
         let freshness = 1.0 - (p.age_minutes as f64 / max_age_mins as f64).min(1.0);
         let size_fit = compute_size_fit(p.author_followers, my_followers);
         let openness = if p.likes > 0 { (p.replies as f64 / p.likes as f64).min(1.0) } else { 0.5 };
-        // Grox spam-bucket penalty: replying under sub-500-follower chains
-        // carries higher spam-classification risk.
-        let small_account_penalty: f64 = if p.author_followers < 500 { 0.15 } else { 0.0 };
+        let small_account_penalty = grox_small_account_penalty(p.author_followers);
         p.opportunity_score = (0.45 * freshness + 0.25 * size_fit + 0.20 * openness + 0.10
             - small_account_penalty) as f32;
     }
