@@ -240,6 +240,9 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         "breaking:", "breaking ", "surging", "metastasized", "exposed", "leaked",
         "collapsed", "soaring", "plunging", "obliterated", "demolished", "introducing",
         "announcing", "launching", "shipping", "released",
+        // Past-tense forms — "Google announced layoffs" is exactly the kind of
+        // weighted lead this check exists to recognize
+        "announced", "launched", "shipped", "raised", "acquired", "banned", "approved",
     ];
     let first_line_lower = first_line.to_lowercase();
     let first_line_has_number = first_line.chars().any(|c| c.is_ascii_digit());
@@ -1001,28 +1004,7 @@ fn extract_features(text: &str) -> FeatureVector {
     let has_link = text.contains("http://") || text.contains("https://");
     let link_position = if has_link { Some("body".into()) } else { None };
 
-    // Count real X hashtags only: `#` followed by alphanumeric (not space,
-    // not another `#`). Skips markdown `## ` header prefixes that surface in
-    // long-form / Article bodies fetched via FxTwitter.
-    let hashtag_count = {
-        let chars: Vec<char> = text.chars().collect();
-        let mut count = 0;
-        for (i, &c) in chars.iter().enumerate() {
-            if c != '#' {
-                continue;
-            }
-            // Previous char must NOT be `#` (skip ## / ### markdown)
-            if i > 0 && chars[i - 1] == '#' {
-                continue;
-            }
-            // Next char must be alphanumeric and NOT `#` (real hashtag)
-            match chars.get(i + 1) {
-                Some(&next) if next.is_alphanumeric() => count += 1,
-                _ => {}
-            }
-        }
-        count
-    };
+    let hashtag_count = count_real_hashtags(text);
     let has_question = text.contains('?');
     let has_numbers = text.chars().any(|c| c.is_ascii_digit());
     let starts_with_i = text.starts_with("I ") || text.starts_with("I'");
@@ -1183,6 +1165,30 @@ fn detect_content_type(text: &str) -> String {
     }
 
     "opinion".into()
+}
+
+/// Count real X hashtags only: `#` followed by alphanumeric (not space, not
+/// another `#`). Skips markdown `##`/`###` header prefixes that surface in
+/// long-form / Article bodies fetched via FxTwitter. Shared with
+/// `IntelStore::log_post` so stored metadata agrees with preflight.
+pub(crate) fn count_real_hashtags(text: &str) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut count = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        if c != '#' {
+            continue;
+        }
+        // Previous char must NOT be `#` (skip ## / ### markdown)
+        if i > 0 && chars[i - 1] == '#' {
+            continue;
+        }
+        // Next char must be alphanumeric (real hashtag)
+        match chars.get(i + 1) {
+            Some(&next) if next.is_alphanumeric() => count += 1,
+            _ => {}
+        }
+    }
+    count
 }
 
 fn has_proper_nouns(text: &str) -> bool {

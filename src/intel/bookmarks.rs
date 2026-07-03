@@ -300,8 +300,11 @@ impl BookmarkStore {
 
         for bm in bookmarks {
             let preview: String = bm.text.chars().take(80).collect();
-            let preview = preview.replace('\n', " ");
-            md.push_str(&format!("## @{} — \"{preview}...\"\n", bm.author_username));
+            let mut preview = preview.replace('\n', " ");
+            if bm.text.chars().count() > 80 {
+                preview.push_str("...");
+            }
+            md.push_str(&format!("## @{} — \"{preview}\"\n", bm.author_username));
             let saved_date = chrono::DateTime::from_timestamp(bm.bookmarked_at, 0)
                 .map(|dt| dt.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| bm.bookmarked_at.to_string());

@@ -577,7 +577,7 @@ impl IntelStore {
         let tz_offset = local_now.offset().local_minus_utc() / 60;
         let char_count = text.chars().count() as i32;
         let has_link = text.contains("http://") || text.contains("https://");
-        let hashtag_count = text.matches('#').count() as i32;
+        let hashtag_count = crate::intel::preflight::count_real_hashtags(text) as i32;
         let hook_text: String = text.chars().take(140).collect();
 
         self.conn.execute(
@@ -1020,47 +1020,10 @@ impl IntelStore {
         })
     }
 
-    /// Recalculate the `timing_stats` table from raw posts + snapshots.
-    pub fn update_timing_stats(&self) -> Result<(), rusqlite::Error> {
-        let now = Utc::now().timestamp();
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute_batch("DELETE FROM timing_stats")?;
-        tx.execute(
-            "INSERT INTO timing_stats
-                (day_of_week, hour_of_day, content_type,
-                 avg_impressions, avg_engagement_rate, sample_count, last_updated)
-             SELECT p.day_of_week, p.hour_of_day, p.content_type,
-                    AVG(ms.impressions),
-                    AVG(CASE WHEN ms.impressions > 0
-                         THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0
-                              / ms.impressions ELSE 0 END),
-                    COUNT(DISTINCT p.tweet_id),
-                    ?1
-             FROM posts p
-             JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-             GROUP BY p.day_of_week, p.hour_of_day, p.content_type",
-            params![now],
-        )?;
-        // Also insert an 'all' row per slot
-        tx.execute(
-            "INSERT INTO timing_stats
-                (day_of_week, hour_of_day, content_type,
-                 avg_impressions, avg_engagement_rate, sample_count, last_updated)
-             SELECT p.day_of_week, p.hour_of_day, 'all',
-                    AVG(ms.impressions),
-                    AVG(CASE WHEN ms.impressions > 0
-                         THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0
-                              / ms.impressions ELSE 0 END),
-                    COUNT(DISTINCT p.tweet_id),
-                    ?1
-             FROM posts p
-             JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-             GROUP BY p.day_of_week, p.hour_of_day",
-            params![now],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
+    // NOTE: timing_stats is written exclusively by tracker.rs::update_timing_stats,
+    // which uses LOCAL day/hour (COALESCE(local_*, *)). A UTC-frame duplicate
+    // that lived here was never called in production and disagreed with the
+    // tracker's semantics — deleted rather than kept as a drift hazard.
 
     /// How often a user replies back after we engage with them.
     pub fn get_engagement_reciprocity(
@@ -1517,13 +1480,6 @@ mod tests {
         let store = test_store();
         let info = store.get_engagement_reciprocity("nobody").unwrap();
         assert!(info.is_none());
-    }
-
-    #[test]
-    fn update_timing_stats_empty_db() {
-        let store = test_store();
-        // Should not fail on empty database
-        store.update_timing_stats().unwrap();
     }
 
     #[test]

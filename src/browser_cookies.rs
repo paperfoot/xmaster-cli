@@ -338,16 +338,23 @@ fn extract_firefox() -> Result<WebCookies, XmasterError> {
         XmasterError::Config("No Firefox profile with cookies.sqlite found".into())
     })?;
 
-    // Copy to temp (Firefox also uses WAL)
-    let tmp = std::env::temp_dir().join("xmaster_ff_cookies.sqlite");
+    // Copy to temp (Firefox also uses WAL). Randomize the filename like the
+    // Chromium path does — a fixed name races concurrent runs and can pick up
+    // a stale copy from a crashed one.
+    let tmp = std::env::temp_dir().join(format!(
+        "xmaster_ff_cookies_{}.sqlite",
+        rand::random::<u32>()
+    ));
     std::fs::copy(&cookie_db, &tmp).map_err(|e| {
         XmasterError::Config(format!("Cannot copy Firefox cookie DB: {e}"))
     })?;
 
-    let wal_src = PathBuf::from(format!("{}-wal", cookie_db.display()));
-    let wal_dst = PathBuf::from(format!("{}-wal", tmp.display()));
-    if wal_src.exists() {
-        let _ = std::fs::copy(&wal_src, &wal_dst);
+    for suffix in &["-wal", "-shm"] {
+        let src = PathBuf::from(format!("{}{}", cookie_db.display(), suffix));
+        let dst = PathBuf::from(format!("{}{}", tmp.display(), suffix));
+        if src.exists() {
+            let _ = std::fs::copy(&src, &dst);
+        }
     }
 
     let conn = rusqlite::Connection::open_with_flags(
@@ -387,7 +394,9 @@ fn extract_firefox() -> Result<WebCookies, XmasterError> {
 
     // Cleanup
     let _ = std::fs::remove_file(&tmp);
-    let _ = std::fs::remove_file(&wal_dst);
+    for suffix in &["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", tmp.display(), suffix));
+    }
 
     if ct0.is_empty() || auth_token.is_empty() {
         return Err(XmasterError::Config(
