@@ -136,7 +136,8 @@ pub enum Commands {
 
     /// Search tweets (X API v2)
     Search {
-        /// Search query
+        /// Search query. Supports X operators, incl. min_likes:/min_replies:/
+        /// min_reposts: (since May 2026). Keyword search no longer returns reposts
         query: String,
         /// Search mode
         #[arg(long, default_value = "recent")]
