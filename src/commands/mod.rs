@@ -256,6 +256,7 @@ pub async fn dispatch(
                 input,
                 title,
                 header_image,
+                api,
             } => {
                 article::draft(
                     ctx,
@@ -263,8 +264,12 @@ pub async fn dispatch(
                     input,
                     title.as_deref(),
                     header_image.as_deref(),
+                    *api,
                 )
                 .await
+            }
+            ArticleCommands::Publish { article_id } => {
+                article::publish(ctx, format, article_id).await
             }
         },
         Commands::Reply { id, text, media } => {

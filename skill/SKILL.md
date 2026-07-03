@@ -27,9 +27,11 @@ Articles are a separate X feature, not long posts / Note Tweets.
 ```
 xmaster article preview draft.md --header-image cover.png -o preview.html
 xmaster article draft draft.md --header-image cover.png --json
+xmaster article draft draft.md --api --json          # official v2 endpoint, no cookies
+xmaster article publish <article_id> --json          # makes the Article PUBLIC
 ```
 
-`article draft` saves an unpublished native X Article draft through X's web Article entity endpoint and requires `xmaster config web-login`.
+`article draft` saves an unpublished native X Article draft through X's web Article entity endpoint (requires `xmaster config web-login`). With `--api` it uses the official X API v2 Articles endpoint (added June 2026) — OAuth keys only, but cover images stay in the body. `article publish` is official-API only and NEVER runs without explicit user approval.
 
 ### Finding Posts to Reply To
 

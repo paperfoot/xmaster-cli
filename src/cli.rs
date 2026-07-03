@@ -494,6 +494,15 @@ pub enum ArticleCommands {
         /// Header/cover image path (default: first image block, if it appears first)
         #[arg(long)]
         header_image: Option<String>,
+        /// Use the official X API v2 Articles endpoint (OAuth keys, no browser
+        /// cookies) instead of the private web session path
+        #[arg(long)]
+        api: bool,
+    },
+    /// Publish a draft Article via the official X API v2 (makes it PUBLIC)
+    Publish {
+        /// Article ID (from 'article draft --api')
+        article_id: String,
     },
 }
 

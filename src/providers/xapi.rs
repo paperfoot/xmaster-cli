@@ -997,6 +997,69 @@ impl XApi {
         })
     }
 
+    /// Create an Article draft via the official X API v2 endpoint
+    /// (`POST /2/articles/draft`, added 2026-06-11). Unlike the web path this
+    /// needs no browser cookies — it is signed with the normal OAuth1 keys.
+    pub async fn create_article_draft_v2(
+        &self,
+        title: &str,
+        content_state: Value,
+    ) -> Result<ArticleEntityResponse, XmasterError> {
+        let val = self
+            .request(
+                Method::POST,
+                &format!("{BASE}/articles/draft"),
+                Some(json!({ "title": title, "content_state": content_state })),
+            )
+            .await?;
+
+        let id = val
+            .pointer("/data/id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| XmasterError::Api {
+                provider: "x",
+                code: "no_article_id",
+                message: format!(
+                    "Unexpected Articles API draft response: {}",
+                    crate::utils::safe_truncate(&val.to_string(), 300)
+                ),
+            })?;
+
+        Ok(ArticleEntityResponse {
+            id: id.to_string(),
+            title: val
+                .pointer("/data/title")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            tweet_id: None,
+        })
+    }
+
+    /// Publish a draft Article via the official X API v2 endpoint
+    /// (`POST /2/articles/{id}/publish`). Returns the ID of the post X
+    /// creates for the published Article. This makes the Article PUBLIC.
+    pub async fn publish_article(&self, article_id: &str) -> Result<String, XmasterError> {
+        let val = self
+            .request(
+                Method::POST,
+                &format!("{BASE}/articles/{article_id}/publish"),
+                None,
+            )
+            .await?;
+
+        val.pointer("/data/post_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| XmasterError::Api {
+                provider: "x",
+                code: "no_post_id",
+                message: format!(
+                    "Unexpected Articles API publish response: {}",
+                    crate::utils::safe_truncate(&val.to_string(), 300)
+                ),
+            })
+    }
+
     pub async fn create_article_draft(
         &self,
         title: &str,

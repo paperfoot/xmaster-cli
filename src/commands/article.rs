@@ -243,17 +243,41 @@ pub async fn draft(
     input: &str,
     title_arg: Option<&str>,
     header_image: Option<&str>,
+    via_api: bool,
 ) -> Result<(), XmasterError> {
     let (source, _input_path, input_dir) = read_input(input)?;
     let parsed_blocks = parse_blocks(&source);
     let (title, mut blocks) = resolve_title(title_arg, parsed_blocks);
-    let header = resolve_header_image(header_image, &mut blocks);
+
+    let mut warnings = Vec::new();
+
+    // The official v2 endpoint has no documented cover-media field yet, so on
+    // the API path a header image stays in the article body instead.
+    let header = if via_api {
+        if let Some(src) = header_image {
+            warnings.push(
+                "The official Articles endpoint doesn't support cover media yet — \
+                the header image was kept as the first body image. Set the cover in \
+                the X editor before publishing."
+                    .to_string(),
+            );
+            blocks.insert(
+                0,
+                ArticleBlock::Figure {
+                    alt: String::new(),
+                    src: src.to_string(),
+                },
+            );
+        }
+        None
+    } else {
+        resolve_header_image(header_image, &mut blocks)
+    };
 
     validate_native_article_title(&title)?;
 
     let api = XApi::new(ctx.clone());
     let mut uploaded_media = Vec::new();
-    let mut warnings = Vec::new();
     if !ctx.config.account.premium {
         warnings.push(
             "X may reject Article creation unless this account has the Articles feature enabled"
@@ -270,7 +294,12 @@ pub async fn draft(
     )
     .await?;
 
-    let article = api.create_article_draft(&title, content_state).await?;
+    let article = if via_api {
+        let official_state = to_official_content_state(&content_state);
+        api.create_article_draft_v2(&title, official_state).await?
+    } else {
+        api.create_article_draft(&title, content_state).await?
+    };
 
     if let Some(ref header_src) = header {
         let (media_id, media_category) = upload_article_media(&api, header_src, &input_dir).await?;
@@ -284,6 +313,18 @@ pub async fn draft(
             .await?;
     }
 
+    let (endpoint_source, endpoint_status) = if via_api {
+        (
+            "X API v2 POST /2/articles/draft",
+            "official public endpoint (added 2026-06-11); publish with 'xmaster article publish <id>'",
+        )
+    } else {
+        (
+            "current X web bundle ArticleEntityDraftCreate / ArticleEntityUpdateContent",
+            "private X web GraphQL; not public X API v2",
+        )
+    };
+
     let display = ArticleDraftResult {
         article_id: article.id,
         draft_url: "https://x.com/compose/articles".into(),
@@ -291,12 +332,89 @@ pub async fn draft(
         block_count: blocks.len(),
         uploaded_media,
         header_image: header,
-        endpoint_source: "current X web bundle ArticleEntityDraftCreate / ArticleEntityUpdateContent",
-        endpoint_status: "private X web GraphQL; not public X API v2",
+        endpoint_source,
+        endpoint_status,
         warnings,
     };
     output::render(format, &display, None);
     Ok(())
+}
+
+#[derive(Serialize)]
+struct ArticlePublishResult {
+    article_id: String,
+    post_id: String,
+    post_url: String,
+}
+
+impl Tableable for ArticlePublishResult {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["Field", "Value"]);
+        table.add_row(vec!["Published article", &self.article_id]);
+        table.add_row(vec!["Post", &self.post_id]);
+        table.add_row(vec!["URL", &self.post_url]);
+        table
+    }
+}
+
+pub async fn publish(
+    ctx: Arc<AppContext>,
+    format: OutputFormat,
+    article_id: &str,
+) -> Result<(), XmasterError> {
+    let api = XApi::new(ctx);
+    let post_id = api.publish_article(article_id).await?;
+
+    let display = ArticlePublishResult {
+        article_id: article_id.to_string(),
+        post_url: format!("https://x.com/i/status/{post_id}"),
+        post_id,
+    };
+    output::render(format, &display, None);
+    Ok(())
+}
+
+/// Convert the web-dialect content state (`blocks` + `entity_map`, entity
+/// values carrying `type`/`mutability`) into the official v2 Articles schema
+/// (`blocks` + `entities`, entity values carrying only `data`; embedded posts
+/// use `post_id` instead of `tweet_id`; media items drop `local_media_id`).
+fn to_official_content_state(web: &Value) -> Value {
+    let blocks = web.get("blocks").cloned().unwrap_or_else(|| json!([]));
+
+    let entities: Vec<Value> = web
+        .get("entity_map")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let key = entry.get("key").cloned().unwrap_or(Value::Null);
+                    let mut data = entry
+                        .pointer("/value/data")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+
+                    if let Some(obj) = data.as_object_mut() {
+                        if let Some(tweet_id) = obj.remove("tweet_id") {
+                            obj.insert("post_id".into(), tweet_id);
+                        }
+                        if let Some(items) = obj.get_mut("media_items").and_then(Value::as_array_mut) {
+                            for item in items {
+                                if let Some(m) = item.as_object_mut() {
+                                    m.remove("local_media_id");
+                                }
+                            }
+                        }
+                    }
+
+                    json!({ "key": key, "value": { "data": data } })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    json!({ "blocks": blocks, "entities": entities })
 }
 
 fn read_input(input: &str) -> Result<(String, Option<PathBuf>, PathBuf), XmasterError> {
@@ -1649,6 +1767,41 @@ fn open_file(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_content_state_conversion() {
+        let mut builder = NativeContentBuilder::default();
+        builder.push_text_block("unstyled", "Read [this](https://example.com) now");
+        builder.push_tweet_block("123456");
+        builder.push_media_block("A caption", "789", "DraftTweetImage");
+        let web = builder.finish();
+
+        let official = to_official_content_state(&web);
+
+        // Top-level key renamed, blocks untouched.
+        assert!(official.get("entity_map").is_none());
+        assert_eq!(
+            official["blocks"].as_array().unwrap().len(),
+            web["blocks"].as_array().unwrap().len()
+        );
+
+        let entities = official["entities"].as_array().unwrap();
+        assert_eq!(entities.len(), 3);
+        // Entity values carry only `data` — no type/mutability.
+        for e in entities {
+            assert!(e["value"].get("type").is_none());
+            assert!(e["value"].get("mutability").is_none());
+        }
+        // LINK keeps its url.
+        assert_eq!(entities[0]["value"]["data"]["url"], "https://example.com");
+        // TWEET's tweet_id becomes post_id.
+        assert_eq!(entities[1]["value"]["data"]["post_id"], "123456");
+        assert!(entities[1]["value"]["data"].get("tweet_id").is_none());
+        // MEDIA items drop local_media_id.
+        let item = &entities[2]["value"]["data"]["media_items"][0];
+        assert_eq!(item["media_id"], "789");
+        assert!(item.get("local_media_id").is_none());
+    }
 
     #[test]
     fn parses_article_blocks() {

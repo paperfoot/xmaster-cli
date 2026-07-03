@@ -145,7 +145,7 @@ pub fn execute(format: OutputFormat) {
             "search-ai".into(), "trending".into(), "user".into(), "me".into(),
             "followers".into(), "following".into(),
             // Posting
-            "post".into(), "reply".into(), "thread".into(), "article preview".into(), "article draft".into(), "delete".into(),
+            "post".into(), "reply".into(), "thread".into(), "article preview".into(), "article draft".into(), "article publish".into(), "delete".into(),
             // Engagement
             "like".into(), "unlike".into(),
             "retweet".into(), "unretweet".into(), "bookmark".into(), "unbookmark".into(),
@@ -196,6 +196,7 @@ pub fn execute(format: OutputFormat) {
             "conversation_inbox".into(),
             "article_preview".into(),
             "article_draft".into(),
+            "article_publish".into(),
             "self_update".into(),
         ],
         env_prefix: "XMASTER_".into(),
@@ -287,7 +288,8 @@ pub fn execute(format: OutputFormat) {
             "LONG-FORM EXEMPLARS: 'xmaster inspire --long' surfaces high-impression long-form posts from your local library. Seed it by running 'xmaster timeline --user @beaverd' (etc.) on long-form practitioners — every search/timeline auto-populates discovered_posts".into(),
             "LONG-FORM COVER IMAGES: generate via the nanaban CLI: `nanaban \"<title-card prompt>\" --ar 3:2`".into(),
             "ARTICLE PREVIEW: Articles are NOT long posts / Note Tweets. Render locally with `xmaster article preview draft.md --header-image cover.png --author \"Name\" --handle username -o preview.html`. Markdown maps to the official Article feature set (headings, bold, italic, lists, images, video/GIF, embedded posts/Articles, links)".into(),
-            "ARTICLE DRAFTS: `xmaster article draft draft.md --header-image cover.png` saves an unpublished Article draft via the private web endpoint (`ArticleEntityDraftCreate`). Requires `xmaster config web-login` for cookies; NOT `/2/tweets` and NOT CreateNoteTweet".into(),
+            "ARTICLE DRAFTS: `xmaster article draft draft.md --header-image cover.png` saves an unpublished Article draft via the private web endpoint (requires `xmaster config web-login`). Add `--api` to use the official X API v2 endpoint instead (OAuth keys only, no cookies; cover image stays in the body). NOT `/2/tweets` and NOT CreateNoteTweet".into(),
+            "ARTICLE PUBLISH: `xmaster article publish <article_id>` publishes a draft via the official v2 endpoint (added 2026-06-11) and returns the created post id. This makes the Article PUBLIC — never run it without explicit user approval".into(),
             "LONG-FORM TIMING: post in the in-network peak (Tue–Thu, 9–11 AM author-local for desk audiences; 7–9 PM for general). Be ready to engage replies in the first 30 min. Avoid Mon mornings (timeline rebuild) and Fri afternoon (drop-off)".into(),
             "QUOTE TWEETS: quotes enter the in-network candidate pool of YOUR followers (thunder_source.rs serves from following_user_ids). Replies travel through the OP's audience pool. Use 'xmaster post \"your take\" --quote <id>' when extending an idea".into(),
             "PREMIUM: ~2-3x organic reach in practice. The mechanism is not in the open source but the effect is real".into(),
