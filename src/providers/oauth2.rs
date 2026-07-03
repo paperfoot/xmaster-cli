@@ -22,14 +22,22 @@ const TOKEN_URL: &str = "https://api.x.com/2/oauth2/token";
 const REDIRECT_URI: &str = "http://localhost:3000/callback";
 const SCOPES: &str = "tweet.read tweet.write users.read bookmark.read bookmark.write offline.access";
 
-/// Build a shared reqwest client for OAuth2 operations with proper timeout and user-agent.
-fn build_oauth2_client() -> Result<reqwest::Client, crate::errors::XmasterError> {
-    reqwest::Client::builder()
+static OAUTH2_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+/// Shared reqwest client for OAuth2 operations, built once per process.
+/// Callers like `oauth2_get` run in pagination loops — rebuilding the client
+/// (and its connection pool) per request wasted a TLS handshake per page.
+fn build_oauth2_client() -> Result<&'static reqwest::Client, crate::errors::XmasterError> {
+    if let Some(client) = OAUTH2_CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .user_agent(format!("xmaster/{}", env!("CARGO_PKG_VERSION")))
         .pool_idle_timeout(std::time::Duration::from_secs(60))
         .build()
-        .map_err(|e| crate::errors::XmasterError::Config(format!("Failed to build OAuth2 HTTP client: {e}")))
+        .map_err(|e| crate::errors::XmasterError::Config(format!("Failed to build OAuth2 HTTP client: {e}")))?;
+    Ok(OAUTH2_CLIENT.get_or_init(|| client))
 }
 
 #[derive(Debug, Deserialize)]
