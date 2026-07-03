@@ -2,10 +2,8 @@ use chrono::{Datelike, Timelike, Utc};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::config_dir;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::preflight::{self, AnalyzeContext};
@@ -61,13 +59,7 @@ pub struct PostScheduler {
 impl PostScheduler {
     /// Open (or create) the scheduler database at `~/.config/xmaster/xmaster.db`.
     pub fn open() -> Result<Self, XmasterError> {
-        let dir = config_dir();
-        std::fs::create_dir_all(&dir).ok();
-        let db_path: PathBuf = dir.join("xmaster.db");
-        let conn = Connection::open(db_path).map_err(|e| XmasterError::Config(e.to_string()))?;
-        conn.pragma_update(None, "journal_mode", "wal").ok();
-        conn.pragma_update(None, "busy_timeout", 5000).ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        let conn = super::open_db("xmaster.db")?;
         let sched = Self { conn };
         sched.init_tables()?;
         Ok(sched)

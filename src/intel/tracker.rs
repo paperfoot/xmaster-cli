@@ -1,9 +1,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::path::PathBuf;
 
-use crate::config::config_dir;
 use crate::errors::XmasterError;
 
 // ---------------------------------------------------------------------------
@@ -131,17 +129,7 @@ pub struct PostTracker {
 
 impl PostTracker {
     pub fn open() -> Result<Self, XmasterError> {
-        let dir = config_dir();
-        std::fs::create_dir_all(&dir).ok();
-        let db_path: PathBuf = dir.join("xmaster.db");
-        let conn = Connection::open(db_path)
-            .map_err(|e| XmasterError::Config(format!("DB open error: {e}")))?;
-        conn.pragma_update(None, "journal_mode", "wal")
-            .map_err(|e| XmasterError::Config(format!("DB pragma error: {e}")))?;
-        conn.pragma_update(None, "busy_timeout", 5000)
-            .map_err(|e| XmasterError::Config(format!("DB pragma error: {e}")))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|e| XmasterError::Config(format!("DB pragma error: {e}")))?;
+        let conn = super::open_db("xmaster.db")?;
 
         // Ensure required tables exist (safe on fresh install)
         conn.execute_batch(
@@ -205,27 +193,11 @@ impl PostTracker {
         .map_err(|e| XmasterError::Config(format!("DB init error: {e}")))?;
 
         // Safe migrations: add local-time columns if not present
-        let post_cols: Vec<String> = conn
-            .prepare("PRAGMA table_info(posts)")
-            .and_then(|mut s| s.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<Vec<_>, _>>())
-            .unwrap_or_default();
-        if !post_cols.iter().any(|c| c == "local_day_of_week") {
-            conn.execute_batch("ALTER TABLE posts ADD COLUMN local_day_of_week INTEGER;").ok();
-        }
-        if !post_cols.iter().any(|c| c == "local_hour_of_day") {
-            conn.execute_batch("ALTER TABLE posts ADD COLUMN local_hour_of_day INTEGER;").ok();
-        }
-        if !post_cols.iter().any(|c| c == "tz_offset_minutes") {
-            conn.execute_batch("ALTER TABLE posts ADD COLUMN tz_offset_minutes INTEGER;").ok();
-        }
+        super::add_column_if_missing(&conn, "posts", "local_day_of_week", "INTEGER");
+        super::add_column_if_missing(&conn, "posts", "local_hour_of_day", "INTEGER");
+        super::add_column_if_missing(&conn, "posts", "tz_offset_minutes", "INTEGER");
         // Add url_clicks to metric_snapshots if not present
-        let ms_cols: Vec<String> = conn
-            .prepare("PRAGMA table_info(metric_snapshots)")
-            .and_then(|mut s| s.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<Vec<_>, _>>())
-            .unwrap_or_default();
-        if !ms_cols.iter().any(|c| c == "url_clicks") {
-            conn.execute_batch("ALTER TABLE metric_snapshots ADD COLUMN url_clicks INTEGER;").ok();
-        }
+        super::add_column_if_missing(&conn, "metric_snapshots", "url_clicks", "INTEGER");
 
         Ok(Self { conn })
     }

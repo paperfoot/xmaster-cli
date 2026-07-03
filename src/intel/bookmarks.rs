@@ -1,9 +1,7 @@
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use std::path::PathBuf;
 
-use crate::config::config_dir;
 use crate::errors::XmasterError;
 use crate::providers::xapi::TweetData;
 
@@ -77,15 +75,7 @@ pub struct BookmarkStore {
 impl BookmarkStore {
     /// Open (or create) the bookmark database at `~/.config/xmaster/bookmarks.db`.
     pub fn open() -> Result<Self, XmasterError> {
-        let dir = config_dir();
-        std::fs::create_dir_all(&dir).ok();
-        let db_path: PathBuf = dir.join("bookmarks.db");
-        let conn = Connection::open(db_path).map_err(|e| {
-            XmasterError::Config(format!("Failed to open bookmark database: {e}"))
-        })?;
-        conn.pragma_update(None, "journal_mode", "wal").ok();
-        conn.pragma_update(None, "busy_timeout", 5000).ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        let conn = super::open_db("bookmarks.db")?;
         let store = Self { conn };
         store.init_tables()?;
         Ok(store)
