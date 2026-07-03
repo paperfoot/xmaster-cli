@@ -175,10 +175,13 @@ impl AppConfig {
     }
 
     pub fn masked_key(key: &str) -> String {
-        if key.len() <= 8 {
-            "*".repeat(key.len())
+        let n = key.chars().count();
+        if n <= 8 {
+            "*".repeat(n)
         } else {
-            format!("{}...{}", &key[..4], &key[key.len() - 4..])
+            let head: String = key.chars().take(4).collect();
+            let tail: String = key.chars().skip(n - 4).collect();
+            format!("{head}...{tail}")
         }
     }
 }

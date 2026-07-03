@@ -160,9 +160,10 @@ pub async fn execute(
         p.split(',').map(|s| s.trim().to_string()).collect()
     });
 
-    // Validate poll options: 2-4 choices, each max 25 chars
+    // Validate poll options: 2-4 choices, each max 25 chars (characters, not
+    // bytes — non-ASCII options must not be falsely rejected)
     if let Some(ref opts) = poll_options {
-        if opts.len() < 2 || opts.len() > 4 || opts.iter().any(|o| o.len() > 25) {
+        if opts.len() < 2 || opts.len() > 4 || opts.iter().any(|o| o.chars().count() > 25) {
             return Err(XmasterError::Config(
                 "Poll must have 2-4 options, max 25 chars each".into(),
             ));
