@@ -92,7 +92,7 @@ XMaster has three backends behind one CLI:
 
 > X removed Likes, Follows, and Quote-post writes from all self-serve API tiers on April 20, 2026. `like`/`follow` return a clear error on non-Enterprise keys; quote posts fall back to the web session automatically.
 
-Every command returns JSON when piped (or with `--json`). Exit codes are semantic: 0 success, 1 runtime error, 2 config error, 3 auth missing, 4 rate limited. Your agent always knows what happened.
+Every command returns JSON when piped (or with `--json`); list commands also support `--csv` for spreadsheet-ready output. Exit codes are semantic: 0 success, 1 runtime error, 2 config/billing error, 3 auth missing, 4 rate limited. Your agent always knows what happened.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -164,7 +164,7 @@ xmaster like https://x.com/user/status/1234567890       # URLs work too
 
 | Command | What it does | Example |
 |---------|-------------|---------|
-| `search` | X API v2 search (structured, filterable) | `xmaster search "rust lang" --mode recent` |
+| `search` | X API v2 search (structured, filterable; supports `min_likes:`/`min_replies:`/`min_reposts:` operators) | `xmaster search "rust lang min_likes:100"` |
 | `search-ai` | AI-powered search via xAI/Grok | `xmaster search-ai "latest AI news"` |
 | `trending` | Trending topics by region | `xmaster trending --region US` |
 
