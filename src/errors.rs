@@ -27,6 +27,9 @@ pub enum XmasterError {
     #[error("Reply restricted: {0}")]
     ReplyRestricted(String),
 
+    #[error("Payment required: {message}")]
+    PaymentRequired { message: String },
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -62,6 +65,7 @@ impl XmasterError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Config(_) => 2,
+            Self::PaymentRequired { .. } => 2,
             Self::ReplyRestricted(_) => 1,
             Self::AuthMissing { .. } => 3,
             Self::RateLimited { .. } => 4,
@@ -79,6 +83,7 @@ impl XmasterError {
     pub fn error_code(&self) -> &'static str {
         match self {
             Self::ReplyRestricted(_) => "reply_restricted",
+            Self::PaymentRequired { .. } => "payment_required",
             Self::Api { code, .. } => code,
             Self::AuthMissing { .. } => "auth_missing",
             Self::RateLimited { .. } => "rate_limited",
@@ -110,6 +115,11 @@ impl XmasterError {
                 } else {
                     "Set X API credentials via env vars (XMASTER_KEYS__API_KEY, etc.) or run: xmaster config set keys.api_key <key>".into()
                 }
+            }
+            Self::PaymentRequired { .. } => {
+                "X API pay-per-use credits exhausted (or this endpoint needs a paid add-on). \
+                Check usage and top up at https://console.x.com — retrying will not help until you do"
+                    .into()
             }
             Self::RateLimited { reset_at, .. } => {
                 format!("Rate limited. Resets at Unix timestamp {reset_at}. Wait and retry, or check limits with: xmaster config check")

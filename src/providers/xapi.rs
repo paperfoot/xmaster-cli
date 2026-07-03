@@ -485,6 +485,19 @@ impl XApi {
             });
         }
 
+        // 402: pay-per-use credits exhausted, or the endpoint needs a paid add-on
+        // (X API moved to credit-based pricing on 2026-02-06).
+        if status == 402 {
+            let text = resp.text().await.unwrap_or_default();
+            let txn_suffix = txn_id
+                .as_deref()
+                .map(|id| format!(" [txn: {id}]"))
+                .unwrap_or_default();
+            return Err(XmasterError::PaymentRequired {
+                message: format!("HTTP 402: {text}{txn_suffix}"),
+            });
+        }
+
         if status == 429 {
             let reset_at = resp
                 .headers()
@@ -734,18 +747,21 @@ impl XApi {
             .request_data(Method::POST, &format!("{BASE}/tweets"), Some(body))
             .await;
 
-        // Auto-fallback: if this is a reply and we got 403 (reply restriction),
-        // retry via GraphQL web endpoint using browser cookies.
+        // Auto-fallback: replies to non-mentioners 403 since Feb 2026, and
+        // quote-posting via `quote_tweet_id` was removed from all self-serve
+        // tiers on 2026-04-20. Both work through the GraphQL web endpoint, so
+        // retry there using browser cookies.
         if let Err(ref err) = result {
-            if reply_to.is_some() && Self::is_reply_restricted(err) {
+            if (reply_to.is_some() || quote_tweet_id.is_some()) && Self::is_write_restricted(err) {
                 if self.ctx.config.has_web_cookies() {
-                    warn!("API reply blocked (X restriction). Falling back to web session...");
+                    warn!("API write blocked (X restriction). Falling back to web session...");
                     return self
                         .create_tweet_via_web(text, reply_to, quote_tweet_id, media_ids)
                         .await;
                 } else {
                     return Err(XmasterError::ReplyRestricted(
-                        "X blocks programmatic replies to users who haven't @mentioned you. \
+                        "X blocks programmatic replies to users who haven't @mentioned you, \
+                        and removed API quote-posting for self-serve tiers (2026-04-20). \
                         Configure web cookies for automatic fallback."
                             .into(),
                     ));
@@ -756,12 +772,13 @@ impl XApi {
         result
     }
 
-    /// Detect whether an error is the Feb 2026 reply restriction (403 on replies
-    /// to users who haven't mentioned you).
+    /// Detect whether an error is an X write restriction: the Feb 2026 reply
+    /// restriction (403 on replies to non-mentioners) or the Apr 2026 removal
+    /// of quote-posting from self-serve tiers.
     /// Note: oauth1-permissions 403s are handled separately in request_once() with
     /// a specific regeneration hint, so they won't reach here. Any 403 that makes
-    /// it to this check is a non-permission 403, likely the reply restriction.
-    fn is_reply_restricted(err: &XmasterError) -> bool {
+    /// it to this check is a non-permission 403, likely a write restriction.
+    fn is_write_restricted(err: &XmasterError) -> bool {
         match err {
             XmasterError::AuthMissing { message, .. } => {
                 message.contains("403") && !message.contains("oauth1-permissions")
@@ -1345,7 +1362,8 @@ impl XApi {
             &format!("{BASE}/users/{uid}/{collection}"),
             Some(body),
         )
-        .await?;
+        .await
+        .map_err(|e| Self::annotate_removed_write(collection, e))?;
         Ok(())
     }
 
@@ -1357,8 +1375,33 @@ impl XApi {
             &format!("{BASE}/users/{uid}/{collection}/{id}"),
             None,
         )
-        .await?;
+        .await
+        .map_err(|e| Self::annotate_removed_write(collection, e))?;
         Ok(())
+    }
+
+    /// X removed Likes and Follows writes from all self-serve API tiers on
+    /// 2026-04-20 (Enterprise keeps them). A 403 on those collections is the
+    /// platform restriction, not a token problem — say so instead of sending
+    /// the user off to regenerate credentials.
+    fn annotate_removed_write(collection: &str, err: XmasterError) -> XmasterError {
+        if !matches!(collection, "likes" | "following") {
+            return err;
+        }
+        match err {
+            XmasterError::AuthMissing { provider, message } if message.contains("403") => {
+                XmasterError::AuthMissing {
+                    provider,
+                    message: format!(
+                        "{message}. Note: X removed Likes and Follows write access from all \
+                        self-serve API tiers on 2026-04-20 — this 403 is expected on \
+                        non-Enterprise keys and no credential change will fix it. \
+                        Like/follow manually in the app instead."
+                    ),
+                }
+            }
+            other => other,
+        }
     }
 
     pub async fn like_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
