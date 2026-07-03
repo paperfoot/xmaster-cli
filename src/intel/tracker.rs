@@ -338,34 +338,18 @@ impl PostTracker {
     // -- timing heatmap -------------------------------------------------------
 
     pub fn compute_timing_heatmap(&self) -> Result<Vec<TimingSlot>, XmasterError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day),
-                        AVG(ms.impressions) AS avg_imp,
-                        AVG(CASE WHEN ms.impressions > 0
-                             THEN (ms.likes + ms.retweets + ms.replies + ms.quotes) * 1.0
-                                  / ms.impressions ELSE 0 END) AS avg_er,
-                        COUNT(DISTINCT p.tweet_id) AS cnt
-                 FROM posts p
-                 JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                 GROUP BY COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)
-                 ORDER BY avg_er DESC",
-            )?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                let dow: i32 = row.get(0)?;
-                let hod: i32 = row.get(1)?;
-                Ok(TimingSlot {
-                    day_of_week: dow as u32,
-                    hour_of_day: hod as u32,
-                    day_name: day_name(dow as u32),
-                    avg_impressions: row.get(2)?,
-                    avg_engagement_rate: row.get(3)?,
-                    sample_count: row.get::<_, i64>(4)? as u32,
-                })
-            })?;
+        let sql = format!(
+            "SELECT {SLOT_KEY_SQL},
+                    AVG(ms.impressions),
+                    {AVG_ER_SQL},
+                    COUNT(DISTINCT p.tweet_id)
+             FROM posts p
+             JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
+             GROUP BY {SLOT_KEY_SQL}
+             ORDER BY 4 DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], timing_slot_from_row)?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -384,65 +368,32 @@ impl PostTracker {
             return Ok(None);
         }
 
+        let where_clause = if content_type.is_some() {
+            "WHERE p.content_type = ?1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {SLOT_KEY_SQL},
+                    AVG(ms.impressions),
+                    {AVG_ER_SQL},
+                    COUNT(DISTINCT p.tweet_id)
+             FROM posts p
+             JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
+             {where_clause}
+             GROUP BY {SLOT_KEY_SQL}
+             HAVING COUNT(DISTINCT p.tweet_id) >= 2
+             ORDER BY 4 DESC LIMIT 1"
+        );
+
         let slot = match content_type {
             Some(ct) => self
                 .conn
-                .query_row(
-                    "SELECT COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day),
-                            AVG(ms.impressions),
-                            AVG(CASE WHEN ms.impressions > 0
-                                 THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0
-                                      / ms.impressions ELSE 0 END),
-                            COUNT(DISTINCT p.tweet_id)
-                     FROM posts p
-                     JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                     WHERE p.content_type = ?1
-                     GROUP BY COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)
-                     HAVING COUNT(DISTINCT p.tweet_id) >= 2
-                     ORDER BY 4 DESC LIMIT 1",
-                    params![ct],
-                    |row| {
-                        let dow: i32 = row.get(0)?;
-                        let hod: i32 = row.get(1)?;
-                        Ok(TimingSlot {
-                            day_of_week: dow as u32,
-                            hour_of_day: hod as u32,
-                            day_name: day_name(dow as u32),
-                            avg_impressions: row.get(2)?,
-                            avg_engagement_rate: row.get(3)?,
-                            sample_count: row.get::<_, i64>(4)? as u32,
-                        })
-                    },
-                )
+                .query_row(&sql, params![ct], timing_slot_from_row)
                 .optional()?,
             None => self
                 .conn
-                .query_row(
-                    "SELECT COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day),
-                            AVG(ms.impressions),
-                            AVG(CASE WHEN ms.impressions > 0
-                                 THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0
-                                      / ms.impressions ELSE 0 END),
-                            COUNT(DISTINCT p.tweet_id)
-                     FROM posts p
-                     JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                     GROUP BY COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)
-                     HAVING COUNT(DISTINCT p.tweet_id) >= 2
-                     ORDER BY 4 DESC LIMIT 1",
-                    [],
-                    |row| {
-                        let dow: i32 = row.get(0)?;
-                        let hod: i32 = row.get(1)?;
-                        Ok(TimingSlot {
-                            day_of_week: dow as u32,
-                            hour_of_day: hod as u32,
-                            day_name: day_name(dow as u32),
-                            avg_impressions: row.get(2)?,
-                            avg_engagement_rate: row.get(3)?,
-                            sample_count: row.get::<_, i64>(4)? as u32,
-                        })
-                    },
-                )
+                .query_row(&sql, [], timing_slot_from_row)
                 .optional()?,
         };
 
@@ -729,23 +680,20 @@ impl PostTracker {
         let now = Utc::now().timestamp();
         self.conn
             .execute_batch("DELETE FROM timing_stats")?;
-        self.conn
-            .execute(
-                "INSERT INTO timing_stats
-                    (day_of_week, hour_of_day, content_type,
-                     avg_impressions, avg_engagement_rate, sample_count, last_updated)
-                 SELECT COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day), 'all',
-                        AVG(ms.impressions),
-                        AVG(CASE WHEN ms.impressions > 0
-                             THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0
-                                  / ms.impressions ELSE 0 END),
-                        COUNT(DISTINCT p.tweet_id),
-                        ?1
-                 FROM posts p
-                 JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                 GROUP BY COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)",
-                params![now],
-            )?;
+        let sql = format!(
+            "INSERT INTO timing_stats
+                (day_of_week, hour_of_day, content_type,
+                 avg_impressions, avg_engagement_rate, sample_count, last_updated)
+             SELECT {SLOT_KEY_SQL}, 'all',
+                    AVG(ms.impressions),
+                    {AVG_ER_SQL},
+                    COUNT(DISTINCT p.tweet_id),
+                    ?1
+             FROM posts p
+             JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
+             GROUP BY {SLOT_KEY_SQL}"
+        );
+        self.conn.execute(&sql, params![now])?;
         Ok(())
     }
 }
@@ -912,6 +860,32 @@ impl PostTracker {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Timing-slot key: local day/hour with UTC fallback for pre-migration rows.
+/// Alias contract for these fragments: `posts p`, `metric_snapshots ms`.
+const SLOT_KEY_SQL: &str =
+    "COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)";
+
+/// Average engagement rate per snapshot: (likes+retweets+replies+quotes)/impressions,
+/// zero when a post has no impressions. Bookmarks excluded — not a 2026 signal.
+const AVG_ER_SQL: &str = "AVG(CASE WHEN ms.impressions > 0
+         THEN (ms.likes + ms.retweets + ms.replies + ms.quotes) * 1.0
+              / ms.impressions ELSE 0 END)";
+
+/// Row mapper for queries selecting: slot key (2 cols), avg impressions,
+/// avg engagement rate, distinct post count — in that order.
+fn timing_slot_from_row(row: &rusqlite::Row) -> rusqlite::Result<TimingSlot> {
+    let dow: i32 = row.get(0)?;
+    let hod: i32 = row.get(1)?;
+    Ok(TimingSlot {
+        day_of_week: dow as u32,
+        hour_of_day: hod as u32,
+        day_name: day_name(dow as u32),
+        avg_impressions: row.get(2)?,
+        avg_engagement_rate: row.get(3)?,
+        sample_count: row.get::<_, i64>(4)? as u32,
+    })
+}
 
 fn day_name(day: u32) -> String {
     match day {
