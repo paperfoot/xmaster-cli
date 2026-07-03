@@ -31,7 +31,7 @@ xmaster article draft draft.md --api --json          # official v2 endpoint, no 
 xmaster article publish <article_id> --json          # makes the Article PUBLIC
 ```
 
-`article draft` saves an unpublished native X Article draft through X's web Article entity endpoint (requires `xmaster config web-login`). With `--api` it uses the official X API v2 Articles endpoint (added June 2026) — OAuth keys only, but cover images stay in the body. `article publish` is official-API only and NEVER runs without explicit user approval.
+`article draft` saves an unpublished native X Article draft through X's web Article entity endpoint (requires `xmaster config web-login`). With `--api` it uses the official X API v2 Articles endpoint (added June 2026) — OAuth keys only, but cover images stay in the body, and (as of July 2026) the official endpoint rejects bold/italic/links with HTTP 400, so use the web path for richly formatted drafts. `article publish` is official-API only and NEVER runs without explicit user approval.
 
 ### Finding Posts to Reply To
 
