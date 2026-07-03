@@ -518,11 +518,18 @@ impl IntelStore {
     /// Get pending replies that haven't been checked for reply-back yet.
     pub fn get_pending_replies(&self, max_age_hours: i64) -> Result<Vec<PendingReply>, rusqlite::Error> {
         let cutoff = Utc::now().timestamp() - (max_age_hours * 3600);
+        // CAST guards required: on DBs created by the original tracker.rs
+        // schema, performed_at has TEXT affinity, so epoch ints are STORED as
+        // text. Without the casts the cutoff comparison is always true (TEXT
+        // sorts after INTEGER in SQLite) and row.get::<i64> then fails — which
+        // silently disabled reply-back checking on legacy DBs.
         let mut stmt = self.conn.prepare(
-            "SELECT id, reply_tweet_id, target_username, performed_at
+            "SELECT id, reply_tweet_id, target_username,
+                    CAST(performed_at AS INTEGER) AS performed_at
              FROM engagement_actions
              WHERE action_type = 'reply' AND got_reply_back IS NULL
-               AND reply_tweet_id IS NOT NULL AND performed_at > ?1
+               AND reply_tweet_id IS NOT NULL
+               AND CAST(performed_at AS INTEGER) > ?1
              ORDER BY performed_at DESC"
         )?;
         let rows = stmt.query_map(params![cutoff], |row| {
@@ -1575,6 +1582,63 @@ mod tests {
         let pending = store.get_pending_replies(24).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].reply_tweet_id, "reply_001");
+    }
+
+    /// Regression: DBs created by tracker.rs's ORIGINAL schema declare
+    /// engagement_actions.performed_at as TEXT, so epoch ints are stored as
+    /// text. get_pending_replies must CAST or it (a) never filters by cutoff
+    /// and (b) errors on row.get::<i64>, silently killing reply-back checks.
+    #[test]
+    fn pending_replies_survive_legacy_text_affinity() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+
+        // Recreate the legacy table BEFORE IntelStore sees the file, so
+        // CREATE IF NOT EXISTS keeps the TEXT affinity.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE engagement_actions (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action_type      TEXT NOT NULL,
+                    target_tweet_id  TEXT,
+                    target_user_id   TEXT,
+                    target_username  TEXT,
+                    performed_at     TEXT NOT NULL,
+                    got_reply_back   BOOLEAN DEFAULT NULL,
+                    target_followers INTEGER
+                );",
+            )
+            .unwrap();
+        }
+
+        let store = IntelStore::open_at(&db_path).unwrap();
+        let style = classify_reply("Interesting — what's the mechanism?");
+        store
+            .log_reply("target_001", None, Some("testuser"), Some(5000), "reply_legacy", Some(&style))
+            .unwrap();
+
+        // Storage class really is TEXT (the legacy condition holds)...
+        let stored: String = store
+            .conn
+            .query_row(
+                "SELECT typeof(performed_at) FROM engagement_actions LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "text");
+
+        // ...and the reply is still found and readable.
+        let pending = store.get_pending_replies(24).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].reply_tweet_id, "reply_legacy");
+
+        // The cutoff actually filters: nothing is pending with a 0-hour window.
+        let none = store.get_pending_replies(0).unwrap();
+        assert!(none.is_empty());
+
+        std::mem::forget(dir);
     }
 
     #[test]
