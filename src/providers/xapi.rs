@@ -375,8 +375,11 @@ impl XApi {
                                 .unwrap_or_default()
                                 .as_secs();
                             if *reset_at > now {
-                                let wait = (*reset_at - now).min(60) + (jitter_ms / 1000);
-                                delay = Duration::from_secs(wait);
+                                // Keep jitter in millis — integer-dividing it
+                                // into seconds always yielded 0, so concurrent
+                                // clients woke in lockstep on the same reset.
+                                let wait = (*reset_at - now).min(60);
+                                delay = Duration::from_millis(wait * 1000 + jitter_ms);
                             }
                         }
                     }
@@ -1248,7 +1251,6 @@ impl XApi {
         Ok(val)
     }
 
-    /// Look up any tweet by ID (yours or someone else's). Only requests public metrics.
     /// Batch fetch public + non_public metrics for up to 100 tweet IDs per HTTP call.
     /// Results for larger inputs are chunked internally and concatenated.
     ///
@@ -1794,8 +1796,10 @@ impl XApi {
         let max_pages = (count / 100).max(1) + 1;
 
         for _ in 0..max_pages {
+            // A page can overshoot `count` because page_size clamps UP to the
+            // endpoint's minimum — guard before subtracting or this underflows.
+            if all_tweets.len() >= count { break; }
             let remaining = count - all_tweets.len();
-            if remaining == 0 { break; }
             let page_size = remaining.clamp(min_page_size, 100);
 
             let mut url = build_url(page_size);
@@ -1977,7 +1981,15 @@ impl XApi {
         };
 
         let is_video = mime.starts_with("video/");
-        let category = if is_video { "tweet_video" } else { "tweet_image" };
+        let category = if is_video {
+            "tweet_video"
+        } else if mime == "image/gif" {
+            // Without this, animated GIFs over the simple-upload threshold
+            // were chunk-uploaded as tweet_image and lost their animation.
+            "tweet_gif"
+        } else {
+            "tweet_image"
+        };
 
         // Validate file size against X upload limits
         let max_size = if is_video {
