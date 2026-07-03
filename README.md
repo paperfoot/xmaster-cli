@@ -86,9 +86,11 @@ XMaster has three backends behind one CLI:
 
 | Backend | Auth | Used for |
 |---------|------|----------|
-| **X API v2** | OAuth 1.0a | Posting, likes, retweets, DMs, search, timelines, follows |
+| **X API v2** | OAuth 1.0a | Posting, retweets, DMs, search, timelines, Articles |
 | **xAI / Grok** | Bearer token | AI-powered semantic search, trending topics |
-| **Web GraphQL** | Browser cookies | Reply bypass when X blocks API replies to strangers |
+| **Web GraphQL** | Browser cookies | Fallback for replies and quote posts the API restricts |
+
+> X removed Likes, Follows, and Quote-post writes from all self-serve API tiers on April 20, 2026. `like`/`follow` return a clear error on non-Enterprise keys; quote posts fall back to the web session automatically.
 
 Every command returns JSON when piped (or with `--json`). Exit codes are semantic: 0 success, 1 runtime error, 2 config error, 3 auth missing, 4 rate limited. Your agent always knows what happened.
 
@@ -126,9 +128,10 @@ Every command returns JSON when piped (or with `--json`). Exit codes are semanti
 | `thread` | Post a multi-tweet thread | `xmaster thread "First" "Second" "Third"` |
 | `article preview` | Generate an X Articles-style HTML preview from Markdown | `xmaster article preview draft.md --header-image cover.png -o preview.html` |
 | `article draft` | Save a native X Article draft without publishing | `xmaster article draft draft.md --header-image cover.png` |
+| `article publish` | Publish a draft Article via the official API (makes it public) | `xmaster article publish 1234567890` |
 | `delete` | Delete a post | `xmaster delete 1234567890` |
-| `like` | Like a tweet (ID or URL) | `xmaster like 1234567890` |
-| `unlike` | Unlike a tweet | `xmaster unlike 1234567890` |
+| `like` | Like a tweet (ID or URL) — removed from self-serve API tiers Apr 2026 | `xmaster like 1234567890` |
+| `unlike` | Unlike a tweet — removed from self-serve API tiers Apr 2026 | `xmaster unlike 1234567890` |
 | `retweet` | Retweet a tweet | `xmaster retweet 1234567890` |
 | `unretweet` | Undo a retweet | `xmaster unretweet 1234567890` |
 | `bookmark` | Bookmark a tweet | `xmaster bookmark 1234567890` |
@@ -143,7 +146,7 @@ xmaster post "Best language?" --poll "Rust,Go,Python"   # Create a poll
 xmaster like https://x.com/user/status/1234567890       # URLs work too
 ```
 
-`article preview` and `article draft` are for X Articles, not long posts / Note Tweets. Drafts use Markdown and map to the native Article surface: `#` title, `##`/`###` headings, `**bold**`, `*italic*`, `~~strikethrough~~`, indentation/quotes, numbered/bulleted lists, links, images, video/GIF directives, and embedded X posts. Use `::video[Caption](clip.mp4)`, `::gif[Caption](loop.gif)`, `::post(https://x.com/user/status/123)`, or `::article(https://x.com/i/article/123)` for media and embeds that Markdown does not model directly. Native draft creation uses X's private web Article entity endpoint (`ArticleEntityDraftCreate`) with browser cookies from `xmaster config web-login`; it saves a draft and does not publish.
+`article preview` and `article draft` are for X Articles, not long posts / Note Tweets. Drafts use Markdown and map to the native Article surface: `#` title, `##`/`###` headings, `**bold**`, `*italic*`, `~~strikethrough~~`, indentation/quotes, numbered/bulleted lists, links, images, video/GIF directives, and embedded X posts. Use `::video[Caption](clip.mp4)`, `::gif[Caption](loop.gif)`, `::post(https://x.com/user/status/123)`, or `::article(https://x.com/i/article/123)` for media and embeds that Markdown does not model directly. Native draft creation uses X's private web Article entity endpoint (`ArticleEntityDraftCreate`) with browser cookies from `xmaster config web-login`; it saves a draft and does not publish. Add `--api` to create the draft through the official X API v2 Articles endpoint instead (added June 2026 — plain OAuth keys, no cookies; cover images stay in the body). `xmaster article publish <article_id>` then publishes it via the official endpoint and returns the created post ID.
 
 ### Reading and Discovery
 
@@ -169,8 +172,8 @@ xmaster like https://x.com/user/status/1234567890       # URLs work too
 
 | Command | What it does | Example |
 |---------|-------------|---------|
-| `follow` | Follow a user | `xmaster follow elonmusk` |
-| `unfollow` | Unfollow a user | `xmaster unfollow elonmusk` |
+| `follow` | Follow a user — removed from self-serve API tiers Apr 2026 | `xmaster follow elonmusk` |
+| `unfollow` | Unfollow a user — removed from self-serve API tiers Apr 2026 | `xmaster unfollow elonmusk` |
 | `followers` | List followers | `xmaster followers elonmusk -c 50` |
 | `following` | List who a user follows | `xmaster following elonmusk -c 50` |
 
