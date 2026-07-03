@@ -33,7 +33,7 @@ xmaster article draft draft.md --header-image cover.png --json
 
 ### Finding Posts to Reply To
 
-Replies are ~20x a like in the 2026 algorithm. This is the #1 growth lever for small accounts.
+Replies are the #1 growth lever for small accounts — a top positive signal, and the only surface that reliably reaches non-followers. (Exact signal weights are unpublished runtime params; distrust any "Nx" figure.)
 
 ```
 # Find fresh posts from big accounts in your niche:
@@ -65,10 +65,10 @@ xmaster metrics <id>                                          # Single post deep
 
 ## Algorithm Intelligence (2026)
 
-The CLI embeds knowledge from `xai-org/x-algorithm` (January 2026). Key facts:
+The CLI embeds knowledge from `xai-org/x-algorithm` (May 2026 re-release). Key facts:
 
-- **19 scoring signals** (15 positive, 4 negative) — weights unpublished but estimated
-- Top signals: follow-from-post (~30x), reply (~20x), quote (~18x), profile click (~12x)
+- **22 scoring signals** (13 positive, 4 continuous, 5 negative). Weight magnitudes are runtime params, NOT in the open source — treat any specific "Nx" multiplier you read online as fiction
+- Strong positive signals: follow_author, share_via_dm, reply, profile_click, dwell. Strong negatives: not_dwelled (predicted scroll-past — why shallow one-liners get suppressed with zero explicit user action), not_interested, mute/block/report
 - **Negative signals are predictive** — Grok suppresses content it predicts users would block/mute
 - **Bookmarks are NOT a signal** — ignore advice claiming otherwise
 - **share_via_dm fires when OTHERS share YOUR post** — create DM-worthy content, don't DM your own posts
@@ -76,6 +76,13 @@ The CLI embeds knowledge from `xai-org/x-algorithm` (January 2026). Key facts:
 - **Engagement history drives everything** — dormant accounts need 2 weeks of active engagement before the algorithm works
 
 `xmaster analyze` checks sentiment (Grok suppresses combative tone), estimates dwell time, and flags algorithm-penalised patterns.
+
+## API Restrictions & Pricing (2026)
+
+- **Likes, Follows, Quote-posts REMOVED from all self-serve API tiers (Apr 20, 2026).** `xmaster like/follow` will 403 on non-Enterprise keys — like/follow manually in the app. Quote posts auto-fall back to the web session (needs `xmaster config web-login`)
+- **Replies to non-mentioners are API-blocked (Feb 2026)** — xmaster auto-falls back to the web session
+- **Pay-per-use pricing**: $0.015/post, $0.20/post if it contains a URL (one more reason links go in the first reply), $0.001/owned read. HTTP 402 / exit code 2 = credits exhausted → top up at console.x.com
+- **Search (since May 2026)**: `min_likes:`, `min_replies:`, `min_reposts:` operators work in queries; keyword search no longer returns retweets
 
 ## Config
 

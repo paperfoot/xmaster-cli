@@ -31,7 +31,7 @@ struct AgentInfo {
     exit_codes: ExitCodes,
     envelope: Envelope,
     /// Algorithm intelligence — agents read this to understand how to optimise.
-    /// Source: xai-org/x-algorithm open-source code (January 2026).
+    /// Source: xai-org/x-algorithm open-source code (May 2026 re-release).
     algorithm: AlgorithmInfo,
     /// Which signals xmaster can measure, which it can only proxy, and which are blind.
     measurement_coverage: MeasurementCoverage,
@@ -204,7 +204,7 @@ pub fn execute(format: OutputFormat) {
         exit_codes: ExitCodes {
             success: "0: Success — continue",
             transient: "1: Transient error (IO, network) — retry with backoff",
-            config: "2: Config error (missing key, bad file) — fix setup, do not retry",
+            config: "2: Config/billing error (missing key, bad file, API credits exhausted) — fix setup, do not retry",
             bad_input: "3: Bad input (invalid args, denied command) — fix arguments",
             rate_limited: "4: Rate limited — wait, then retry",
         },
@@ -275,7 +275,9 @@ pub fn execute(format: OutputFormat) {
             "Use 'xmaster search-ai' over 'xmaster search' — cheaper and smarter (xAI vs X API). Supports from:username for hard author filtering (e.g. 'xmaster search-ai \"from:elonmusk AI\"')".into(),
             "Reply to larger accounts in your niche, and reply back when people reply to you — author reply-back is a strong reciprocity loop".into(),
             "Create content people want to DM to friends — share_via_dm is a top scoring signal".into(),
-            "Never put external links in the main tweet body — links reduce reach. Put them in the first reply".into(),
+            "Never put external links in the main tweet body — links reduce reach, and since 2026-04-20 a URL-bearing post costs $0.20 via API vs $0.015 plain. Put links in the first reply".into(),
+            "API RESTRICTIONS (2026): 'like'/'unlike'/'follow'/'unfollow' hit endpoints X removed from ALL self-serve API tiers on 2026-04-20 — expect 403 on non-Enterprise keys; like/follow manually in the app. Replies to non-mentioners and quote posts auto-fall back to the web session (requires 'xmaster config web-login')".into(),
+            "SEARCH OPERATORS (since the May 2026 index migration): min_likes:, min_replies:, min_reposts: work inside 'xmaster search' queries (e.g. 'xmaster search \"longevity min_likes:100\"'). Keyword search no longer returns retweets".into(),
             "Space posts 2+ hours apart — author_diversity_scorer.rs decays repeated authors per feed pass".into(),
             "DAILY CAP: ≤4 standalone posts per 24h. Replies don't count — heavy replying beats heavy posting for small accounts".into(),
             "THREADS: dedup_conversation_filter.rs keeps only the highest-scored tweet per conversation. Long threads dilute their own hook. Keep to ≤4, or split into standalones".into(),
@@ -361,10 +363,9 @@ pub fn execute(format: OutputFormat) {
                 after_command: "engage recommend".into(),
                 next_commands: vec![
                     "xmaster reply <id> \"...\"".into(),
-                    "xmaster like <id>".into(),
                     "xmaster engage watchlist add <username>".into(),
                 ],
-                reason: "Act on the recommended engagement targets — add proven reciprocators to your watchlist".into(),
+                reason: "Act on the recommended engagement targets — add proven reciprocators to your watchlist. (API likes/follows were removed for self-serve tiers in Apr 2026 — reply instead, it is the stronger signal anyway)".into(),
             },
             Handoff {
                 after_command: "engage feed".into(),
@@ -380,10 +381,9 @@ pub fn execute(format: OutputFormat) {
                 after_command: "engage swarm".into(),
                 next_commands: vec![
                     "xmaster reply <reply_id> \"...\"".into(),
-                    "xmaster like <reply_id>".into(),
-                    "xmaster follow <username>".into(),
+                    "xmaster engage watchlist add <username>".into(),
                 ],
-                reason: "Swarm targets are small-to-mid accounts already engaged with the big post. Replying peer-to-peer builds reciprocal relationships faster than competing for the top slot under the big account".into(),
+                reason: "Swarm targets are small-to-mid accounts already engaged with the big post. Replying peer-to-peer builds reciprocal relationships faster than competing for the top slot under the big account. (API likes/follows were removed for self-serve tiers in Apr 2026)".into(),
             },
             Handoff {
                 after_command: "track run".into(),
