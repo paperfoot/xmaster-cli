@@ -94,6 +94,8 @@ impl PostScheduler {
             ",
             )
             .map_err(|e| XmasterError::Config(e.to_string()))?;
+        // Claim token for fire() runs — see the phase comments there.
+        crate::intel::add_column_if_missing(&self.conn, "scheduled_posts", "fire_token", "TEXT");
         Ok(())
     }
 
@@ -278,28 +280,45 @@ impl PostScheduler {
         let now = Utc::now().timestamp();
         let grace_cutoff = now - (grace_minutes * 60);
 
-        // Phase 1: Atomically claim due posts (prevents duplicate posts from concurrent runs)
+        // Phase 0: fail rows orphaned by an interrupted run. A row stuck in
+        // 'firing' for over an hour means its owning process died mid-fire;
+        // re-firing it risks a double post (the tweet may already be live),
+        // so mark it failed and let the user decide.
         self.conn
             .execute(
-                "UPDATE scheduled_posts SET status = 'firing'
-                 WHERE status = 'pending' AND scheduled_at <= ?1",
+                "UPDATE scheduled_posts
+                 SET status = 'failed',
+                     last_error = 'orphaned by an interrupted fire run — reschedule if still wanted'
+                 WHERE status = 'firing' AND scheduled_at <= ?1 - 3600",
                 params![now],
             )
             .map_err(|e| XmasterError::Config(e.to_string()))?;
 
-        // Phase 2: Fetch claimed posts
+        // Phase 1: Atomically claim due posts with a per-run token, so two
+        // overlapping fire() runs never pick up the same rows (a token-less
+        // 'firing' status let a second run re-read rows the first was posting).
+        let fire_token = generate_id(now);
+        self.conn
+            .execute(
+                "UPDATE scheduled_posts SET status = 'firing', fire_token = ?2
+                 WHERE status = 'pending' AND scheduled_at <= ?1",
+                params![now, fire_token],
+            )
+            .map_err(|e| XmasterError::Config(e.to_string()))?;
+
+        // Phase 2: Fetch the posts THIS run claimed
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT id, content, scheduled_at, reply_to_id, quote_id, media_paths, retry_count
                  FROM scheduled_posts
-                 WHERE status = 'firing'",
+                 WHERE status = 'firing' AND fire_token = ?1",
             )
             .map_err(|e| XmasterError::Config(e.to_string()))?;
 
         type DuePost = (String, String, i64, Option<String>, Option<String>, Option<String>, i32);
         let due_posts: Vec<DuePost> =
-            stmt.query_map([], |row| {
+            stmt.query_map(params![fire_token], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
