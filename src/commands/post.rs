@@ -151,12 +151,7 @@ pub async fn execute(
     let quote_id = quote.map(parse_tweet_id);
 
     let media_ids = if !media.is_empty() {
-        let mut ids = Vec::new();
-        for path in media {
-            let id = api.upload_media(path).await?;
-            ids.push(id);
-        }
-        Some(ids)
+        Some(api.upload_media_many(media).await?)
     } else {
         None
     };

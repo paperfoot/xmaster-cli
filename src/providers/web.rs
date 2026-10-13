@@ -898,6 +898,22 @@ impl<'a> Web<'a> {
     }
 }
 
+// Media upload support (providers/media.rs).
+impl Web<'_> {
+    /// `req` with this session's web headers and a transaction ID signed for
+    /// `method` + `path`, for the upload.x.com media endpoints.
+    pub(crate) async fn upload_headers(
+        &self,
+        req: RequestBuilder,
+        method: &str,
+        path: &str,
+    ) -> Result<RequestBuilder, XmasterError> {
+        let state = self.state(false).await?;
+        let tx = state.tx.as_ref().map(|k| transaction_id::sign(k, method, path)).unwrap_or_default();
+        Ok(self.headers(req, &tx, "https://x.com/compose/post"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
