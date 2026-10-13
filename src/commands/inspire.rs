@@ -105,14 +105,9 @@ pub async fn execute(
     min_chars: Option<i64>,
     count: usize,
 ) -> Result<(), XmasterError> {
-    let store = IntelStore::open()
-        .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
-
-    let library_size = store.discovered_posts_count()
-        .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?;
-
-    let rows = store.query_discovered_posts(topic, author, min_likes, min_chars, count)
-        .map_err(|e| XmasterError::Config(format!("Query error: {e}")))?;
+    let store = IntelStore::open()?;
+    let library_size = store.discovered_posts_count()?;
+    let rows = store.query_discovered_posts(topic, author, min_likes, min_chars, count)?;
 
     if rows.is_empty() {
         let hint = if library_size == 0 {
@@ -132,8 +127,7 @@ pub async fn execute(
     let now_ts = Utc::now().timestamp();
     let thirty_days_ago = now_ts - 30 * 24 * 3600;
     let my_recent: Vec<(String, i64, HashSet<String>)> = store
-        .get_post_history(200)
-        .map_err(|e| XmasterError::Config(format!("DB error: {e}")))?
+        .get_post_history(200)?
         .into_iter()
         .filter(|p| p.posted_at >= thirty_days_ago)
         .map(|p| (p.text.clone(), p.posted_at, trigrams(&p.text)))
