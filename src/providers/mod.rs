@@ -7,3 +7,4 @@ pub mod jev;
 pub mod media;
 pub mod web;
 pub mod web_timeline;
+pub mod web_events;

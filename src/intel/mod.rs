@@ -5,6 +5,7 @@ pub mod preflight;
 pub mod scheduler;
 pub mod schema;
 pub mod tracker;
+pub mod rails;
 
 use rusqlite::Connection;
 
