@@ -347,6 +347,9 @@ impl XApi {
         for attempt in 0..MAX_RETRIES {
             match self.request_once(method.clone(), url, body.clone()).await {
                 Ok(val) => return Ok(val),
+                // A 5xx on a POST may come after X already created the post:
+                // retrying risks a duplicate. Only 429 (not processed) retries.
+                Err(e @ XmasterError::ServerError { .. }) if method == Method::POST => return Err(e),
                 Err(e) if e.is_retryable() && attempt + 1 < MAX_RETRIES => {
                     // Exponential backoff: 1s, 2s, 4s base + random 0-500ms jitter
                     let base_ms = 1000u64 * (1u64 << attempt);
@@ -360,11 +363,16 @@ impl XApi {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs();
+                            // Long windows: hand the reset time to the caller
+                            // (exit 4) instead of stalling an agent for minutes.
+                            if reset_at.saturating_sub(now) > 15 {
+                                return Err(e);
+                            }
                             if *reset_at > now {
                                 // Keep jitter in millis — integer-dividing it
                                 // into seconds always yielded 0, so concurrent
                                 // clients woke in lockstep on the same reset.
-                                let wait = (*reset_at - now).min(60);
+                                let wait = *reset_at - now;
                                 delay = Duration::from_millis(wait * 1000 + jitter_ms);
                             }
                         }
@@ -748,6 +756,17 @@ impl XApi {
                 Ok((id, text)) => return Ok(TweetResponse { id, text }),
                 // Quotes and long posts have no API path to fall back to
                 Err(e) if quote_tweet_id.is_some() || long_premium => return Err(e),
+                // X may have accepted it: a second path would double-post
+                Err(e) if Self::maybe_delivered(&e) => {
+                    return Err(XmasterError::Api {
+                        provider: "x-web",
+                        code: "write_unconfirmed",
+                        message: format!(
+                            "{e}. The post may have gone through: check your profile \
+                            before retrying"
+                        ),
+                    })
+                }
                 Err(e) => {
                     warn!("Web post failed ({e}); trying the API");
                     web_err = Some(e);
@@ -768,6 +787,19 @@ impl XApi {
                 )
             })),
             other => other,
+        }
+    }
+
+    /// Could X have accepted a write despite this error (timeout after send,
+    /// 5xx, a 200 we couldn't read)? Then trying another path risks a duplicate.
+    fn maybe_delivered(err: &XmasterError) -> bool {
+        match err {
+            XmasterError::Http(e) => !e.is_connect() && !e.is_builder(),
+            XmasterError::ServerError { .. } => true,
+            XmasterError::Api { code, message, .. } => {
+                matches!(*code, "no_tweet_result" | "no_rest_id") || message.contains("(HTTP 5")
+            }
+            _ => false,
         }
     }
 
