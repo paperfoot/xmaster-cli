@@ -86,15 +86,19 @@ pub async fn authorize(client_id: &str, client_secret: &str) -> Result<(), Xmast
     let code_challenge = generate_code_challenge(&code_verifier);
     let state = generate_state();
 
-    let auth_url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+    let auth_url = url::Url::parse_with_params(
         AUTH_URL,
-        urlencoding::encode(client_id),
-        urlencoding::encode(REDIRECT_URI),
-        urlencoding::encode(SCOPES),
-        urlencoding::encode(&state),
-        urlencoding::encode(&code_challenge),
-    );
+        [
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", REDIRECT_URI),
+            ("scope", SCOPES),
+            ("state", &state),
+            ("code_challenge", &code_challenge),
+            ("code_challenge_method", "S256"),
+        ],
+    )
+    .map_err(|e| XmasterError::Config(format!("Bad OAuth2 authorize URL: {e}")))?;
 
     // Bind the listener BEFORE opening the browser
     let listener = TcpListener::bind("127.0.0.1:3000").await.map_err(|e| {
@@ -107,7 +111,7 @@ pub async fn authorize(client_id: &str, client_secret: &str) -> Result<(), Xmast
     eprintln!("Opening browser for authorization...");
 
     // Open browser
-    let _ = std::process::Command::new("open").arg(&auth_url).spawn();
+    let _ = std::process::Command::new("open").arg(auth_url.as_str()).spawn();
 
     // Wait for the single callback request (with 2-minute timeout)
     let (code, returned_state) = tokio::time::timeout(

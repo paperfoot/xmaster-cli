@@ -22,15 +22,19 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use super::web_timeline::{self, Page};
-use super::xapi::TweetData;
+use super::xapi::{TweetData, TweetLookup, UserResponse};
 
 /// Public bearer token used by the X web app (same for all users, not secret).
 const WEB_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const SEC_CH_UA: &str = "\"Google Chrome\";v=\"146\", \"Chromium\";v=\"146\", \"Not_A Brand\";v=\"24\"";
 
-/// Signing keys and query IDs are re-read from x.com after this long.
-const STATE_TTL_SECS: u64 = 3600;
+/// Signing keys and query IDs are re-read from x.com after this long. A stale
+/// ID or key is caught per request (refresh once, retry), so this can be long.
+const STATE_TTL_SECS: u64 = 6 * 3600;
+
+/// Scripts fetched at once while looking for the signing script.
+const SCRIPT_BATCH: usize = 8;
 
 /// Last-known query IDs (x.com main.js, 2026-10-13). Used only when discovery
 /// fails; the Article IDs live in a lazy chunk that discovery doesn't read.
@@ -43,6 +47,9 @@ const FALLBACK_IDS: &[(&str, &str)] = &[
     ("DeleteRetweet", "ZyZigVsNiFO6v1dEks1eWg"),
     ("CreateBookmark", "aoDbu3RHznuiSkQ9aNM67Q"),
     ("DeleteBookmark", "Wlmlj2-xzyS1GN3a6cj-mQ"),
+    ("DeleteTweet", "nxpZCY2K-I6QoFHAHeojFQ"),
+    ("UserByScreenName", "AMIBMjtxEEATh4z8V9GtRg"),
+    ("TweetResultByRestId", "xZfFqfOmKQu_OXekGI59mg"),
     ("ArticleEntityDraftCreate", "g1l5N8BxGewYuCy5USe_bQ"),
     ("ArticleEntityUpdateCoverMedia", "Es8InPh7mEkK9PxclxFAVQ"),
     ("HomeLatestTimeline", "NmDBT3APtNxDpMqIEauu7A"),
@@ -197,6 +204,57 @@ fn viewer_handle(html: &str, id: &str) -> Option<String> {
         .map(|c| c[1].to_string())
 }
 
+/// A script's text, fetched without x.com cookies (a browser doesn't send
+/// them to the static-asset host). Empty on any failure.
+async fn script_text(client: &reqwest::Client, url: &str) -> String {
+    match client.get(url).header("user-agent", UA).send().await {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Fetch scripts concurrently: (url, text) pairs in input order.
+async fn fetch_scripts(client: &reqwest::Client, urls: &[String]) -> Vec<(String, String)> {
+    let mut set = tokio::task::JoinSet::new();
+    for (i, url) in urls.iter().enumerate() {
+        let (client, url) = (client.clone(), url.clone());
+        set.spawn(async move {
+            let text = script_text(&client, &url).await;
+            (i, url, text)
+        });
+    }
+    let mut got = set.join_all().await;
+    got.sort_by_key(|g| g.0);
+    got.into_iter().map(|(_, u, t)| (u, t)).collect()
+}
+
+/// The script with the transaction-ID key indices: the legacy build names
+/// ondemand.s in the page's chunk map; the x-web (Vite) build imports a
+/// sign.o-* script from its transaction-id plugin, one or two imports deep.
+async fn signing_script(client: &reqwest::Client, html: &str) -> Result<String, XmasterError> {
+    if let Ok(url) = transaction_id::ondemand_url(html) {
+        return Ok(script_text(client, &url).await);
+    }
+    let mut frontier = transaction_id::x_web_scripts(html);
+    let mut seen: std::collections::HashSet<String> = frontier.iter().cloned().collect();
+    for _depth in 0..3 {
+        let mut next = Vec::new();
+        for batch in frontier.chunks(SCRIPT_BATCH) {
+            let texts = fetch_scripts(client, batch).await;
+            if let Some(url) = texts.iter().find_map(|(u, t)| transaction_id::indices_script_ref(t, u)) {
+                return Ok(script_text(client, &url).await);
+            }
+            for (u, t) in &texts {
+                next.extend(transaction_id::relative_imports(t, u).into_iter().filter(|i| seen.insert(i.clone())));
+            }
+        }
+        // The transaction-id plugin is the importer: look there first
+        next.sort_by_key(|u| !u.contains("transaction"));
+        frontier = next;
+    }
+    Err(web_err("no_signing_script", "Found no transaction-ID signing script in x.com's bundles".into()))
+}
+
 fn main_js_url(html: &str) -> Option<String> {
     regex::Regex::new(r#"https://abs\.twimg\.com/responsive-web/client-web/main\.[0-9a-f]+\.js"#)
         .unwrap()
@@ -347,6 +405,15 @@ impl<'a> Web<'a> {
 
         let prev = guard.take().unwrap_or_default();
         let mut html = self.get_text("https://x.com/home").await?;
+        if transaction_id::is_challenge_page(&html) {
+            *guard = Some(prev);
+            return Err(web_err(
+                "web_challenge",
+                "x.com answered with a Cloudflare challenge page instead of the app. Open x.com \
+                 in Chrome on this network, then retry"
+                    .into(),
+            ));
+        }
         if !html.contains("twitter-site-verification") && self.refresh_cookies() {
             html = self.get_text("https://x.com/home").await?;
         }
@@ -360,34 +427,39 @@ impl<'a> Web<'a> {
             });
         }
 
+        // Query IDs come from the legacy main.js. The x-web build uses Relay
+        // persisted queries with another schema; there the cached and
+        // fallback IDs stay in use.
         let main_js = main_js_url(&html).unwrap_or_default();
-        let mut ops = if !main_js.is_empty() && (main_js != prev.main_js || prev.ops.is_empty()) {
-            let found = parse_ops(&self.get_text(&main_js).await.unwrap_or_default());
-            if found.is_empty() { prev.ops } else { found }
-        } else {
-            prev.ops
-        };
+        let client = &self.ctx.client;
+        let new_bundle = !main_js.is_empty() && (main_js != prev.main_js || prev.ops.is_empty());
+        let (bundle, signing) = tokio::join!(
+            async { if new_bundle { script_text(client, &main_js).await } else { String::new() } },
+            signing_script(client, &html),
+        );
+        let found = parse_ops(&bundle);
+        let mut ops = if found.is_empty() { prev.ops } else { found };
         for (op, segment) in LAZY_OPS {
             if ops.contains_key(*op) {
                 continue;
             }
             for url in lazy_chunk_urls(&html, segment) {
-                ops.extend(parse_ops(&self.get_text(&url).await.unwrap_or_default()));
+                ops.extend(parse_ops(&script_text(client, &url).await));
                 if ops.contains_key(*op) {
                     break;
                 }
             }
         }
-        let ondemand = self.get_text(&transaction_id::ondemand_url(&html)?).await?;
+        let signing = signing?;
         // Keep only the switches some operation declares (the page has ~1k)
         let used: std::collections::HashSet<&String> = ops.values().flat_map(|m| &m.features).collect();
         let switches = parse_switches(&html).into_iter().filter(|(k, _)| used.contains(k)).collect();
         let state = State {
             fetched_at: now(),
-            main_js,
+            main_js: if main_js.is_empty() { prev.main_js } else { main_js },
             ops,
             switches,
-            tx: Some(transaction_id::derive(&html, &ondemand)?),
+            tx: Some(transaction_id::derive(&html, &signing)?),
             viewer_handle: viewer_id(&html)
                 .and_then(|id| viewer_handle(&html, &id))
                 .unwrap_or(prev.viewer_handle),
@@ -400,16 +472,7 @@ impl<'a> Web<'a> {
         Ok(state)
     }
 
-    fn query_id(&self, state: &State, op: &str) -> String {
-        let keys = &self.ctx.config.keys;
-        let pinned = match op {
-            "CreateTweet" => keys.graphql_create_tweet_id.as_str(),
-            "CreateNoteTweet" => keys.graphql_create_note_tweet_id.as_str(),
-            _ => "",
-        };
-        if !pinned.is_empty() {
-            return pinned.to_string();
-        }
+    fn query_id(state: &State, op: &str) -> String {
         state
             .ops
             .get(op)
@@ -449,7 +512,7 @@ impl<'a> Web<'a> {
     ) -> Result<Value, XmasterError> {
         for attempt in 0..2 {
             let state = self.state(attempt > 0).await?;
-            let (method, path, req) = build(&self.query_id(&state, op));
+            let (method, path, req) = build(&Self::query_id(&state, op));
             let tx = state.tx.as_ref().map(|k| transaction_id::sign(k, method, &path)).unwrap_or_default();
             let resp = self.headers(req, &tx, referer).send().await?;
             let status = resp.status();
@@ -596,6 +659,59 @@ impl<'a> Web<'a> {
         Ok(self.viewer().await?.0)
     }
 
+    /// The logged-in account's profile.
+    pub async fn viewer_profile(&self) -> Result<UserResponse, XmasterError> {
+        let (id, handle) = self.viewer().await?;
+        if handle.is_empty() {
+            return Err(web_err("no_viewer_handle", format!("The x.com page named no handle for user {id}")));
+        }
+        self.user_by_screen_name(&handle).await
+    }
+
+    /// A profile by handle (UserByScreenName).
+    pub async fn user_by_screen_name(&self, handle: &str) -> Result<UserResponse, XmasterError> {
+        let val = self
+            .query("UserByScreenName", json!({ "screen_name": handle }), "https://x.com/home")
+            .await?;
+        val.pointer("/data/user/result")
+            .and_then(web_timeline::parse_user)
+            .ok_or_else(|| XmasterError::NotFound(format!("User @{handle}")))
+    }
+
+    /// Public metrics and author ID for up to 100 posts per call
+    /// (TweetResultsByRestIds). Unavailable posts are left out.
+    pub async fn tweet_lookups(&self, ids: &[String]) -> Result<Vec<(TweetLookup, String)>, XmasterError> {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(100) {
+            let variables = json!({
+                "tweetIds": chunk,
+                "includePromotedContent": false,
+                "withBirdwatchNotes": false,
+                "withVoice": false,
+                "withCommunity": false,
+            });
+            let val = self.query("TweetResultsByRestIds", variables, "https://x.com/home").await?;
+            let results = val.pointer("/data/tweetResult").and_then(Value::as_array).cloned().unwrap_or_default();
+            out.extend(results.iter().filter_map(|r| r.get("result")).filter_map(web_timeline::parse_lookup));
+        }
+        Ok(out)
+    }
+
+    /// One post by ID (TweetResultByRestId).
+    pub async fn tweet(&self, id: &str) -> Result<TweetData, XmasterError> {
+        let variables = json!({
+            "tweetId": id,
+            "withCommunity": false,
+            "includePromotedContent": false,
+            "withVoice": false,
+        });
+        let referer = format!("https://x.com/i/status/{id}");
+        let val = self.query("TweetResultByRestId", variables, &referer).await?;
+        val.pointer("/data/tweetResult/result")
+            .and_then(web_timeline::parse_tweet)
+            .ok_or_else(|| XmasterError::NotFound(format!("Post {id}")))
+    }
+
     /// Page through a timeline query until `want` posts are taken, the
     /// timeline ends, or `take` reports the rest is out of range. Pauses
     /// between pages like someone scrolling.
@@ -661,7 +777,7 @@ impl<'a> Web<'a> {
         let product = if top { "Top" } else { "Latest" };
         let referer = format!(
             "https://x.com/search?q={}&src=typed_query{}",
-            urlencoding::encode(query),
+            percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC),
             if top { "" } else { "&f=live" }
         );
         let variables = json!({
@@ -847,6 +963,10 @@ impl<'a> Web<'a> {
         Ok((id.to_string(), full_text.to_string()))
     }
 
+    pub async fn delete_tweet(&self, id: &str) -> Result<(), XmasterError> {
+        self.tweet_action("DeleteTweet", json!({ "tweet_id": id, "dark_request": false })).await
+    }
+
     async fn tweet_action(&self, op: &str, variables: Value) -> Result<(), XmasterError> {
         self.graphql(op, variables, None, None, "https://x.com/home").await.map(|_| ())
     }
@@ -896,6 +1016,26 @@ impl<'a> Web<'a> {
         .await
         .map(|_| ())
     }
+
+    /// Mute, unmute, block or unblock by handle: the v1.1 endpoints x.com
+    /// itself calls, so no paid user-ID lookup is needed.
+    pub async fn moderate(&self, action: Moderation, username: &str) -> Result<(), XmasterError> {
+        let (op, path) = match action {
+            Moderation::Mute => ("Mute", "/i/api/1.1/mutes/users/create.json"),
+            Moderation::Unmute => ("Unmute", "/i/api/1.1/mutes/users/destroy.json"),
+            Moderation::Block => ("Block", "/i/api/1.1/blocks/create.json"),
+            Moderation::Unblock => ("Unblock", "/i/api/1.1/blocks/destroy.json"),
+        };
+        self.rest_form(op, path, &[("screen_name", username)]).await.map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Moderation {
+    Mute,
+    Unmute,
+    Block,
+    Unblock,
 }
 
 // Media upload support (providers/media.rs).

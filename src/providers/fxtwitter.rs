@@ -14,11 +14,13 @@
 //!
 //! This module is a soft dependency: if FxTwitter is unreachable, we return
 //! `None` and the caller falls back to the v2 API response unchanged.
-//! Opt out by setting `keys.disable_fxtwitter = true` in config.
+//! Opt out with `xmaster config set settings.disable_fxtwitter true`.
 //!
 //! Reference: https://github.com/FixTweet/FxTwitter
 
-use crate::providers::xapi::{ReferencedTweet, TweetData, TweetMetrics, UserMetrics, UserResponse};
+use crate::providers::xapi::{
+    ReferencedTweet, TweetData, TweetLookup, TweetLookupPublicMetrics, TweetMetrics, UserMetrics, UserResponse,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -66,8 +68,9 @@ struct FxUser {
     followers: u64,
     #[serde(default)]
     following: u64,
-    #[serde(default)]
-    tweets: u64,
+    /// `tweets` on the v1 endpoint, `statuses` on /2/profile
+    #[serde(default, alias = "statuses")]
+    tweets: Option<u64>,
     #[serde(default)]
     avatar_url: Option<String>,
     #[serde(default)]
@@ -96,6 +99,8 @@ struct FxTweet {
     likes: u64,
     #[serde(default)]
     bookmarks: u64,
+    #[serde(default)]
+    quotes: u64,
     #[serde(default)]
     views: Option<u64>,
     #[serde(default)]
@@ -194,12 +199,21 @@ async fn fetch_status(tweet_id: &str) -> Option<FxTweet> {
     fetch_json::<FxResponse>(&format!("/i/status/{tweet_id}")).await?.tweet
 }
 
-/// Look up a profile for free (username → ID, bio, counts). `None` on any
-/// failure — the caller falls back to the paid API lookup.
+/// Look up a profile for free (username → ID, bio, counts). Each FxTwitter
+/// profile endpoint 404s on a share of requests independently, so a miss on
+/// one tries the other. `None` on any failure.
 pub async fn fetch_user(username: &str) -> Option<UserResponse> {
-    let u = fetch_json::<FxUserResponse>(&format!("/{}", urlencoding::encode(username)))
-        .await?
-        .user?;
+    if username.is_empty() || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let mut found = None;
+    for path in [format!("/{username}"), format!("/2/profile/{username}")] {
+        found = fetch_json::<FxUserResponse>(&path).await.and_then(|r| r.user);
+        if found.is_some() {
+            break;
+        }
+    }
+    let u = found?;
     Some(UserResponse {
         id: u.id,
         name: u.name,
@@ -208,7 +222,7 @@ pub async fn fetch_user(username: &str) -> Option<UserResponse> {
         public_metrics: Some(UserMetrics {
             followers_count: u.followers,
             following_count: u.following,
-            tweet_count: u.tweets,
+            tweet_count: u.tweets.unwrap_or(0),
             listed_count: 0,
         }),
         profile_image_url: u.avatar_url,
@@ -262,6 +276,29 @@ pub async fn fetch_post(tweet_id: &str) -> Option<(TweetData, Option<Article>)> 
         media_urls: t.media.map(|m| m.all.into_iter().map(|i| i.url).collect()).unwrap_or_default(),
     };
     Some((tweet, t.article.map(flatten_article)))
+}
+
+/// Public metrics for one post, free, with its author's ID (so a caller can
+/// tell its own posts apart). `None` on any failure.
+pub async fn fetch_lookup(tweet_id: &str) -> Option<(TweetLookup, String)> {
+    let t = fetch_status(tweet_id).await?;
+    let lookup = TweetLookup {
+        id: t.id,
+        created_at: t
+            .created_timestamp
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        public_metrics: Some(TweetLookupPublicMetrics {
+            like_count: t.likes,
+            retweet_count: t.retweets,
+            reply_count: t.replies,
+            impression_count: t.views.unwrap_or(0),
+            quote_count: t.quotes,
+            bookmark_count: t.bookmarks,
+        }),
+        non_public_metrics: None,
+    };
+    Some((lookup, t.author?.id))
 }
 
 fn flatten_article(a: FxArticle) -> Article {
