@@ -11,6 +11,10 @@ use std::sync::Arc;
 struct ThreadResult {
     #[serde(rename = "ids")]
     tweet_ids: Vec<String>,
+    /// The first post of the thread.
+    url: String,
+    /// Deletes every posted part, last first.
+    undo: String,
     total: usize,
     succeeded: usize,
     failed: usize,
@@ -72,11 +76,7 @@ pub async fn execute(
     media: &[String],
 ) -> Result<(), XmasterError> {
     if texts.is_empty() {
-        return Err(XmasterError::Api {
-            provider: "x",
-            code: "invalid_input",
-            message: "Thread must contain at least one tweet".into(),
-        });
+        return Err(XmasterError::InvalidInput("a thread needs at least one post".into()));
     }
 
     let api = XApi::new(ctx.clone());
@@ -176,6 +176,9 @@ pub async fn execute(
                 }
                 posted_ids.push(resp.id);
             }
+            // Nothing posted yet: the error itself is the answer (exit code
+            // and suggestion intact).
+            Err(e) if i == 0 => return Err(crate::commands::reclassify_403(e)),
             Err(e) => {
                 failed += 1;
                 let remaining = texts.len() - i - 1;
@@ -191,16 +194,13 @@ pub async fn execute(
         }
     }
 
-    // If ALL tweets failed, return an error instead of a success envelope
-    if posted_ids.is_empty() && !texts.is_empty() {
-        return Err(XmasterError::Api {
-            provider: "x",
-            code: "thread_failed",
-            message: format!("Thread failed: 0/{} tweets posted", texts.len()),
-        });
+    let undo = posted_ids.iter().rev().map(|id| format!("xmaster delete {id}")).collect::<Vec<_>>().join(" && ");
+    if format == OutputFormat::Table {
+        eprintln!("Delete thread: {undo}");
     }
-
     let display = ThreadResult {
+        url: crate::commands::post_url(&posted_ids[0]),
+        undo,
         total: texts.len(),
         succeeded: posted_ids.len(),
         failed,
@@ -210,17 +210,5 @@ pub async fn execute(
         warnings: if format == OutputFormat::Json { warnings } else { vec![] },
     };
     output::render(format, &display, None);
-
-    // Undo hint
-    if format == OutputFormat::Table && !posted_ids.is_empty() {
-        eprintln!(
-            "Delete thread: {}",
-            posted_ids
-                .iter()
-                .map(|id| format!("xmaster delete {id}"))
-                .collect::<Vec<_>>()
-                .join(" && ")
-        );
-    }
     Ok(())
 }

@@ -1,4 +1,3 @@
-use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::judge::{self, Triage};
@@ -144,7 +143,7 @@ pub async fn execute(
     count: usize,
     quote_reply_count: usize,
 ) -> Result<(), XmasterError> {
-    let source_tweet_id = parse_tweet_id(id);
+    let source_tweet_id = id.to_string();
     let api = XApi::new(ctx.clone());
     let mut notes = vec![
         "Native reposts do not have their own comments; this checks quote tweets/reposts-with-comment and replies under those quote tweets.".into(),

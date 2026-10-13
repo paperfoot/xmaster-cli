@@ -1,3 +1,4 @@
+use crate::commands::{reclassify_403, WriteRoute};
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::{self, CsvRenderable, OutputFormat, Tableable};
@@ -5,37 +6,34 @@ use crate::providers::xapi::XApi;
 use serde::Serialize;
 use std::sync::Arc;
 
+/// A follow or unfollow, with the profile link, the undo command and the
+/// path that carried it.
 #[derive(Serialize)]
 struct FollowResult {
-    action: String,
+    action: &'static str,
     username: String,
-    success: bool,
+    url: String,
+    undo: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<&'static str>,
 }
 
 impl Tableable for FollowResult {
     fn to_table(&self) -> comfy_table::Table {
         let mut table = comfy_table::Table::new();
         table.set_header(vec!["Action", "Username", "Status"]);
-        table.add_row(vec![
-            self.action.as_str(),
-            self.username.as_str(),
-            if self.success { "OK" } else { "Failed" },
-        ]);
+        table.add_row(vec![self.action, &format!("@{}", self.username), "OK"]);
         table
     }
 }
 
 impl CsvRenderable for FollowResult {
     fn csv_headers() -> Vec<&'static str> {
-        vec!["action", "username", "status"]
+        vec!["action", "username", "url", "undo"]
     }
 
     fn csv_rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.action.clone(),
-            self.username.clone(),
-            if self.success { "OK" } else { "Failed" }.to_string(),
-        ]]
+        vec![vec![self.action.into(), self.username.clone(), self.url.clone(), self.undo.clone()]]
     }
 }
 
@@ -94,54 +92,29 @@ impl CsvRenderable for UserList {
     }
 }
 
-/// Print an undo hint to stderr (only in table mode).
-fn undo_hint(format: OutputFormat, message: &str) {
+fn render_follow(ctx: &AppContext, format: OutputFormat, action: &'static str, undo: &str, username: &str) {
+    let display = FollowResult {
+        action,
+        username: username.to_string(),
+        url: format!("https://x.com/{username}"),
+        undo: format!("xmaster {undo} {username}"),
+        via: WriteRoute::web_only(ctx),
+    };
     if format == OutputFormat::Table {
-        eprintln!("{message}");
+        eprintln!("Undo: {}", display.undo);
     }
-}
-
-/// Add a contextual hint when follow/unfollow fails with 403.
-fn maybe_add_hint(err: XmasterError) -> XmasterError {
-    if let XmasterError::AuthMissing { provider, ref message } = err {
-        if message.contains("403") {
-            return XmasterError::Api {
-                provider,
-                code: "forbidden",
-                message: format!(
-                    "{message}. Hint: You may already follow this user or they have blocked you"
-                ),
-            };
-        }
-    }
-    err
+    output::render_csv(format, &display, None);
 }
 
 pub async fn follow(ctx: Arc<AppContext>, format: OutputFormat, username: &str) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
-    let username = username.trim_start_matches('@');
-    api.follow_username(username).await.map_err(maybe_add_hint)?;
-    let display = FollowResult {
-        action: "follow".into(),
-        username: username.to_string(),
-        success: true,
-    };
-    output::render(format, &display, None);
-    undo_hint(format, &format!("Undo: xmaster unfollow {username}"));
+    XApi::new(ctx.clone()).follow_username(username).await.map_err(reclassify_403)?;
+    render_follow(&ctx, format, "follow", "unfollow", username);
     Ok(())
 }
 
 pub async fn unfollow(ctx: Arc<AppContext>, format: OutputFormat, username: &str) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
-    let username = username.trim_start_matches('@');
-    api.unfollow_username(username).await.map_err(maybe_add_hint)?;
-    let display = FollowResult {
-        action: "unfollow".into(),
-        username: username.to_string(),
-        success: true,
-    };
-    output::render(format, &display, None);
-    undo_hint(format, &format!("Undo: xmaster follow {username}"));
+    XApi::new(ctx.clone()).unfollow_username(username).await.map_err(reclassify_403)?;
+    render_follow(&ctx, format, "unfollow", "follow", username);
     Ok(())
 }
 

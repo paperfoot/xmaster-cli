@@ -31,9 +31,10 @@ pub mod quotes;
 pub mod amplifiers;
 pub mod volume;
 pub mod article;
+pub mod conversation;
 pub mod rails_cmd;
 
-use crate::cli::{ArticleCommands, Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
+use crate::cli::{ArticleCommands, Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, RailsCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::OutputFormat;
@@ -76,6 +77,8 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::HideReply { .. } => "hide-reply",
         Commands::UnhideReply { .. } => "unhide-reply",
         Commands::Read { .. } => "read",
+        Commands::Conversation { .. } => "conversation",
+        Commands::Quote { .. } => "quote",
         Commands::Replies { .. } => "replies",
         Commands::Likers { .. } => "likers",
         Commands::Retweeters { .. } => "retweeters",
@@ -95,6 +98,20 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Suggest { .. } => "suggest",
         Commands::Schedule { .. } => "schedule",
         Commands::Skill { .. } => "skill",
+        Commands::Rails { .. } => "rails",
+    }
+}
+
+/// Other names a deny rule may use for a command: its X-term alias, and
+/// `post` for every command that publishes a post.
+fn deny_aliases(cmd_name: &str) -> &'static [&'static str] {
+    match cmd_name {
+        "reply" | "quote" | "thread" => &["post"],
+        "retweet" => &["repost"],
+        "unretweet" => &["unrepost"],
+        "retweeters" => &["reposters"],
+        "conversation" => &["convo"],
+        _ => &[],
     }
 }
 
@@ -108,10 +125,14 @@ fn check_command_access(cmd_name: &str) -> Result<(), XmasterError> {
     }
 
     if let Ok(deny) = std::env::var("XMASTER_DENY_COMMANDS") {
-        let denied: Vec<&str> = deny.split(',').map(|s| s.trim()).collect();
-        if denied.iter().any(|d| d.eq_ignore_ascii_case(cmd_name)) {
+        let names: Vec<&str> = std::iter::once(cmd_name).chain(deny_aliases(cmd_name).iter().copied()).collect();
+        if let Some(rule) = deny
+            .split(',')
+            .map(str::trim)
+            .find(|d| names.iter().any(|n| d.eq_ignore_ascii_case(n)))
+        {
             return Err(XmasterError::CommandDenied(format!(
-                "'{cmd_name}' is blocked by XMASTER_DENY_COMMANDS"
+                "'{cmd_name}' is blocked by XMASTER_DENY_COMMANDS ({rule})"
             )));
         }
     }
@@ -128,6 +149,83 @@ fn check_command_access(cmd_name: &str) -> Result<(), XmasterError> {
     Ok(())
 }
 
+/// Does this command change anything on X? (`XMASTER_READ_ONLY` blocks
+/// these.) Dry runs, local bookkeeping (schedule add, watchlist, config) and
+/// the rails switches (pause, resume, reset-cooldown) are not X writes.
+fn writes_to_x(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::Post { dry_run, .. } | Commands::Reply { dry_run, .. } | Commands::Quote { dry_run, .. } => !dry_run,
+        Commands::Thread { .. }
+        | Commands::Delete { .. }
+        | Commands::Like { .. }
+        | Commands::Unlike { .. }
+        | Commands::Retweet { .. }
+        | Commands::Unretweet { .. }
+        | Commands::Bookmark { .. }
+        | Commands::Unbookmark { .. }
+        | Commands::Follow { .. }
+        | Commands::Unfollow { .. }
+        | Commands::HideReply { .. }
+        | Commands::UnhideReply { .. }
+        | Commands::Block { .. }
+        | Commands::Unblock { .. }
+        | Commands::Mute { .. }
+        | Commands::Unmute { .. } => true,
+        Commands::Dm { action } => matches!(action, DmCommands::Send { .. }),
+        Commands::Lists { action } => matches!(
+            action,
+            ListCommands::Create { .. } | ListCommands::Delete { .. } | ListCommands::Add { .. } | ListCommands::Remove { .. }
+        ),
+        Commands::Schedule { action } => matches!(action, ScheduleCommands::Fire),
+        Commands::Article { action } => matches!(action, ArticleCommands::Draft { .. } | ArticleCommands::Publish { .. }),
+        _ => false,
+    }
+}
+
+/// `XMASTER_READ_ONLY=1`: every read works, nothing changes on X.
+fn check_read_only(cmd: &Commands, cmd_name: &str) -> Result<(), XmasterError> {
+    let on = std::env::var("XMASTER_READ_ONLY").is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+    if on && writes_to_x(cmd) {
+        return Err(XmasterError::CommandDenied(format!(
+            "'{cmd_name}' writes to X and XMASTER_READ_ONLY is set (--dry-run still works for post, reply and quote)"
+        )));
+    }
+    Ok(())
+}
+
+/// A link to any post that needs no lookup of its author's handle.
+pub(crate) fn post_url(id: &str) -> String {
+    format!("https://x.com/i/status/{id}")
+}
+
+/// The route of a write whose path is fixed up front (`via` in results).
+pub(crate) struct WriteRoute;
+
+impl WriteRoute {
+    /// Likes and follows: the web session when it's set up, else the API
+    /// (no fallback either way, so this is the path taken).
+    pub fn web_only(ctx: &AppContext) -> Option<&'static str> {
+        Some(if ctx.config.web_first(true) { "web" } else { "api" })
+    }
+}
+
+/// TRANSITIONAL until xapi.rs builds its errors with
+/// `XmasterError::from_x_error` (lane transport): today every API 403 arrives
+/// as `AuthMissing` ("HTTP 403: <body>"), telling agents to change keys.
+/// Re-classify it from X's body: duplicate text, reply limits, protected
+/// posts and removed endpoints become `Forbidden`/`ReplyRestricted` (exit 5)
+/// or `NotFound`; token-permission 403s stay credentials problems.
+pub(crate) fn reclassify_403(err: XmasterError) -> XmasterError {
+    match err {
+        XmasterError::AuthMissing { provider, message } if message.starts_with("HTTP 403: ") => {
+            let body = &message["HTTP 403: ".len()..];
+            let body = body.rsplit_once(" [txn: ").map_or(body, |(b, _)| b);
+            XmasterError::from_x_error(provider, 403, body)
+        }
+        other => other,
+    }
+}
+
 pub async fn dispatch(
     ctx: Arc<AppContext>,
     cli: &Cli,
@@ -136,10 +234,19 @@ pub async fn dispatch(
     // Command access guard — check allowlist/denylist before any work.
     let cmd_name = command_name(&cli.command);
     check_command_access(cmd_name)?;
+    check_read_only(&cli.command, cmd_name)?;
 
     match &cli.command {
-        Commands::Post { text, reply_to, quote, media, poll, poll_duration } => {
-            post::execute(ctx, format, text, reply_to.as_deref(), quote.as_deref(), media, poll.as_deref(), *poll_duration).await
+        Commands::Post { text, reply_to, quote, media, poll, poll_duration, dry_run } => {
+            let draft = post::Draft {
+                text,
+                reply_to: reply_to.as_deref(),
+                quote: quote.as_deref(),
+                media,
+                poll: poll.as_deref(),
+                poll_duration: *poll_duration,
+            };
+            post::execute(ctx, format, draft, *dry_run).await
         }
         Commands::Delete { id } => engage::delete(ctx, format, id).await,
         Commands::Like { id } => engage::like(ctx, format, id).await,
@@ -219,7 +326,7 @@ pub async fn dispatch(
                 engage_recommend::swarm(ctx, format, id, *min_followers, *max_followers, *count).await
             }
         },
-        Commands::Update { check } => update::execute(*check).await,
+        Commands::Update { check } => update::execute(format, *check).await,
         Commands::Star => {
             crate::star_nudge::open_star_page();
             Ok(())
@@ -273,8 +380,13 @@ pub async fn dispatch(
                 article::publish(ctx, format, article_id).await
             }
         },
-        Commands::Reply { id, text, media } => {
-            post::execute(ctx, format, text, Some(id.as_str()), None, media, None, 1440).await
+        Commands::Reply { id, text, media, dry_run } => {
+            let draft = post::Draft { text, reply_to: Some(id), quote: None, media, poll: None, poll_duration: 1440 };
+            post::execute(ctx, format, draft, *dry_run).await
+        }
+        Commands::Quote { id, text, media, dry_run } => {
+            let draft = post::Draft { text, reply_to: None, quote: Some(id), media, poll: None, poll_duration: 1440 };
+            post::execute(ctx, format, draft, *dry_run).await
         }
         Commands::Metrics { ids } => metrics::execute_batch(ctx, format, ids).await,
         Commands::Lists { action } => match action {
@@ -299,6 +411,7 @@ pub async fn dispatch(
         Commands::HideReply { id } => moderation::hide_reply(ctx, format, id).await,
         Commands::UnhideReply { id } => moderation::unhide_reply(ctx, format, id).await,
         Commands::Read { id } => read_post::execute(ctx, format, id).await,
+        Commands::Conversation { id, count } => conversation::execute(ctx, format, id, *count).await,
         Commands::Replies { id, count, all } => replies::execute(ctx, format, id, *count, *all).await,
         Commands::Likers { id, count } => tweet_engagement::likers(ctx, format, id, *count).await,
         Commands::Retweeters { id, count } => tweet_engagement::retweeters(ctx, format, id, *count).await,
@@ -340,6 +453,12 @@ pub async fn dispatch(
             ScheduleCommands::Reschedule { id, at } => schedule::reschedule(format, id, at).await,
             ScheduleCommands::Fire => schedule::fire(ctx, format).await,
             ScheduleCommands::Setup => schedule::setup(format).await,
+        },
+        Commands::Rails { action } => match action {
+            RailsCommands::Status => rails_cmd::status(ctx, format).await,
+            RailsCommands::Pause { hours } => rails_cmd::pause(format, *hours).await,
+            RailsCommands::Resume => rails_cmd::resume(format).await,
+            RailsCommands::ResetCooldown { yes } => rails_cmd::reset_cooldown(ctx, format, *yes).await,
         },
         Commands::Skill { action } => match action {
             SkillCommands::Install => skill_cmd::install(format).await,
@@ -401,6 +520,49 @@ mod access_tests {
         assert!(check_command_access("agent-info").is_ok());
         assert!(check_command_access("config").is_ok());
         clear_access_env();
+    }
+
+    #[test]
+    fn denying_post_covers_reply_quote_thread_and_x_terms_match() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_DENY_COMMANDS", "post,repost");
+        for cmd in ["post", "reply", "quote", "thread", "retweet"] {
+            assert!(check_command_access(cmd).is_err(), "{cmd} should be denied");
+        }
+        assert!(check_command_access("like").is_ok());
+        clear_access_env();
+    }
+
+    #[test]
+    fn read_only_blocks_x_writes_but_not_reads_dry_runs_or_rails() {
+        use clap::Parser;
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_READ_ONLY", "1");
+        let check = |args: &[&str]| {
+            let cli = Cli::try_parse_from(std::iter::once("xmaster").chain(args.iter().copied())).unwrap();
+            check_read_only(&cli.command, command_name(&cli.command))
+        };
+        for w in [&["post", "hi"][..], &["reply", "1", "hi"], &["like", "1"], &["dm", "send", "jack", "hi"], &["lists", "add", "1", "jack"], &["schedule", "fire"]] {
+            assert!(check(w).is_err(), "{w:?} should be blocked");
+        }
+        for r in [&["read", "1"][..], &["post", "hi", "--dry-run"], &["dm", "inbox"], &["rails", "pause"], &["rails", "resume"], &["schedule", "list"]] {
+            assert!(check(r).is_ok(), "{r:?} should be allowed");
+        }
+        std::env::remove_var("XMASTER_READ_ONLY");
+    }
+
+    #[test]
+    fn api_403_is_reclassified_from_the_body() {
+        let dup = XmasterError::AuthMissing {
+            provider: "x",
+            message: r#"HTTP 403: {"detail":"You are not allowed to create a Tweet with duplicate content.","type":"about:blank","title":"Forbidden","status":403} [txn: abc]"#.into(),
+        };
+        let e = reclassify_403(dup);
+        assert_eq!(e.exit_code(), 5, "{e}");
+        let keys = XmasterError::AuthMissing { provider: "x", message: "HTTP 401: Unauthorized".into() };
+        assert_eq!(reclassify_403(keys).exit_code(), 2);
     }
 
     #[test]

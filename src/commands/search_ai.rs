@@ -69,12 +69,6 @@ pub async fn personalized_trends(
     let api = crate::providers::xapi::XApi::new(ctx.clone());
     let trends = api.get_personalized_trends().await?;
 
-    if trends.is_empty() {
-        return Err(XmasterError::NotFound(
-            "No personalized trends returned. Ensure your account has X Premium.".into(),
-        ));
-    }
-
     #[derive(Serialize)]
     struct TrendsResult {
         source: String,
@@ -101,6 +95,10 @@ pub async fn personalized_trends(
         count: trends.len(),
         trends,
     };
-    output::render(format, &display, None);
+    if display.trends.is_empty() {
+        output::render_hint(format, &display, "No personalized trends: they need X Premium. `xmaster trending` works without it");
+    } else {
+        output::render(format, &display, None);
+    }
     Ok(())
 }

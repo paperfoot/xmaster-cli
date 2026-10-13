@@ -94,26 +94,19 @@ impl Tableable for BulkUsers {
 }
 
 /// Batch lookup of multiple users by username — single call for many users.
-/// Empty input returns a clean error rather than a silent empty response.
+/// Handles arrive normalized (no `@`, at least one) from the CLI parser.
 pub async fn bulk(
     ctx: Arc<AppContext>,
     format: OutputFormat,
     usernames: &[String],
 ) -> Result<(), XmasterError> {
     if usernames.is_empty() {
-        return Err(XmasterError::Config(
-            "xmaster users <u1> <u2> ... — provide at least one username".into(),
-        ));
+        return Err(XmasterError::InvalidInput("give at least one handle: xmaster users <h1> <h2> ...".into()));
     }
-    // Normalize: strip any leading @ the user typed.
-    let clean: Vec<String> = usernames
-        .iter()
-        .map(|u| u.trim_start_matches('@').to_string())
-        .filter(|u| !u.is_empty())
-        .collect();
+    let clean = usernames;
 
     let api = XApi::new(ctx.clone());
-    let users = api.get_users_by_usernames(&clean).await?;
+    let users = api.get_users_by_usernames(clean).await?;
 
     let result = BulkUsers {
         requested: clean.len(),

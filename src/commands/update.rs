@@ -1,5 +1,6 @@
 use crate::errors::XmasterError;
-use serde::Deserialize;
+use crate::output::{self, OutputFormat, Tableable};
+use serde::{Deserialize, Serialize};
 
 const REPO: &str = "paperfoot/xmaster-cli";
 
@@ -30,7 +31,39 @@ fn asset_name() -> &'static str {
     }
 }
 
-pub async fn execute(check: bool) -> Result<(), XmasterError> {
+/// The outcome of `update` / `update --check`.
+#[derive(Serialize)]
+struct UpdateStatus {
+    current: &'static str,
+    latest: String,
+    update_available: bool,
+    /// The binary was replaced (false for `--check` and when up to date).
+    updated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<&'static str>,
+}
+
+impl Tableable for UpdateStatus {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["Current", "Latest", "Status"]);
+        let status = match (self.updated, self.update_available) {
+            (true, _) => "updated",
+            (false, true) => "update available: run `xmaster update`",
+            (false, false) => "up to date",
+        };
+        table.add_row(vec![self.current, self.latest.as_str(), status]);
+        table
+    }
+}
+
+/// Is `latest` a newer release than `current`? Numeric, never a downgrade.
+fn is_newer(latest: &str, current: &str) -> bool {
+    let parts = |v: &str| v.split('.').filter_map(|s| s.parse().ok()).collect::<Vec<u32>>();
+    parts(latest) > parts(current)
+}
+
+pub async fn execute(format: OutputFormat, check: bool) -> Result<(), XmasterError> {
     let current = env!("CARGO_PKG_VERSION");
 
     let client = reqwest::Client::builder()
@@ -45,29 +78,25 @@ pub async fn execute(check: bool) -> Result<(), XmasterError> {
         .await?
         .json()
         .await
-        .map_err(|e| XmasterError::Config(format!("Failed to check for updates: {e}")))?;
+        .map_err(|e| XmasterError::Api {
+            provider: "github",
+            code: "update_check_failed",
+            message: format!("Failed to check for updates: {e}"),
+        })?;
 
-    let latest = release.tag_name.trim_start_matches('v');
-
-    if latest == current {
-        eprintln!("Already up to date (v{current})");
+    let latest = release.tag_name.trim_start_matches('v').to_string();
+    let available = is_newer(&latest, current);
+    if check || !available {
+        let status = UpdateStatus {
+            current,
+            latest,
+            update_available: available,
+            updated: false,
+            next: available.then_some("xmaster update"),
+        };
+        output::render(format, &status, None);
         return Ok(());
     }
-
-    // Compare versions — only upgrade, never downgrade.
-    let current_parts: Vec<u32> = current.split('.').filter_map(|s| s.parse().ok()).collect();
-    let latest_parts: Vec<u32> = latest.split('.').filter_map(|s| s.parse().ok()).collect();
-    if latest_parts <= current_parts {
-        eprintln!("Already up to date (v{current}, latest release is v{latest})");
-        return Ok(());
-    }
-
-    if check {
-        eprintln!("Update available: v{current} -> v{latest}");
-        eprintln!("Run `xmaster update` to install");
-        return Ok(());
-    }
-
     // Find the right asset for this platform.
     let target = asset_name();
     let asset = release
@@ -91,24 +120,42 @@ pub async fn execute(check: bool) -> Result<(), XmasterError> {
 
     // Replace the running binary.
     let current_exe = std::env::current_exe()
-        .map_err(|e| XmasterError::Config(format!("Cannot locate current binary: {e}")))?;
+        .map_err(|e| XmasterError::Io(std::io::Error::new(e.kind(), format!("Cannot locate current binary: {e}"))))?;
 
     // Write to a temp file next to the binary, then atomic rename.
     let tmp = current_exe.with_extension("tmp");
     std::fs::write(&tmp, &bytes)
-        .map_err(|e| XmasterError::Config(format!("Failed to write update: {e}")))?;
+        .map_err(|e| XmasterError::Io(std::io::Error::new(e.kind(), format!("Failed to write update: {e}"))))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| XmasterError::Config(format!("Failed to set permissions: {e}")))?;
+            .map_err(|e| XmasterError::Io(std::io::Error::new(e.kind(), format!("Failed to set permissions: {e}"))))?;
     }
 
     std::fs::rename(&tmp, &current_exe)
-        .map_err(|e| XmasterError::Config(format!("Failed to replace binary: {e}")))?;
+        .map_err(|e| XmasterError::Io(std::io::Error::new(e.kind(), format!("Failed to replace binary: {e}"))))?;
 
-    eprintln!("Updated: v{current} -> v{latest}");
-    eprintln!("Run `xmaster skill update` to sync the skill file.");
+    let status = UpdateStatus {
+        current,
+        latest,
+        update_available: true,
+        updated: true,
+        next: Some("xmaster skill update"),
+    };
+    output::render(format, &status, None);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    #[test]
+    fn only_newer_releases_count() {
+        assert!(is_newer("1.10.0", "1.9.3"));
+        assert!(!is_newer("1.8.0", "1.8.0"));
+        assert!(!is_newer("1.7.9", "1.8.0"));
+    }
 }

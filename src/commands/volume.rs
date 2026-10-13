@@ -66,12 +66,6 @@ pub async fn execute(
         })
         .collect();
 
-    if buckets.is_empty() {
-        return Err(XmasterError::NotFound(format!(
-            "No tweet volume data for query '{query}' (last 7 days)"
-        )));
-    }
-
     let total: u64 = buckets.iter().map(|b| b.tweet_count).sum();
 
     let result = VolumeResult {
@@ -80,6 +74,10 @@ pub async fn execute(
         total_tweets: total,
         buckets,
     };
-    output::render(format, &result, None);
+    if result.buckets.is_empty() {
+        output::render_hint(format, &result, "No posts matched in the last 7 days; broaden the query");
+    } else {
+        output::render(format, &result, None);
+    }
     Ok(())
 }
