@@ -1061,6 +1061,26 @@ impl Web<'_> {
     }
 }
 
+impl Web<'_> {
+    /// POST a form to an x.com API path once, with the session's headers and
+    /// a signed transaction ID; no stale-ID refresh, no retry. For
+    /// fire-and-forget client events (`web_events`). Returns the HTTP status.
+    pub(crate) async fn post_form(&self, path: &str, form: &[(&str, String)], referer: &str) -> Result<u16, XmasterError> {
+        let state = self.state(false).await?;
+        let tx = state.tx.as_ref().map(|k| transaction_id::sign(k, "POST", path)).unwrap_or_default();
+        let req = self.ctx.client.post(format!("https://x.com{path}")).form(form);
+        Ok(self.headers(req, &tx, referer).send().await?.status().as_u16())
+    }
+}
+
+impl Web<'_> {
+    /// A logged-in page switch from the cached session state (`None` when the
+    /// state can't be loaded or the switch isn't cached).
+    pub(crate) async fn switch(&self, name: &str) -> Option<bool> {
+        self.state(false).await.ok()?.switches.get(name).copied()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,25 +1159,5 @@ mod tests {
         let e = errors_to_err("CreateTweet", &json!([{ "code": 226, "message": "automated" }]));
         assert!(e.to_string().contains("automated"));
         assert!(e.to_string().contains("slow down"));
-    }
-}
-
-impl Web<'_> {
-    /// POST a form to an x.com API path once, with the session's headers and
-    /// a signed transaction ID; no stale-ID refresh, no retry. For
-    /// fire-and-forget client events (`web_events`). Returns the HTTP status.
-    pub(crate) async fn post_form(&self, path: &str, form: &[(&str, String)], referer: &str) -> Result<u16, XmasterError> {
-        let state = self.state(false).await?;
-        let tx = state.tx.as_ref().map(|k| transaction_id::sign(k, "POST", path)).unwrap_or_default();
-        let req = self.ctx.client.post(format!("https://x.com{path}")).form(form);
-        Ok(self.headers(req, &tx, referer).send().await?.status().as_u16())
-    }
-}
-
-impl Web<'_> {
-    /// A logged-in page switch from the cached session state (`None` when the
-    /// state can't be loaded or the switch isn't cached).
-    pub(crate) async fn switch(&self, name: &str) -> Option<bool> {
-        self.state(false).await.ok()?.switches.get(name).copied()
     }
 }
