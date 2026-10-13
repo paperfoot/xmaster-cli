@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "xmaster",
     version,
-    about = "Enterprise-grade X/Twitter CLI — post, reply, like, retweet, DM, search, and more",
+    about = "X CLI for AI agents and people: read, post, reply anywhere, like, repost, search, DM",
     long_about = "Built by 199 Biotechnologies for AI agents and humans.\n\nAgent-friendly: auto-JSON when piped, semantic exit codes, structured errors."
 )]
 pub struct Cli {
@@ -57,14 +57,14 @@ pub enum Commands {
         id: String,
     },
 
-    /// Read a post — full text, author, date, metrics, media URLs in one call
+    /// Read a post: text, author, date, metrics and media in one call
     Read {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// A post in context: its parent chain, the post, and its top replies (one call)
+    /// A post with its parent chain and top replies
     #[command(visible_alias = "convo")]
     Conversation {
         /// Post ID or URL
@@ -139,12 +139,12 @@ pub enum Commands {
         action: DmCommands,
     },
 
-    /// View timeline
+    /// Home or user timeline
     Timeline {
         /// Handle (omit for home timeline)
         #[arg(long, value_parser = handle)]
         user: Option<String>,
-        /// Number of tweets
+        /// Number of posts
         #[arg(long, short, alias = "limit", default_value = "10")]
         count: usize,
         /// Only show posts after this time (e.g. "12h", "7d", or ISO 8601)
@@ -168,7 +168,7 @@ pub enum Commands {
         since_id: Option<String>,
     },
 
-    /// Search tweets (X API v2)
+    /// Search posts (X search operators work)
     Search {
         /// Search query. Supports X operators, incl. min_likes:/min_replies:/
         /// min_reposts: (since May 2026). Keyword search no longer returns reposts
@@ -215,17 +215,17 @@ pub enum Commands {
         personalized: bool,
     },
 
-    /// Get user info
+    /// A user's profile
     User {
         /// Handle, @handle or profile URL
         #[arg(value_parser = handle)]
         username: String,
     },
 
-    /// Get authenticated user info
+    /// Your own profile
     Me,
 
-    /// Manage bookmarks (sync, search, export, digest)
+    /// Bookmarks and a local searchable archive
     Bookmarks {
         #[command(subcommand)]
         action: BookmarkCommands,
@@ -257,20 +257,29 @@ pub enum Commands {
         action: ConfigCommands,
     },
 
-    /// Show agent-readable capabilities
-    AgentInfo,
+    /// Show agent-readable capabilities (--tips for strategy and X ranking notes)
+    AgentInfo {
+        /// Strategy notes: all, or one topic (algorithm, replies, posting, growth, metrics, avoid)
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = "all",
+            value_parser = clap::builder::PossibleValuesParser::new(crate::commands::agent_info::TIP_TOPICS.iter().copied())
+        )]
+        tips: Option<String>,
+    },
 
     /// Post a thread (one argument per post)
     Thread {
         /// Post texts, in order
         #[arg(required = true)]
         texts: Vec<String>,
-        /// Media file paths to attach to the first tweet
+        /// Media file paths to attach to the first post
         #[arg(long, num_args = 1..=4)]
         media: Vec<String>,
     },
 
-    /// X Articles tools (separate from long posts / Note Tweets)
+    /// X Articles (separate from long posts)
     Article {
         #[command(subcommand)]
         action: ArticleCommands,
@@ -319,23 +328,24 @@ pub enum Commands {
         action: ListCommands,
     },
 
-    /// Hide a reply to your tweet
+    /// Hide a reply to your post
     HideReply {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Unhide a reply to your tweet
+    /// Unhide a reply to your post
     UnhideReply {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Direct replies to a post: the whole conversation through the web
-    /// session (free, no 7-day limit). With JEV, replies not worth reading
-    /// (thanks, emoji, spam, no substance) are left out.
+    /// Replies to a post, any age (free through the web session)
+    ///
+    /// With JEV, replies not worth reading (thanks, emoji, spam, no
+    /// substance) are left out; --all shows every reply.
     Replies {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
@@ -348,7 +358,7 @@ pub enum Commands {
         all: bool,
     },
 
-    /// List users who liked a tweet
+    /// Users who liked a post
     Likers {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
@@ -358,7 +368,7 @@ pub enum Commands {
         count: usize,
     },
 
-    /// List users who reposted a post
+    /// Users who reposted a post
     #[command(visible_alias = "reposters")]
     Retweeters {
         /// Post ID or URL
@@ -369,7 +379,7 @@ pub enum Commands {
         count: usize,
     },
 
-    /// List quote tweets of a tweet (persisted into discovered_posts)
+    /// Quote posts of a post (saved to your local library)
     Quotes {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
@@ -379,14 +389,14 @@ pub enum Commands {
         count: usize,
     },
 
-    /// Batch-lookup multiple users by username in a single call
+    /// Look up many users in one call
     Users {
         /// Handles, @handles or profile URLs
         #[arg(required = true, value_parser = handle)]
         usernames: Vec<String>,
     },
 
-    /// Show recent tweet volume for a search query over time
+    /// Post volume over time for a search query
     Volume {
         /// Search query
         query: String,
@@ -395,14 +405,14 @@ pub enum Commands {
         granularity: String,
     },
 
-    /// Show who amplifies your content (users who repost your tweets)
+    /// Who reposts your posts most
     Amplifiers {
         /// Max reposts to scan (10-100)
         #[arg(long, short, alias = "limit", default_value = "50")]
         count: usize,
     },
 
-    /// Show API rate limit status
+    /// X API rate-limit status
     RateLimits,
 
     /// Block a user
@@ -433,9 +443,9 @@ pub enum Commands {
         username: String,
     },
 
-    /// Analyze a tweet before posting (pre-flight check)
+    /// Score a draft before posting (preflight checks, JEV flags)
     Analyze {
-        /// Tweet text to analyze
+        /// Draft text
         text: String,
         /// Optimization goal (replies, impressions)
         #[arg(long)]
@@ -446,7 +456,8 @@ pub enum Commands {
         reply_to: Option<String>,
     },
 
-    /// Browse your discovered posts library for content inspiration.
+    /// Browse posts saved from your reads
+    ///
     /// Use --long to surface long-form / Article-candidate exemplars (>=500 chars).
     Inspire {
         /// Filter by topic (searches post text)
@@ -469,7 +480,7 @@ pub enum Commands {
         count: usize,
     },
 
-    /// Track metric snapshots for recent posts
+    /// Metric snapshots, reply-backs and follower tracking
     Track {
         #[command(subcommand)]
         action: TrackCommands,
@@ -499,7 +510,7 @@ pub enum Commands {
         action: EngageCommands,
     },
 
-    /// Install or update the xmaster agent skill for all AI platforms
+    /// Install or update the xmaster agent skill (Claude, Codex, Gemini, ...)
     Skill {
         #[command(subcommand)]
         action: SkillCommands,
@@ -608,19 +619,19 @@ pub enum ArticleCommands {
 
 #[derive(Subcommand)]
 pub enum EngageCommands {
-    /// Audit a post's conversation inbox: replies, quote tweets, and comments under quotes
+    /// Triage replies and quotes on your post
     Inbox {
         /// Post ID or URL of your post
         #[arg(value_parser = post_id)]
         id: String,
-        /// Max direct replies and quote tweets to fetch
+        /// Max direct replies and quote posts to fetch
         #[arg(long, short, alias = "limit", default_value = "20")]
         count: usize,
-        /// Max replies to inspect under each quote tweet (0 disables quote-comment scan)
+        /// Max replies to inspect under each quote post (0 disables quote-comment scan)
         #[arg(long, default_value = "5")]
         quote_reply_count: usize,
     },
-    /// Find high-ROI reply targets in your niche
+    /// Accounts in your niche worth replying to
     Recommend {
         /// Topic to discover targets (uses AI search)
         #[arg(long)]
@@ -632,12 +643,12 @@ pub enum EngageCommands {
         #[arg(long, short, alias = "limit", default_value = "5")]
         count: usize,
     },
-    /// Manage your niche watchlist (accounts you track but don't follow)
+    /// Accounts you track without following
     Watchlist {
         #[command(subcommand)]
         action: WatchlistCommands,
     },
-    /// Find fresh posts from big accounts to reply to NOW.
+    /// Fresh posts in your niche worth a reply now
     ///
     /// Accepts multiple topics positionally AND as comma-separated lists
     /// (they are merged + deduped). If no topics are passed, falls back to
@@ -664,8 +675,7 @@ pub enum EngageCommands {
         #[arg(long, short, alias = "limit")]
         count: Option<usize>,
     },
-    /// Find small-to-mid accounts replying under a big post — the 2026
-    /// peer-to-peer growth lane.
+    /// Small accounts replying under a big post, for peer replies
     ///
     /// Small accounts grow fastest by replying to OTHER SMALL ACCOUNTS under
     /// big-account posts (community consensus, Q1 2026). This command fetches
@@ -686,7 +696,7 @@ pub enum EngageCommands {
         #[arg(long, short, alias = "limit", default_value = "10")]
         count: usize,
     },
-    /// Rank accounts you've already replied to by downstream reply performance.
+    /// Accounts where your past replies did best
     ///
     /// Aggregates your sent replies from the last N days, groups by target
     /// username, and computes avg impressions, avg profile clicks, reply-back
@@ -739,7 +749,7 @@ pub enum WatchlistCommands {
 pub enum ScheduleCommands {
     /// Schedule a new post
     Add {
-        /// Tweet text
+        /// Post text
         content: String,
         /// When to post: ISO datetime "2026-03-24 09:00" or "auto" for best time
         #[arg(long)]
@@ -850,7 +860,7 @@ pub enum ListCommands {
         /// List ID
         #[arg(value_parser = numeric_id)]
         list_id: String,
-        /// Number of tweets
+        /// Number of posts
         #[arg(long, short, alias = "limit", default_value = "10")]
         count: usize,
     },
@@ -913,13 +923,13 @@ pub enum ConfigCommands {
         /// Value to set
         value: String,
     },
-    /// Validate configured credentials
+    /// Live read-only test of the web session and keys
     Check,
     /// Step-by-step setup guide for X API and xAI keys
     Guide,
     /// Authorize OAuth 2.0 (required for bookmarks)
     Auth,
-    /// Auto-capture X web cookies from your browser (enables replies anywhere, likes, follows, quotes via your browser session)
+    /// Copy X cookies from your browser: free reads and writes, replies anywhere
     WebLogin,
 }
 
@@ -933,7 +943,7 @@ pub enum BookmarkCommands {
         #[arg(long)]
         unread: bool,
     },
-    /// Sync bookmarks from X to local database (preserves deleted tweets)
+    /// Sync bookmarks to the local archive (keeps posts deleted on X)
     Sync {
         /// Number of bookmarks to fetch from X
         #[arg(long, short, alias = "limit", default_value = "100")]
