@@ -44,7 +44,7 @@ pub enum XmasterError {
     ReplyRestricted(String),
 
     /// X refused the action itself (not the credentials). Build it with
-    /// [`XmasterError::from_x_refusal`] or [`XmasterError::removed_from_api`].
+    /// [`XmasterError::from_x_error`] or [`XmasterError::removed_from_api`].
     #[error("Blocked by X: {reason}{}", x_type.as_deref().map(|t| format!(" [{t}]")).unwrap_or_default())]
     Forbidden {
         reason: String,
@@ -177,13 +177,14 @@ fn is_reply_limit(code: u32, reason: &str) -> bool {
 }
 
 impl XmasterError {
-    /// Turn an X refusal (HTTP 401/403, or GraphQL `errors[]` beside a 200)
+    /// Turn an X error (HTTP 401/403, or GraphQL `errors[]` beside a 200)
     /// into the right variant, from the body X sent. Understands v2 problems
     /// (`{title, type, detail}`) and legacy/GraphQL errors
     /// (`{errors: [{code, message}]}`). 401 and token-permission problems are
-    /// credentials (exit 2); reply limits are `ReplyRestricted`; anything else
-    /// X refused is `Forbidden` (exit 5).
-    pub fn from_x_refusal(provider: &'static str, status: u16, body: &str) -> Self {
+    /// credentials (exit 2); missing posts/users are `NotFound` and too-long
+    /// text `InvalidInput` (exit 3); reply limits are `ReplyRestricted`;
+    /// anything else X refused is `Forbidden` (exit 5).
+    pub fn from_x_error(provider: &'static str, status: u16, body: &str) -> Self {
         let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
         let first = json.pointer("/errors/0");
         let code = first
@@ -218,6 +219,12 @@ impl XmasterError {
                     `xmaster config set keys.access_token_secret <secret>`"
                 ),
             };
+        }
+        if matches!(code, 8 | 34 | 50 | 144) || x_type.as_deref() == Some("resource-not-found") {
+            return Self::NotFound(reason);
+        }
+        if code == 186 {
+            return Self::InvalidInput(format!("{reason} (over 280 weighted characters; longer posts need X Premium)"));
         }
         if is_reply_limit(code, &reason) {
             return Self::ReplyRestricted(reason);
@@ -473,7 +480,7 @@ mod tests {
     #[test]
     fn v2_duplicate_403_is_forbidden_with_reword_hint() {
         let body = r#"{"detail":"You are not allowed to create a Tweet with duplicate content.","type":"about:blank","title":"Forbidden","status":403}"#;
-        let e = XmasterError::from_x_refusal("x", 403, body);
+        let e = XmasterError::from_x_error("x", 403, body);
         assert_eq!(e.exit_code(), 5);
         assert_eq!(e.error_code(), "forbidden");
         assert!(e.suggestion().contains("Reword"));
@@ -483,32 +490,45 @@ mod tests {
     #[test]
     fn v2_reply_restriction_is_reply_restricted() {
         let body = r#"{"detail":"Reply to this conversation is not allowed because you have not been mentioned or otherwise engaged by the author of the post you are replying to.","type":"about:blank","title":"Forbidden","status":403}"#;
-        let e = XmasterError::from_x_refusal("x", 403, body);
+        let e = XmasterError::from_x_error("x", 403, body);
         assert!(matches!(e, XmasterError::ReplyRestricted(_)));
         assert_eq!(e.exit_code(), 5);
     }
 
     #[test]
     fn graphql_codes_classify() {
-        let e = XmasterError::from_x_refusal(
+        let e = XmasterError::from_x_error(
             "x-web",
             200,
             r#"{"errors":[{"message":"Authorization: Status is a duplicate. (187)","code":187}]}"#,
         );
         assert!(matches!(&e, XmasterError::Forbidden { x_type: Some(t), .. } if t == "code 187"));
         assert!(e.suggestion().contains("Reword"));
-        let e = XmasterError::from_x_refusal("x-web", 200, r#"{"errors":[{"message":"Restricted","code":433}]}"#);
+        let e = XmasterError::from_x_error("x-web", 200, r#"{"errors":[{"message":"Restricted","code":433}]}"#);
         assert!(matches!(e, XmasterError::ReplyRestricted(_)));
-        let e = XmasterError::from_x_refusal("x-web", 200, r#"{"errors":[{"message":"looks automated","code":226}]}"#);
+        let e = XmasterError::from_x_error("x-web", 200, r#"{"errors":[{"message":"looks automated","code":226}]}"#);
         assert!(e.suggestion().contains("226"));
     }
 
     #[test]
+    fn missing_and_too_long_are_bad_input() {
+        let e = XmasterError::from_x_error(
+            "x-web",
+            200,
+            r#"{"errors":[{"message":"_Missing: Tweet record for tweetId: '1' not found","code":144}]}"#,
+        );
+        assert!(matches!(e, XmasterError::NotFound(_)));
+        assert_eq!(e.exit_code(), 3);
+        let e = XmasterError::from_x_error("x-web", 200, r#"{"errors":[{"message":"Tweet needs to be a bit shorter.","code":186}]}"#);
+        assert_eq!(e.error_code(), "invalid_input");
+    }
+
+    #[test]
     fn credential_problems_stay_auth() {
-        let e = XmasterError::from_x_refusal("x", 401, r#"{"title":"Unauthorized","type":"about:blank","status":401,"detail":"Unauthorized"}"#);
+        let e = XmasterError::from_x_error("x", 401, r#"{"title":"Unauthorized","type":"about:blank","status":401,"detail":"Unauthorized"}"#);
         assert_eq!(e.exit_code(), 2);
         let perms = r#"{"title":"Forbidden","type":"https://api.twitter.com/2/problems/oauth1-permissions","detail":"Your client app is not configured with the appropriate oauth1 app permissions for this endpoint."}"#;
-        let e = XmasterError::from_x_refusal("x", 403, perms);
+        let e = XmasterError::from_x_error("x", 403, perms);
         assert!(matches!(e, XmasterError::AuthMissing { .. }));
         assert!(e.to_string().contains("regenerate"));
     }
@@ -516,7 +536,7 @@ mod tests {
     #[test]
     fn tier_and_removed_endpoints_point_at_web_session() {
         let body = r#"{"client_id":"1","reason":"client-not-enrolled","title":"Client Forbidden","type":"https://api.twitter.com/2/problems/client-forbidden","detail":"When authenticating requests to the Twitter API v2 endpoints, you must use keys and tokens from a Twitter developer App that is attached to a Project."}"#;
-        let e = XmasterError::from_x_refusal("x", 403, body);
+        let e = XmasterError::from_x_error("x", 403, body);
         assert!(e.to_string().contains("[client-forbidden]"));
         assert!(e.suggestion().contains("web-login"));
         let e = XmasterError::removed_from_api("likes");
@@ -526,9 +546,9 @@ mod tests {
 
     #[test]
     fn non_json_body_keeps_raw_text() {
-        let e = XmasterError::from_x_refusal("x", 403, "  <html>nope</html> ");
+        let e = XmasterError::from_x_error("x", 403, "  <html>nope</html> ");
         assert!(matches!(&e, XmasterError::Forbidden { reason, x_type: None } if reason == "<html>nope</html>"));
-        let e = XmasterError::from_x_refusal("x", 403, "");
+        let e = XmasterError::from_x_error("x", 403, "");
         assert!(e.to_string().contains("HTTP 403"));
     }
 }
