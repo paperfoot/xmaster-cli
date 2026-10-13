@@ -26,15 +26,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Post a tweet (text, media, reply, quote, poll)
+    /// Post (text, media, reply, quote, poll)
     Post {
-        /// Tweet text
+        /// Post text
         text: String,
-        /// Reply to a tweet ID
-        #[arg(long)]
+        /// Reply to this post (ID or URL)
+        #[arg(long, value_parser = post_id)]
         reply_to: Option<String>,
-        /// Quote a tweet ID
-        #[arg(long)]
+        /// Quote this post (ID or URL)
+        #[arg(long, value_parser = post_id)]
         quote: Option<String>,
         /// Media file paths to attach
         #[arg(long, num_args = 1..=4)]
@@ -45,65 +45,91 @@ pub enum Commands {
         /// Poll duration in minutes (default 1440 = 24h)
         #[arg(long, default_value = "1440")]
         poll_duration: u64,
+        /// Check the draft and show the route and cost; post nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 
-    /// Delete a tweet
+    /// Delete a post
     Delete {
-        /// Tweet ID to delete
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
     /// Read a post — full text, author, date, metrics, media URLs in one call
     Read {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Like a tweet
+    /// A post in context: its parent chain, the post, and its top replies (one call)
+    #[command(visible_alias = "convo")]
+    Conversation {
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
+        id: String,
+        /// Max replies to include (0 for none)
+        #[arg(long, short, alias = "limit", default_value = "10")]
+        count: usize,
+    },
+
+    /// Like a post
     Like {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Unlike a tweet
+    /// Unlike a post
     Unlike {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Retweet a tweet
+    /// Repost a post
+    #[command(visible_alias = "repost")]
     Retweet {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Undo a retweet
+    /// Undo a repost
+    #[command(visible_alias = "unrepost")]
     Unretweet {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Bookmark a tweet
+    /// Bookmark a post
     Bookmark {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
     /// Remove a bookmark
     Unbookmark {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
     /// Follow a user
     Follow {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 
     /// Unfollow a user
     Unfollow {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 
@@ -115,8 +141,8 @@ pub enum Commands {
 
     /// View timeline
     Timeline {
-        /// Username (omit for home timeline)
-        #[arg(long)]
+        /// Handle (omit for home timeline)
+        #[arg(long, value_parser = handle)]
         user: Option<String>,
         /// Number of tweets
         #[arg(long, short, alias = "limit", default_value = "10")]
@@ -127,8 +153,8 @@ pub enum Commands {
         /// Only show posts before this time (e.g. "12h", "7d", or ISO 8601)
         #[arg(long)]
         before: Option<String>,
-        /// Sort by: impressions, likes, retweets, date (default: date)
-        #[arg(long)]
+        /// Sort by: impressions, likes, reposts, date (default: date)
+        #[arg(long, value_parser = ["impressions", "views", "likes", "reposts", "retweets", "rts", "date"])]
         sort: Option<String>,
     },
 
@@ -137,8 +163,8 @@ pub enum Commands {
         /// Number of mentions
         #[arg(long, short, alias = "limit", default_value = "10")]
         count: usize,
-        /// Only show mentions after this tweet ID
-        #[arg(long)]
+        /// Only show mentions after this post ID
+        #[arg(long, value_parser = post_id)]
         since_id: Option<String>,
     },
 
@@ -147,8 +173,8 @@ pub enum Commands {
         /// Search query. Supports X operators, incl. min_likes:/min_replies:/
         /// min_reposts: (since May 2026). Keyword search no longer returns reposts
         query: String,
-        /// Search mode
-        #[arg(long, default_value = "recent")]
+        /// Search mode: recent (latest first) or top
+        #[arg(long, default_value = "recent", value_parser = ["recent", "latest", "top", "relevancy", "relevant", "popular"])]
         mode: String,
         /// Number of results
         #[arg(long, short, alias = "limit", default_value = "10")]
@@ -191,7 +217,8 @@ pub enum Commands {
 
     /// Get user info
     User {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 
@@ -206,7 +233,8 @@ pub enum Commands {
 
     /// List followers
     Followers {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
         /// Number of results
         #[arg(long, short, alias = "limit", default_value = "20")]
@@ -215,7 +243,8 @@ pub enum Commands {
 
     /// List following
     Following {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
         /// Number of results
         #[arg(long, short, alias = "limit", default_value = "20")]
@@ -231,9 +260,10 @@ pub enum Commands {
     /// Show agent-readable capabilities
     AgentInfo,
 
-    /// Post a multi-tweet thread
+    /// Post a thread (one argument per post)
     Thread {
-        /// Tweet texts (one per thread tweet)
+        /// Post texts, in order
+        #[arg(required = true)]
         texts: Vec<String>,
         /// Media file paths to attach to the first tweet
         #[arg(long, num_args = 1..=4)]
@@ -246,20 +276,40 @@ pub enum Commands {
         action: ArticleCommands,
     },
 
-    /// Reply to a tweet (shorthand for post --reply-to)
+    /// Reply to a post (shorthand for post --reply-to)
     Reply {
-        /// Tweet ID or URL to reply to
+        /// Post ID or URL to reply to
+        #[arg(value_parser = post_id)]
         id: String,
         /// Reply text
         text: String,
         /// Media file paths
         #[arg(long, num_args = 1..=4)]
         media: Vec<String>,
+        /// Check the draft and show the route and cost; post nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 
-    /// Get tweet engagement metrics
+    /// Quote a post (shorthand for post --quote)
+    Quote {
+        /// Post ID or URL to quote
+        #[arg(value_parser = post_id)]
+        id: String,
+        /// Your text above the quoted post
+        text: String,
+        /// Media file paths
+        #[arg(long, num_args = 1..=4)]
+        media: Vec<String>,
+        /// Check the draft and show the route and cost; post nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Get post engagement metrics
     Metrics {
-        /// Tweet ID(s) or URL(s)
+        /// Post ID(s) or URL(s)
+        #[arg(required = true, value_parser = post_id)]
         ids: Vec<String>,
     },
 
@@ -271,20 +321,24 @@ pub enum Commands {
 
     /// Hide a reply to your tweet
     HideReply {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
     /// Unhide a reply to your tweet
     UnhideReply {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
     },
 
-    /// Get replies to a tweet (uses conversation_id search). With JEV, replies
-    /// not worth reading (thanks, emoji, spam, no substance) are left out.
+    /// Direct replies to a post: the whole conversation through the web
+    /// session (free, no 7-day limit). With JEV, replies not worth reading
+    /// (thanks, emoji, spam, no substance) are left out.
     Replies {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
         /// Max replies to fetch
         #[arg(long, short, alias = "limit", default_value = "20")]
@@ -296,16 +350,19 @@ pub enum Commands {
 
     /// List users who liked a tweet
     Likers {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
         /// Max users to fetch (1-100)
         #[arg(long, short, alias = "limit", default_value = "50")]
         count: usize,
     },
 
-    /// List users who retweeted a tweet
+    /// List users who reposted a post
+    #[command(visible_alias = "reposters")]
     Retweeters {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
         /// Max users to fetch (1-100)
         #[arg(long, short, alias = "limit", default_value = "50")]
@@ -314,7 +371,8 @@ pub enum Commands {
 
     /// List quote tweets of a tweet (persisted into discovered_posts)
     Quotes {
-        /// Tweet ID or URL
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
         id: String,
         /// Max quotes to fetch (10-100)
         #[arg(long, short, alias = "limit", default_value = "50")]
@@ -323,7 +381,8 @@ pub enum Commands {
 
     /// Batch-lookup multiple users by username in a single call
     Users {
-        /// Usernames (without @)
+        /// Handles, @handles or profile URLs
+        #[arg(required = true, value_parser = handle)]
         usernames: Vec<String>,
     },
 
@@ -332,7 +391,7 @@ pub enum Commands {
         /// Search query
         query: String,
         /// Time granularity: minute, hour, day
-        #[arg(long, default_value = "hour")]
+        #[arg(long, default_value = "hour", value_parser = ["minute", "hour", "day"])]
         granularity: String,
     },
 
@@ -348,25 +407,29 @@ pub enum Commands {
 
     /// Block a user
     Block {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 
     /// Unblock a user
     Unblock {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 
     /// Mute a user
     Mute {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 
     /// Unmute a user
     Unmute {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 
@@ -377,9 +440,9 @@ pub enum Commands {
         /// Optimization goal (replies, impressions)
         #[arg(long)]
         goal: Option<String>,
-        /// Analyze as a REPLY to this tweet ID (applies reply-quality rules:
-        /// catches generic agreement, emoji-only, and too-short replies)
-        #[arg(long)]
+        /// Analyze as a REPLY to this post (ID or URL; applies reply-quality
+        /// rules: catches generic agreement, emoji-only, and too-short replies)
+        #[arg(long, value_parser = post_id)]
         reply_to: Option<String>,
     },
 
@@ -389,8 +452,8 @@ pub enum Commands {
         /// Filter by topic (searches post text)
         #[arg(long)]
         topic: Option<String>,
-        /// Filter by author username
-        #[arg(long)]
+        /// Filter by author handle
+        #[arg(long, value_parser = handle)]
         author: Option<String>,
         /// Minimum like count
         #[arg(long)]
@@ -451,6 +514,30 @@ pub enum Commands {
 
     /// Open the xmaster GitHub repo to star it
     Star,
+
+    /// Pacing rails: write budget, cooldowns, pause
+    Rails {
+        #[command(subcommand)]
+        action: RailsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RailsCommands {
+    /// Today's write counts vs caps, next allowed time, cooldown
+    Status,
+    /// Pause all writes (optionally for N hours)
+    Pause {
+        #[arg(long)]
+        hours: Option<f64>,
+    },
+    /// Resume writes after a pause
+    Resume,
+    /// Clear an X-challenge cooldown (only after clearing it on x.com)
+    ResetCooldown {
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -523,7 +610,8 @@ pub enum ArticleCommands {
 pub enum EngageCommands {
     /// Audit a post's conversation inbox: replies, quote tweets, and comments under quotes
     Inbox {
-        /// Tweet ID or URL of your post
+        /// Post ID or URL of your post
+        #[arg(value_parser = post_id)]
         id: String,
         /// Max direct replies and quote tweets to fetch
         #[arg(long, short, alias = "limit", default_value = "20")]
@@ -585,7 +673,8 @@ pub enum EngageCommands {
     /// follower band so you can engage peer-to-peer instead of competing for
     /// the top-of-thread slot under the big account.
     Swarm {
-        /// Tweet ID or URL of the big post to swarm under
+        /// Post ID or URL of the big post to swarm under
+        #[arg(value_parser = post_id)]
         id: String,
         /// Minimum follower count to include (default 50 — filters brand-new accounts)
         #[arg(long, default_value = "50")]
@@ -629,7 +718,8 @@ pub enum EngageCommands {
 pub enum WatchlistCommands {
     /// Add an account to your watchlist
     Add {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
         /// Topic/niche tag
         #[arg(long)]
@@ -639,7 +729,8 @@ pub enum WatchlistCommands {
     List,
     /// Remove an account from your watchlist
     Remove {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
 }
@@ -653,11 +744,11 @@ pub enum ScheduleCommands {
         /// When to post: ISO datetime "2026-03-24 09:00" or "auto" for best time
         #[arg(long)]
         at: String,
-        /// Reply to tweet ID
-        #[arg(long)]
+        /// Reply to this post (ID or URL)
+        #[arg(long, value_parser = post_id)]
         reply_to: Option<String>,
-        /// Quote tweet ID
-        #[arg(long)]
+        /// Quote this post (ID or URL)
+        #[arg(long, value_parser = post_id)]
         quote: Option<String>,
         /// Media file paths
         #[arg(long, num_args = 1..=4)]
@@ -733,25 +824,31 @@ pub enum ListCommands {
     /// Delete a list
     Delete {
         /// List ID
+        #[arg(value_parser = numeric_id)]
         id: String,
     },
     /// Add a user to a list
     Add {
         /// List ID
+        #[arg(value_parser = numeric_id)]
         list_id: String,
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
     /// Remove a user from a list
     Remove {
         /// List ID
+        #[arg(value_parser = numeric_id)]
         list_id: String,
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
     },
     /// View list timeline
     Timeline {
         /// List ID
+        #[arg(value_parser = numeric_id)]
         list_id: String,
         /// Number of tweets
         #[arg(long, short, alias = "limit", default_value = "10")]
@@ -760,6 +857,7 @@ pub enum ListCommands {
     /// List the members of a list
     Members {
         /// List ID
+        #[arg(value_parser = numeric_id)]
         list_id: String,
         /// Number of members to fetch (1-100)
         #[arg(long, short, alias = "limit", default_value = "50")]
@@ -777,7 +875,8 @@ pub enum ListCommands {
 pub enum DmCommands {
     /// Send a direct message
     Send {
-        /// Username (without @)
+        /// Handle, @handle or profile URL
+        #[arg(value_parser = handle)]
         username: String,
         /// Message text
         text: String,
@@ -874,92 +973,88 @@ pub enum BookmarkCommands {
     },
 }
 
-/// Parse a tweet ID from a URL or raw ID string.
-/// Handles URLs like `.../status/12345/photo/1` by finding the segment after "status".
-pub fn parse_tweet_id(input: &str) -> String {
-    let input = input.trim();
-    if input.contains("x.com/") || input.contains("twitter.com/") {
-        let parts: Vec<&str> = input.split('/').filter(|s| !s.is_empty()).collect();
-        // Find the segment immediately after "status"
-        if let Some(pos) = parts.iter().position(|&p| p == "status") {
-            if let Some(id_part) = parts.get(pos + 1) {
-                let id = id_part.split('?').next().unwrap_or(id_part);
-                if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
-                    return id.to_string();
-                }
-            }
-        }
+/// clap parser: a post ID or post URL (x.com, twitter.com, mirrors),
+/// normalized to the ID. Garbage fails at parse time (exit 3), before any
+/// paid call.
+fn post_id(input: &str) -> Result<String, String> {
+    crate::utils::tweet_id(input)
+        .ok_or_else(|| "expected a post ID or post URL, e.g. 1234567890 or https://x.com/user/status/1234567890".into())
+}
+
+/// clap parser: `name`, `@name` or a profile URL, normalized to the handle.
+fn handle(input: &str) -> Result<String, String> {
+    crate::utils::handle(input)
+        .ok_or_else(|| "expected an X handle (1-15 letters, digits or _), @handle or profile URL".into())
+}
+
+/// clap parser: a numeric X ID (lists).
+fn numeric_id(input: &str) -> Result<String, String> {
+    let id = input.trim();
+    if (1..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()) {
+        Ok(id.to_string())
+    } else {
+        Err("expected a numeric ID".into())
     }
-    input.to_string()
+}
+
+/// TRANSITIONAL for files outside lane `commands` (read_post.rs,
+/// moderation.rs, analyze.rs, engage_recommend.rs): their IDs arrive already
+/// normalized by [`post_id`], so this is the identity on them. Delete once
+/// those callers use the ID as given.
+pub fn parse_tweet_id(input: &str) -> String {
+    crate::utils::tweet_id(input).unwrap_or_else(|| input.trim().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("xmaster").chain(args.iter().copied()))
+    }
 
     #[test]
-    fn raw_id() {
+    fn post_ids_normalize_at_parse_time() {
+        let cli = parse(&["read", "https://x.com/user/status/1234567890/photo/1?s=20"]).unwrap();
+        assert!(matches!(cli.command, Commands::Read { ref id } if id == "1234567890"));
+        let cli = parse(&["reply", "https://twitter.com/a/status/42", "hi"]).unwrap();
+        assert!(matches!(cli.command, Commands::Reply { ref id, .. } if id == "42"));
+    }
+
+    #[test]
+    fn garbage_ids_fail_at_parse_time() {
+        for args in [
+            &["read", "notanid"][..],
+            &["like", "https://example.com/status/1"],
+            &["metrics", "1", "x"],
+            &["post", "hi", "--reply-to", "abc"],
+            &["lists", "timeline", "abc"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should fail");
+        }
+    }
+
+    #[test]
+    fn handles_strip_at_and_urls() {
+        let cli = parse(&["follow", "@jack"]).unwrap();
+        assert!(matches!(cli.command, Commands::Follow { ref username } if username == "jack"));
+        let cli = parse(&["user", "https://x.com/sama"]).unwrap();
+        assert!(matches!(cli.command, Commands::User { ref username } if username == "sama"));
+        assert!(parse(&["follow", "not a handle"]).is_err());
+    }
+
+    #[test]
+    fn x_terms_are_aliases() {
+        assert!(matches!(parse(&["repost", "1"]).unwrap().command, Commands::Retweet { .. }));
+        assert!(matches!(parse(&["unrepost", "1"]).unwrap().command, Commands::Unretweet { .. }));
+        assert!(matches!(parse(&["reposters", "1"]).unwrap().command, Commands::Retweeters { .. }));
+        assert!(matches!(parse(&["convo", "1"]).unwrap().command, Commands::Conversation { count: 10, .. }));
+    }
+
+    #[test]
+    fn transitional_parse_tweet_id_is_identity_on_ids() {
         assert_eq!(parse_tweet_id("1234567890"), "1234567890");
-    }
-
-    #[test]
-    fn x_url() {
-        assert_eq!(
-            parse_tweet_id("https://x.com/user/status/1234567890"),
-            "1234567890"
-        );
-    }
-
-    #[test]
-    fn twitter_url() {
-        assert_eq!(
-            parse_tweet_id("https://twitter.com/user/status/1234567890"),
-            "1234567890"
-        );
-    }
-
-    #[test]
-    fn url_with_query() {
-        assert_eq!(
-            parse_tweet_id("https://x.com/user/status/1234567890?s=20"),
-            "1234567890"
-        );
-    }
-
-    #[test]
-    fn url_with_trailing_slash() {
-        assert_eq!(
-            parse_tweet_id("https://x.com/user/status/1234567890/"),
-            "1234567890"
-        );
-    }
-
-    #[test]
-    fn url_with_multiple_query_params() {
-        assert_eq!(
-            parse_tweet_id("https://x.com/user/status/9876543210?s=20&t=abc"),
-            "9876543210"
-        );
-    }
-
-    #[test]
-    fn whitespace_trimmed() {
-        assert_eq!(parse_tweet_id("  1234567890  "), "1234567890");
-    }
-
-    #[test]
-    fn url_with_photo_suffix() {
-        assert_eq!(
-            parse_tweet_id("https://x.com/user/status/1234567890/photo/1"),
-            "1234567890"
-        );
-    }
-
-    #[test]
-    fn url_with_video_suffix() {
-        assert_eq!(
-            parse_tweet_id("https://x.com/user/status/9876543210/video/1"),
-            "9876543210"
-        );
+        assert_eq!(parse_tweet_id("https://x.com/u/status/1234567890"), "1234567890");
     }
 }

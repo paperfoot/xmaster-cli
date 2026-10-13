@@ -1,4 +1,3 @@
-use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::{self, OutputFormat, Tableable};
@@ -57,7 +56,7 @@ pub async fn likers(
     id: &str,
     count: usize,
 ) -> Result<(), XmasterError> {
-    let tweet_id = parse_tweet_id(id);
+    let tweet_id = id.to_string();
     let api = XApi::new(ctx.clone());
     let users = api.get_tweet_likers(&tweet_id, count).await?;
     let result = EngagementUserList {
@@ -76,7 +75,7 @@ pub async fn retweeters(
     id: &str,
     count: usize,
 ) -> Result<(), XmasterError> {
-    let tweet_id = parse_tweet_id(id);
+    let tweet_id = id.to_string();
     let api = XApi::new(ctx.clone());
     let users = api.get_tweet_retweeters(&tweet_id, count).await?;
     let result = EngagementUserList {

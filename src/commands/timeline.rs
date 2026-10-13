@@ -145,13 +145,9 @@ pub async fn timeline(
         match sort_by {
             "impressions" | "views" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.impressions)),
             "likes" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.likes)),
-            "retweets" | "rts" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.retweets)),
-            "date" => {} // already sorted by date from API
-            other => {
-                return Err(XmasterError::Config(format!(
-                    "Unknown --sort value '{other}'. Valid: impressions, likes, retweets, date"
-                )));
-            }
+            "reposts" | "retweets" | "rts" => list.tweets.sort_by_key(|t| std::cmp::Reverse(t.retweets)),
+            // "date": already newest first; other values are rejected by the CLI parser
+            _ => {}
         }
     }
 

@@ -1,7 +1,6 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::store::IntelStore;
-use crate::intel::tracker::PostTracker;
 use crate::output::{self, OutputFormat, Tableable};
 use serde::Serialize;
 use std::sync::Arc;
@@ -109,8 +108,7 @@ fn derive_patterns(report: &crate::intel::tracker::PerformanceReport) -> Vec<Pat
 
 /// Build reply-outcome summary for the given period. Returns None on any
 /// error or if no replies were sent in the window.
-fn build_reply_outcomes(days: i64) -> Option<ReplyOutcomeSummary> {
-    let store = IntelStore::open().ok()?;
+fn build_reply_outcomes(store: &IntelStore, days: i64) -> Option<ReplyOutcomeSummary> {
     // Use the same rank_hot_reply_targets method that powers `engage hot-targets`
     let ranked = store.rank_hot_reply_targets(days, 1, 0.0, 0.0).ok()?;
     if ranked.is_empty() {
@@ -142,8 +140,8 @@ fn build_reply_outcomes(days: i64) -> Option<ReplyOutcomeSummary> {
     })
 }
 
-fn render_report(tracker: &PostTracker, period: &str, format: OutputFormat) -> Result<(), XmasterError> {
-    let report = tracker.generate_report(period)?;
+fn render_report(store: &IntelStore, period: &str, format: OutputFormat) -> Result<(), XmasterError> {
+    let report = store.generate_report(period)?;
 
     if report.total_posts == 0 {
         let label = match period {
@@ -161,7 +159,7 @@ fn render_report(tracker: &PostTracker, period: &str, format: OutputFormat) -> R
 
     // Reply outcomes only for daily — weekly can be added later.
     let reply_outcomes = match period {
-        "daily" => build_reply_outcomes(1),
+        "daily" => build_reply_outcomes(store, 1),
         _ => None,
     };
 
@@ -179,8 +177,7 @@ pub async fn daily(
     _ctx: Arc<AppContext>,
     format: OutputFormat,
 ) -> Result<(), XmasterError> {
-    let tracker = PostTracker::open()?;
-    render_report(&tracker, "daily", format)
+    render_report(&IntelStore::open()?, "daily", format)
 }
 
 /// Generate a weekly performance report.
@@ -188,6 +185,5 @@ pub async fn weekly(
     _ctx: Arc<AppContext>,
     format: OutputFormat,
 ) -> Result<(), XmasterError> {
-    let tracker = PostTracker::open()?;
-    render_report(&tracker, "weekly", format)
+    render_report(&IntelStore::open()?, "weekly", format)
 }

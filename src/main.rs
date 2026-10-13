@@ -24,7 +24,7 @@ fn has_json_flag() -> bool {
     std::env::args_os().any(|a| a == "--json")
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     // Activate tracing — honours RUST_LOG (e.g. RUST_LOG=xmaster=debug)
     tracing_subscriber::fmt()

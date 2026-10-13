@@ -1,4 +1,3 @@
-use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::store::{FullSnapshot, IntelStore};
@@ -333,7 +332,7 @@ pub async fn execute_batch(
     ids: &[String],
 ) -> Result<(), XmasterError> {
     if ids.is_empty() {
-        return Err(XmasterError::Config("No tweet IDs provided".into()));
+        return Err(XmasterError::InvalidInput("give at least one post ID or URL".into()));
     }
 
     if !ctx.config.has_x_auth() {
@@ -343,8 +342,8 @@ pub async fn execute_batch(
         });
     }
 
-    // Normalize IDs (strip URLs) up front.
-    let tweet_ids: Vec<String> = ids.iter().map(|id| parse_tweet_id(id)).collect();
+    // IDs arrive normalized (URLs resolved) from the CLI parser.
+    let tweet_ids = ids.to_vec();
 
     let now_ts = Utc::now().timestamp();
     let now_iso = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);

@@ -2,6 +2,7 @@ use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::{self, CsvRenderable, OutputFormat, Tableable};
+use crate::providers::web::Moderation;
 use crate::providers::xapi::XApi;
 use reqwest::Method;
 use serde::Serialize;
@@ -102,18 +103,7 @@ pub async fn block(
     format: OutputFormat,
     username: &str,
 ) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
-    let uid = api.get_authenticated_user_id().await?;
-    let target = api.get_user_by_username(username).await?;
-
-    signed_request(
-        &ctx,
-        Method::POST,
-        &format!("{BASE}/users/{uid}/blocking"),
-        Some(json!({ "target_user_id": target.id })),
-    )
-    .await?;
-
+    XApi::new(ctx).moderate(Moderation::Block, username).await?;
     render_success(format, "block", format!("@{username}"));
     Ok(())
 }
@@ -123,18 +113,7 @@ pub async fn unblock(
     format: OutputFormat,
     username: &str,
 ) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
-    let uid = api.get_authenticated_user_id().await?;
-    let target = api.get_user_by_username(username).await?;
-
-    signed_request(
-        &ctx,
-        Method::DELETE,
-        &format!("{BASE}/users/{uid}/blocking/{}", target.id),
-        None,
-    )
-    .await?;
-
+    XApi::new(ctx).moderate(Moderation::Unblock, username).await?;
     render_success(format, "unblock", format!("@{username}"));
     Ok(())
 }
@@ -144,18 +123,7 @@ pub async fn mute(
     format: OutputFormat,
     username: &str,
 ) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
-    let uid = api.get_authenticated_user_id().await?;
-    let target = api.get_user_by_username(username).await?;
-
-    signed_request(
-        &ctx,
-        Method::POST,
-        &format!("{BASE}/users/{uid}/muting"),
-        Some(json!({ "target_user_id": target.id })),
-    )
-    .await?;
-
+    XApi::new(ctx).moderate(Moderation::Mute, username).await?;
     render_success(format, "mute", format!("@{username}"));
     Ok(())
 }
@@ -165,18 +133,7 @@ pub async fn unmute(
     format: OutputFormat,
     username: &str,
 ) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
-    let uid = api.get_authenticated_user_id().await?;
-    let target = api.get_user_by_username(username).await?;
-
-    signed_request(
-        &ctx,
-        Method::DELETE,
-        &format!("{BASE}/users/{uid}/muting/{}", target.id),
-        None,
-    )
-    .await?;
-
+    XApi::new(ctx).moderate(Moderation::Unmute, username).await?;
     render_success(format, "unmute", format!("@{username}"));
     Ok(())
 }

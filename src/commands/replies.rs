@@ -1,4 +1,3 @@
-use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::judge;
@@ -79,7 +78,7 @@ pub async fn execute(
     all: bool,
 ) -> Result<(), XmasterError> {
     let api = XApi::new(ctx.clone());
-    let tweet_id = parse_tweet_id(id);
+    let tweet_id = id.to_string();
 
     let mut tweets = api.get_replies(&tweet_id, count).await?;
     let trimmed = if all { None } else { jev_trim(&ctx, &tweet_id, &mut tweets).await };

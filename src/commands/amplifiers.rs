@@ -48,12 +48,6 @@ pub async fn execute(
     let api = XApi::new(ctx.clone());
     let tweets = api.get_reposts_of_me(count).await?;
 
-    if tweets.is_empty() {
-        return Err(XmasterError::NotFound(
-            "No reposts of your content found. Post more and check back later.".into(),
-        ));
-    }
-
     // Group by author username, count reposts per author
     let mut by_author: HashMap<String, (usize, u64, String)> = HashMap::new();
     for t in &tweets {
@@ -95,6 +89,10 @@ pub async fn execute(
         amplifiers,
         suggested_next_commands: next_cmds,
     };
-    output::render(format, &result, None);
+    if result.total_reposts == 0 {
+        output::render_hint(format, &result, "No reposts of your posts found yet; check back after your next posts get traction");
+    } else {
+        output::render(format, &result, None);
+    }
     Ok(())
 }

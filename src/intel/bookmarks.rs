@@ -73,50 +73,9 @@ pub struct BookmarkStore {
 }
 
 impl BookmarkStore {
-    /// Open (or create) the bookmark database at `~/.config/xmaster/bookmarks.db`.
+    /// Open `~/.config/xmaster/bookmarks.db` at the current schema.
     pub fn open() -> Result<Self, XmasterError> {
-        let conn = super::open_db("bookmarks.db")?;
-        let store = Self { conn };
-        store.init_tables()?;
-        Ok(store)
-    }
-
-    fn init_tables(&self) -> Result<(), XmasterError> {
-        self.conn
-            .execute_batch(
-                "
-            CREATE TABLE IF NOT EXISTS bookmarks (
-                tweet_id TEXT PRIMARY KEY,
-                author_username TEXT NOT NULL,
-                author_name TEXT,
-                text TEXT NOT NULL,
-                created_at TEXT,
-                bookmarked_at INTEGER NOT NULL,
-                likes INTEGER DEFAULT 0,
-                retweets INTEGER DEFAULT 0,
-                replies INTEGER DEFAULT 0,
-                impressions INTEGER DEFAULT 0,
-                has_media INTEGER DEFAULT 0,
-                has_link INTEGER DEFAULT 0,
-                tags TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                read INTEGER DEFAULT 0,
-                exported INTEGER DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_bookmarks_date ON bookmarks(bookmarked_at);
-            CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_username);
-            CREATE INDEX IF NOT EXISTS idx_bookmarks_read ON bookmarks(read);
-
-            CREATE TABLE IF NOT EXISTS bookmark_sync_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                synced_at INTEGER NOT NULL,
-                new_count INTEGER NOT NULL,
-                total_count INTEGER NOT NULL
-            );
-            ",
-            )
-            .map_err(|e| XmasterError::Config(format!("Failed to init bookmark tables: {e}")))?;
-        Ok(())
+        Ok(Self { conn: super::schema::open(&super::schema::BOOKMARKS)? })
     }
 
     // -- sync ----------------------------------------------------------------
@@ -486,5 +445,51 @@ impl BookmarkStore {
             notes: row.get(12)?,
             read: row.get::<_, i64>(13)? != 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the owner's bookmarks.db declares `bookmarked_at` TEXT and
+    /// holds both digit strings and ISO-8601 strings, which failed every
+    /// reader ("Invalid column type Text"). After the migration they all work.
+    #[test]
+    fn legacy_text_bookmarks_are_readable_after_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        let now = Utc::now().timestamp();
+        let iso = chrono::DateTime::from_timestamp(now - 86_400, 0).unwrap().to_rfc3339();
+        conn.execute_batch(
+            "CREATE TABLE bookmarks (
+                tweet_id TEXT PRIMARY KEY, author_username TEXT NOT NULL, author_name TEXT,
+                text TEXT NOT NULL, created_at TEXT, bookmarked_at TEXT NOT NULL,
+                likes INTEGER DEFAULT 0, retweets INTEGER DEFAULT 0, replies INTEGER DEFAULT 0,
+                impressions INTEGER DEFAULT 0, has_media INTEGER DEFAULT 0, has_link INTEGER DEFAULT 0,
+                tags TEXT DEFAULT '', notes TEXT DEFAULT '', read INTEGER DEFAULT 0,
+                exported INTEGER DEFAULT 0);
+            CREATE TABLE bookmark_sync_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, synced_at TEXT NOT NULL,
+                new_count INTEGER NOT NULL, total_count INTEGER NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bookmarks (tweet_id, author_username, text, bookmarked_at)
+             VALUES ('b1', 'alice', 'longevity study', ?1), ('b2', 'bob', 'longevity trial', ?2)",
+            params![iso, (now - 3600).to_string()],
+        )
+        .unwrap();
+        super::super::schema::migrate(&conn, &super::super::schema::BOOKMARKS).unwrap();
+        let store = BookmarkStore { conn };
+
+        let found = store.search("longevity").unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].tweet_id, "b2", "newest first");
+        assert_eq!(found[1].bookmarked_at, now - 86_400);
+        assert_eq!(store.list_unread(10).unwrap().len(), 2);
+        assert_eq!(store.get_digest(7).unwrap().count, 2);
+        let stats = store.get_stats().unwrap();
+        assert_eq!(stats.total, 2);
+        assert!(stats.oldest.unwrap().starts_with("20"));
     }
 }

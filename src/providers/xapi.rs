@@ -1,34 +1,20 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use reqwest::Method;
-use reqwest_oauth1::OAuthClientProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, OnceCell};
 use tracing::warn;
 
-use super::web::Web;
+use super::oauth1::{self, OAuthClientProvider};
+use super::web::{Moderation, Web};
+use crate::intel::rails::{self, WriteIntent, WriteKind};
 
 /// Max retry attempts for transient errors (429, 5xx).
 const MAX_RETRIES: u32 = 3;
 
 const BASE: &str = "https://api.x.com/2";
-
-// ---------------------------------------------------------------------------
-// Rate limit info
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct RateLimitInfo {
-    /// Total requests allowed in the window.
-    pub limit: u32,
-    /// Requests remaining in the current window.
-    pub remaining: u32,
-    /// Unix timestamp when the window resets.
-    pub reset: u64,
-}
 
 // ---------------------------------------------------------------------------
 // Response / data types
@@ -268,26 +254,22 @@ fn parse_article_entity(
 // XApi client
 // ---------------------------------------------------------------------------
 
+/// Thin handle over the shared `AppContext`: free to construct, and every
+/// cache lives in the context so all handles in a command share it.
 pub struct XApi {
     ctx: Arc<AppContext>,
-    cached_user_id: OnceCell<String>,
-    last_rate_limit: Mutex<Option<RateLimitInfo>>,
 }
 
 impl XApi {
     pub fn new(ctx: Arc<AppContext>) -> Self {
-        Self {
-            ctx,
-            cached_user_id: OnceCell::new(),
-            last_rate_limit: Mutex::new(None),
-        }
+        Self { ctx }
     }
 
     // -- OAuth helpers ------------------------------------------------------
 
-    fn secrets(&self) -> reqwest_oauth1::Secrets<'_> {
+    fn secrets(&self) -> oauth1::Secrets<'_> {
         let k = &self.ctx.config.keys;
-        reqwest_oauth1::Secrets::new(&k.api_key, &k.api_secret)
+        oauth1::Secrets::new(&k.api_key, &k.api_secret)
             .token(&k.access_token, &k.access_token_secret)
     }
 
@@ -299,24 +281,6 @@ impl XApi {
             });
         }
         Ok(())
-    }
-
-    // -- Rate limit header parser -------------------------------------------
-
-    fn parse_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Option<RateLimitInfo> {
-        let limit = headers
-            .get("x-rate-limit-limit")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u32>().ok())?;
-        let remaining = headers
-            .get("x-rate-limit-remaining")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u32>().ok())?;
-        let reset = headers
-            .get("x-rate-limit-reset")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())?;
-        Some(RateLimitInfo { limit, remaining, reset })
     }
 
     // -- Retry wrapper ------------------------------------------------------
@@ -399,48 +363,12 @@ impl XApi {
     ) -> Result<Value, XmasterError> {
         self.require_auth()?;
 
-        let resp = match method {
-            Method::GET => {
-                self.ctx.client.clone().oauth1(self.secrets())
-                    .get(url)
-                    .send().await?
-            }
-            Method::POST => {
-                let mut b = self.ctx.client.clone().oauth1(self.secrets()).post(url);
-                if let Some(ref json) = body {
-                    b = b.header("Content-Type", "application/json")
-                        .body(serde_json::to_string(json)?);
-                }
-                b.send().await?
-            }
-            Method::DELETE => {
-                self.ctx.client.clone().oauth1(self.secrets())
-                    .delete(url)
-                    .send().await?
-            }
-            Method::PUT => {
-                let mut b = self.ctx.client.clone().oauth1(self.secrets()).put(url);
-                if let Some(ref json) = body {
-                    b = b.header("Content-Type", "application/json")
-                        .body(serde_json::to_string(json)?);
-                }
-                b.send().await?
-            }
-            _ => {
-                return Err(XmasterError::Api {
-                    provider: "x",
-                    code: "unsupported_method",
-                    message: format!("Unsupported HTTP method: {method}"),
-                });
-            }
-        };
-
-        let status = resp.status();
-
-        // Parse and store rate limit headers from every response.
-        if let Some(rl) = Self::parse_rate_limit_headers(resp.headers()) {
-            *self.last_rate_limit.lock().await = Some(rl);
+        let mut req = self.ctx.client.clone().oauth1(self.secrets()).request(method, url);
+        if let Some(json) = &body {
+            req = req.header("Content-Type", "application/json").body(serde_json::to_string(json)?);
         }
+        let resp = req.send().await?;
+        let status = resp.status();
 
         // Capture x-transaction-id for error diagnostics (X returns this on
         // every response; it's the only way to correlate with X support).
@@ -605,26 +533,71 @@ impl XApi {
         Ok((envelope.data.unwrap_or_default(), includes))
     }
 
-    // -- Cached user ID -----------------------------------------------------
+    // -- The authenticated account ------------------------------------------
+
+    /// X issues OAuth1 access tokens as `<user id>-<secret part>`, so the
+    /// account's ID needs no network call.
+    pub fn token_user_id(&self) -> Option<&str> {
+        let (id, rest) = self.ctx.config.keys.access_token.split_once('-')?;
+        (!id.is_empty() && !rest.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+    }
 
     pub async fn get_authenticated_user_id(&self) -> Result<String, XmasterError> {
-        self.cached_user_id
+        if let Some(id) = self.token_user_id() {
+            return Ok(id.to_string());
+        }
+        if let Some(me) = self.ctx.me.get() {
+            return Ok(me.id.clone());
+        }
+        if self.ctx.config.web_reads() {
+            match Web::new(&self.ctx)?.viewer_id().await {
+                Ok(id) => return Ok(id),
+                Err(e) => self.web_read_failed("user ID lookup", e)?,
+            }
+        }
+        Ok(self.get_me().await?.id)
+    }
+
+    /// The authenticated account's profile: once per process, and from a
+    /// small file cache across runs (1h when the free web session can
+    /// refresh it, 24h when only the paid API can).
+    pub async fn get_me(&self) -> Result<UserResponse, XmasterError> {
+        self.ctx
+            .me
             .get_or_try_init(|| async {
-                if self.ctx.config.web_reads() {
-                    match Web::new(&self.ctx)?.viewer_id().await {
-                        Ok(id) => return Ok(id),
-                        Err(e) => self.web_read_failed("user ID lookup", e)?,
+                let free = self.ctx.config.web_reads();
+                let ttl = if free { 3600 } else { 86_400 };
+                let account = self.account_key();
+                if let Some(user) = me_cache::load(&account, ttl) {
+                    return Ok(user);
+                }
+                let mut user = None;
+                if free {
+                    match Web::new(&self.ctx)?.viewer_profile().await {
+                        Ok(u) => user = Some(u),
+                        Err(e) => self.web_read_failed("profile read", e)?,
                     }
                 }
-                let user: UserResponse = self.request_data(
-                    Method::GET,
-                    &format!("{BASE}/users/me?user.fields=id"),
-                    None,
-                ).await?;
-                Ok(user.id)
+                let user = match user {
+                    Some(u) => u,
+                    None => {
+                        let url = format!("{BASE}/users/me?{fields}", fields = Self::user_fields_param());
+                        self.request_data(Method::GET, &url, None).await?
+                    }
+                };
+                me_cache::save(&account, &user);
+                Ok(user)
             })
             .await
             .cloned()
+    }
+
+    /// Which credentials the cached profile belongs to (a hash, never the keys).
+    fn account_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let k = &self.ctx.config.keys;
+        let h = Sha256::digest(format!("{}\n{}", k.access_token, k.web_auth_token));
+        h[..8].iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// A failed free web read falls back to the paid API, unless there is no
@@ -643,8 +616,14 @@ impl XApi {
         "tweet.fields=created_at,public_metrics,author_id,conversation_id,referenced_tweets,entities,lang,attachments"
     }
 
+    /// Media is expanded only for single-post reads: a list can't map media
+    /// to its posts (see `merge_authors`), so it would be billed for nothing.
     fn tweet_expansions() -> &'static str {
         "expansions=author_id,attachments.media_keys&media.fields=url,preview_image_url,type,alt_text"
+    }
+
+    fn list_expansions() -> &'static str {
+        "expansions=author_id"
     }
 
     fn user_fields_param() -> &'static str {
@@ -716,7 +695,30 @@ impl XApi {
 
     // -- Tweets -------------------------------------------------------------
 
+    /// Every write goes through the pacing rails (`intel::rails`).
     pub async fn create_tweet(
+        &self,
+        text: &str,
+        reply_to: Option<&str>,
+        quote_tweet_id: Option<&str>,
+        media_ids: Option<&[String]>,
+        poll_options: Option<&[String]>,
+        poll_duration: Option<u64>,
+    ) -> Result<TweetResponse, XmasterError> {
+        let kind = match (reply_to, quote_tweet_id) {
+            (Some(_), _) => WriteKind::Reply,
+            (None, Some(_)) => WriteKind::Quote,
+            _ => WriteKind::Post,
+        };
+        let mut intent = WriteIntent::new(kind).text(text);
+        if let Some(target) = reply_to.or(quote_tweet_id) {
+            intent = intent.target(target);
+        }
+        let write = self.create_tweet_unpaced(text, reply_to, quote_tweet_id, media_ids, poll_options, poll_duration);
+        rails::guard(&self.ctx, intent, write).await
+    }
+
+    async fn create_tweet_unpaced(
         &self,
         text: &str,
         reply_to: Option<&str>,
@@ -977,6 +979,66 @@ impl XApi {
             .await
     }
 
+    /// Metrics for a batch of posts. Others' posts are read for free (web
+    /// session, else FxTwitter); only your own go to the API, the one source
+    /// of their non-public metrics (link and profile clicks). Posts no free
+    /// path returned fall back to the API too. Missing posts are left out.
+    pub async fn get_posts_by_ids(&self, tweet_ids: &[String]) -> Result<Vec<TweetLookup>, XmasterError> {
+        if tweet_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let free = self.free_lookups(tweet_ids).await;
+        let api = self.ctx.config.has_x_auth();
+        if free.is_empty() && !api {
+            self.require_auth()?;
+        }
+        let me = if api { self.get_authenticated_user_id().await.ok() } else { None };
+        let mut out = Vec::with_capacity(tweet_ids.len());
+        let mut paid = Vec::new();
+        for id in tweet_ids {
+            match free.get(id) {
+                Some((lookup, author)) if !api || me.as_deref() != Some(author.as_str()) => out.push(lookup.clone()),
+                None if !api => {}
+                _ => paid.push(id.clone()),
+            }
+        }
+        if !paid.is_empty() {
+            match self.api_posts_by_ids(&paid).await {
+                Ok(found) => out.extend(found),
+                // The free read still stands for posts it covered
+                Err(e) if paid.iter().all(|id| free.contains_key(id)) => {
+                    warn!("API metrics read failed ({e}); using public metrics");
+                    out.extend(paid.iter().filter_map(|id| free.get(id).map(|f| f.0.clone())));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Free public metrics and author IDs, by post ID.
+    async fn free_lookups(&self, ids: &[String]) -> std::collections::HashMap<String, (TweetLookup, String)> {
+        if let Some(web) = Web::new(&self.ctx).ok().filter(|_| self.ctx.config.web_reads()) {
+            match web.tweet_lookups(ids).await {
+                Ok(found) => return found.into_iter().map(|f| (f.0.id.clone(), f)).collect(),
+                Err(e) => warn!("Web metrics read failed ({e}); trying FxTwitter"),
+            }
+        }
+        if self.ctx.config.settings.disable_fxtwitter {
+            return Default::default();
+        }
+        let mut out = std::collections::HashMap::new();
+        for chunk in ids.chunks(8) {
+            let mut set = tokio::task::JoinSet::new();
+            for id in chunk {
+                let id = id.clone();
+                set.spawn(async move { super::fxtwitter::fetch_lookup(&id).await });
+            }
+            out.extend(set.join_all().await.into_iter().flatten().map(|f| (f.0.id.clone(), f)));
+        }
+        out
+    }
+
     /// Batch fetch public + non_public metrics for up to 100 tweet IDs per HTTP call.
     /// Results for larger inputs are chunked internally and concatenated.
     ///
@@ -988,14 +1050,8 @@ impl XApi {
     /// Uses the raw signed-request path rather than [`Self::request`] because the
     /// generic helper collapses 403 into `AuthMissing`, which would break the
     /// fallback. 401/429/5xx propagate as typed errors so the caller can retry.
-    pub async fn get_posts_by_ids(
-        &self,
-        tweet_ids: &[String],
-    ) -> Result<Vec<TweetLookup>, XmasterError> {
+    async fn api_posts_by_ids(&self, tweet_ids: &[String]) -> Result<Vec<TweetLookup>, XmasterError> {
         self.require_auth()?;
-        if tweet_ids.is_empty() {
-            return Ok(Vec::new());
-        }
 
         let mut out: Vec<TweetLookup> = Vec::with_capacity(tweet_ids.len());
         for chunk in tweet_ids.chunks(100) {
@@ -1070,7 +1126,20 @@ impl XApi {
         Ok(out)
     }
 
+    /// One post: FxTwitter (free, no session), then the web session, then
+    /// the paid API.
     pub async fn get_tweet(&self, id: &str) -> Result<TweetData, XmasterError> {
+        if !self.ctx.config.settings.disable_fxtwitter {
+            if let Some((tweet, _)) = super::fxtwitter::fetch_post(id).await {
+                return Ok(tweet);
+            }
+        }
+        if self.ctx.config.web_reads() {
+            match Web::new(&self.ctx)?.tweet(id).await {
+                Ok(t) => return Ok(t),
+                Err(e) => self.web_read_failed("post read", e)?,
+            }
+        }
         let url = format!(
             "{BASE}/tweets/{id}?{tf}&{exp}&{uf}",
             tf = Self::tweet_fields(),
@@ -1090,12 +1159,8 @@ impl XApi {
 
     /// Direct replies to a post. The web session reads the post's
     /// conversation view (free, any age); the API fallback searches the last
-    /// 7 days.
-    ///
-    /// API path: the conversation_id of a reply equals the root tweet of the
-    /// thread, not the reply's own ID. So we first fetch the target tweet to
-    /// learn its conversation_id, search the whole conversation, then filter
-    /// to only direct replies to the target tweet.
+    /// 7 days with `in_reply_to_tweet_id:`, which bills only direct replies
+    /// rather than the whole conversation.
     pub async fn get_replies(
         &self,
         tweet_id: &str,
@@ -1107,44 +1172,54 @@ impl XApi {
                 Err(e) => self.web_read_failed("replies read", e)?,
             }
         }
-        // 1. Fetch the target tweet to get its conversation_id
-        let target = self.get_tweet(tweet_id).await?;
-        let conv_id = target
-            .conversation_id
-            .as_deref()
-            .unwrap_or(tweet_id);
-
-        // 2. Search the full conversation
-        let max = count.clamp(10, 100);
-        let query = format!("conversation_id:{conv_id}");
-        let all = self.search_tweets(&query, "recency", max).await?;
-
-        // 3. Filter to direct replies to the target tweet
-        let replies: Vec<TweetData> = all
-            .into_iter()
-            .filter(|t| {
-                // Exclude the target tweet itself
-                if t.id == tweet_id {
-                    return false;
-                }
-                // Keep tweets that reference the target as replied_to
-                t.referenced_tweets
-                    .as_ref()
-                    .map(|refs| {
-                        refs.iter()
-                            .any(|r| r.ref_type == "replied_to" && r.id == tweet_id)
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-
+        let url = format!(
+            "{BASE}/tweets/search/recent?query=in_reply_to_tweet_id%3A{tweet_id}&max_results={max}&sort_order=recency&{tf}&expansions=author_id&{uf}",
+            max = count.clamp(10, 100),
+            tf = Self::tweet_fields(),
+            uf = Self::user_fields_param(),
+        );
+        let mut replies = self.get_tweet_list(&url).await?;
+        replies.truncate(count);
         Ok(replies)
     }
 
     pub async fn delete_tweet(&self, id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Delete).target(id), self.delete_tweet_unpaced(id)).await
+    }
+
+    async fn delete_tweet_unpaced(&self, id: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(false) {
+            match Web::new(&self.ctx)?.delete_tweet(id).await {
+                Ok(()) => return Ok(()),
+                // Deleting twice is harmless, so the API may retry any failure
+                Err(e) => warn!("Web delete failed ({e}); trying the API"),
+            }
+        }
         self.request(Method::DELETE, &format!("{BASE}/tweets/{id}"), None)
             .await?;
         Ok(())
+    }
+
+    /// Mute, unmute, block or unblock by handle: the web session first
+    /// (free, no user-ID lookup), the API as fallback. All four are
+    /// idempotent, so a retry on the API can't double anything.
+    pub async fn moderate(&self, action: Moderation, username: &str) -> Result<(), XmasterError> {
+        let username = username.trim_start_matches('@');
+        if self.ctx.config.web_first(false) {
+            match Web::new(&self.ctx)?.moderate(action, username).await {
+                Ok(()) => return Ok(()),
+                Err(e) => warn!("Web {action:?} failed ({e}); trying the API"),
+            }
+        }
+        let uid = self.get_authenticated_user_id().await?;
+        let target = self.get_user_by_username(username).await?.id;
+        let (method, url, body) = match action {
+            Moderation::Mute => (Method::POST, format!("{BASE}/users/{uid}/muting"), Some(json!({ "target_user_id": target }))),
+            Moderation::Unmute => (Method::DELETE, format!("{BASE}/users/{uid}/muting/{target}"), None),
+            Moderation::Block => (Method::POST, format!("{BASE}/users/{uid}/blocking"), Some(json!({ "target_user_id": target }))),
+            Moderation::Unblock => (Method::DELETE, format!("{BASE}/users/{uid}/blocking/{target}"), None),
+        };
+        self.request(method, &url, body).await.map(|_| ())
     }
 
     // -- Engagement ---------------------------------------------------------
@@ -1180,9 +1255,25 @@ impl XApi {
     }
 
     /// X removed Likes and Follows writes from all self-serve API tiers on
-    /// 2026-04-20 (Enterprise keeps them). A 403 on those collections is the
-    /// platform restriction, not a token problem — say so instead of sending
-    /// the user off to regenerate credentials.
+    /// 2026-04-20 (Enterprise keeps them). Without web cookies they can't
+    /// succeed, so fail before spending a call; with cookies and
+    /// `web_writes = never` (an Enterprise key) the API is tried.
+    fn removed_api_write(&self, what: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.has_web_cookies() {
+            return Ok(());
+        }
+        Err(XmasterError::AuthMissing {
+            provider: "x-web",
+            message: format!(
+                "{what} goes through your browser session: X removed it from self-serve API \
+                 tiers on 2026-04-20. Run: xmaster config web-login"
+            ),
+        })
+    }
+
+    /// A 403 on likes/follows is the platform restriction, not a token
+    /// problem — say so instead of sending the user off to regenerate
+    /// credentials.
     fn annotate_removed_write(collection: &str, err: XmasterError) -> XmasterError {
         if !matches!(collection, "likes" | "following") {
             return err;
@@ -1208,21 +1299,35 @@ impl XApi {
     // (settings.web_writes); reposts and bookmarks fall back to the API.
 
     pub async fn like_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Like).target(tweet_id), self.like_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn like_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.like(tweet_id).await;
         }
+        self.removed_api_write("Liking")?;
         self.add_to_collection("likes", json!({ "tweet_id": tweet_id }))
             .await
     }
 
     pub async fn unlike_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unlike).target(tweet_id), self.unlike_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn unlike_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.unlike(tweet_id).await;
         }
+        self.removed_api_write("Unliking")?;
         self.remove_from_collection("likes", tweet_id).await
     }
 
     pub async fn retweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Repost).target(tweet_id), self.retweet_unpaced(tweet_id)).await
+    }
+
+    async fn retweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.retweet(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1234,6 +1339,10 @@ impl XApi {
     }
 
     pub async fn unretweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unrepost).target(tweet_id), self.unretweet_unpaced(tweet_id)).await
+    }
+
+    async fn unretweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.unretweet(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1244,6 +1353,10 @@ impl XApi {
     }
 
     pub async fn bookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Bookmark).target(tweet_id), self.bookmark_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn bookmark_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.bookmark(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1255,6 +1368,10 @@ impl XApi {
     }
 
     pub async fn unbookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unbookmark).target(tweet_id), self.unbookmark_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn unbookmark_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.unbookmark(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1268,31 +1385,59 @@ impl XApi {
 
     /// Follow by handle. The web path needs no paid user-ID lookup.
     pub async fn follow_username(&self, username: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Follow).handle(username), self.follow_username_unpaced(username)).await
+    }
+
+    async fn follow_username_unpaced(&self, username: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.follow(username).await;
         }
+        self.removed_api_write("Following")?;
         let user = self.get_user_by_username(username).await?;
         self.add_to_collection("following", json!({ "target_user_id": user.id }))
             .await
     }
 
     pub async fn unfollow_username(&self, username: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unfollow).handle(username), self.unfollow_username_unpaced(username)).await
+    }
+
+    async fn unfollow_username_unpaced(&self, username: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.unfollow(username).await;
         }
+        self.removed_api_write("Unfollowing")?;
         let user = self.get_user_by_username(username).await?;
         self.remove_from_collection("following", &user.id).await
     }
 
     // -- User lookup --------------------------------------------------------
 
-    /// Username → profile. Tries FxTwitter first (free); the API lookup is
-    /// the fallback. Every command that resolves a handle goes through here.
+    /// Username → profile, free first: FxTwitter (both endpoints), then the
+    /// web session, then the paid API. Every command that resolves a handle
+    /// goes through here; repeats within a run are served from memory.
     pub async fn get_user_by_username(&self, username: &str) -> Result<UserResponse, XmasterError> {
         let username = username.trim_start_matches('@');
+        let key = username.to_lowercase();
+        if let Some(u) = self.ctx.profiles.lock().unwrap().get(&key) {
+            return Ok(u.clone());
+        }
+        let user = self.lookup_user(username).await?;
+        self.ctx.profiles.lock().unwrap().insert(key, user.clone());
+        Ok(user)
+    }
+
+    async fn lookup_user(&self, username: &str) -> Result<UserResponse, XmasterError> {
         if !self.ctx.config.settings.disable_fxtwitter {
             if let Some(user) = super::fxtwitter::fetch_user(username).await {
                 return Ok(user);
+            }
+        }
+        if self.ctx.config.web_reads() {
+            match Web::new(&self.ctx)?.user_by_screen_name(username).await {
+                Ok(u) => return Ok(u),
+                Err(e @ XmasterError::NotFound(_)) => return Err(e),
+                Err(e) => self.web_read_failed("profile read", e)?,
             }
         }
         let url = format!(
@@ -1307,11 +1452,6 @@ impl XApi {
             "{BASE}/users/{user_id}?{fields}",
             fields = Self::user_fields_param()
         );
-        self.request_data(Method::GET, &url, None).await
-    }
-
-    pub async fn get_me(&self) -> Result<UserResponse, XmasterError> {
-        let url = format!("{BASE}/users/me?{fields}", fields = Self::user_fields_param());
         self.request_data(Method::GET, &url, None).await
     }
 
@@ -1382,7 +1522,7 @@ impl XApi {
         let url = format!(
             "{BASE}/tweets/{tweet_id}/quote_tweets?max_results={max}&{tf}&{exp}&{uf}",
             tf = Self::tweet_fields(),
-            exp = Self::tweet_expansions(),
+            exp = Self::list_expansions(),
             uf = Self::user_fields_param(),
         );
         self.get_tweet_list(&url).await
@@ -1437,7 +1577,7 @@ impl XApi {
         let url = format!(
             "{BASE}/users/{user_id}/mentions?max_results={max}&{tf}&{exp}&{uf}{since_param}",
             tf = Self::tweet_fields(),
-            exp = Self::tweet_expansions(),
+            exp = Self::list_expansions(),
             uf = Self::user_fields_param(),
         );
         self.get_tweet_list(&url).await
@@ -1461,7 +1601,7 @@ impl XApi {
         let url = format!(
             "{BASE}/users/{user_id}/timelines/reverse_chronological?max_results={max}&{tf}&{exp}&{uf}{time_params}",
             tf = Self::tweet_fields(),
-            exp = Self::tweet_expansions(),
+            exp = Self::list_expansions(),
             uf = Self::user_fields_param(),
         );
         self.get_tweet_list(&url).await
@@ -1507,7 +1647,7 @@ impl XApi {
         let url = format!(
             "{BASE}/users/reposts_of_me?max_results={max}&{tf}&{exp}&{uf}",
             tf = Self::tweet_fields(),
-            exp = Self::tweet_expansions(),
+            exp = Self::list_expansions(),
             uf = Self::user_fields_param(),
         );
         self.get_tweet_list(&url).await
@@ -1563,15 +1703,6 @@ impl XApi {
         let (users, _includes) =
             self.request_list::<UserResponse>(Method::GET, &url, None).await?;
         Ok(users)
-    }
-
-    pub async fn search_tweets(
-        &self,
-        query: &str,
-        mode: &str,
-        count: usize,
-    ) -> Result<Vec<TweetData>, XmasterError> {
-        self.search_tweets_paginated(query, mode, count, None, None).await
     }
 
     /// Build the optional `&start_time` / `&end_time` query fragment.
@@ -1654,7 +1785,7 @@ impl XApi {
             format!(
                 "{BASE}/tweets/search/recent?query={encoded_query}&max_results={page_size}&sort_order={sort}&{tf}&{exp}&{uf}{time_params}",
                 tf = Self::tweet_fields(),
-                exp = Self::tweet_expansions(),
+                exp = Self::list_expansions(),
                 uf = Self::user_fields_param(),
             )
         })
@@ -1680,7 +1811,7 @@ impl XApi {
             format!(
                 "{BASE}/users/{user_id}/tweets?max_results={page_size}&{tf}&{exp}&{uf}{time_params}",
                 tf = Self::tweet_fields(),
-                exp = Self::tweet_expansions(),
+                exp = Self::list_expansions(),
                 uf = Self::user_fields_param(),
             )
         })
@@ -1690,6 +1821,15 @@ impl XApi {
     // -- Direct Messages ----------------------------------------------------
 
     pub async fn send_dm(
+        &self,
+        participant_id: &str,
+        text: &str,
+    ) -> Result<(), XmasterError> {
+        let intent = WriteIntent::new(WriteKind::Dm).handle(participant_id);
+        rails::guard(&self.ctx, intent, self.send_dm_unpaced(participant_id, text)).await
+    }
+
+    async fn send_dm_unpaced(
         &self,
         participant_id: &str,
         text: &str,
@@ -1782,4 +1922,35 @@ impl XApi {
         super::media::upload_many(&self.ctx, paths).await
     }
 
+}
+
+/// `get_me` results on disk, so commands that only need the account's handle
+/// or follower count don't pay for a lookup on every run.
+mod me_cache {
+    use super::UserResponse;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct Entry {
+        account: String,
+        fetched_at: i64,
+        user: UserResponse,
+    }
+
+    fn path() -> std::path::PathBuf {
+        crate::config::config_dir().join("me.json")
+    }
+
+    pub fn load(account: &str, ttl_secs: i64) -> Option<UserResponse> {
+        let e: Entry = serde_json::from_slice(&std::fs::read(path()).ok()?).ok()?;
+        let age = chrono::Utc::now().timestamp() - e.fetched_at;
+        (e.account == account && (0..ttl_secs).contains(&age)).then_some(e.user)
+    }
+
+    pub fn save(account: &str, user: &UserResponse) {
+        let e = Entry { account: account.into(), fetched_at: chrono::Utc::now().timestamp(), user: user.clone() };
+        if let Ok(bytes) = serde_json::to_vec(&e) {
+            let _ = std::fs::write(path(), bytes);
+        }
+    }
 }

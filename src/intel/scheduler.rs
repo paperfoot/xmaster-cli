@@ -1,6 +1,6 @@
 use chrono::{Datelike, Timelike, Utc};
 use rand::Rng;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -55,48 +55,15 @@ pub struct FiredPost {
 // ---------------------------------------------------------------------------
 
 pub struct PostScheduler {
-    conn: Connection,
+    /// `scheduled_posts` lives in xmaster.db; fired posts are logged through
+    /// the same handle.
+    store: IntelStore,
 }
 
 impl PostScheduler {
-    /// Open (or create) the scheduler database at `~/.config/xmaster/xmaster.db`.
+    /// Open the scheduler on `~/.config/xmaster/xmaster.db`.
     pub fn open() -> Result<Self, XmasterError> {
-        let conn = super::open_db("xmaster.db")?;
-        let sched = Self { conn };
-        sched.init_tables()?;
-        Ok(sched)
-    }
-
-    fn init_tables(&self) -> Result<(), XmasterError> {
-        self.conn
-            .execute_batch(
-                "
-            CREATE TABLE IF NOT EXISTS scheduled_posts (
-                id              TEXT PRIMARY KEY,
-                content         TEXT NOT NULL,
-                scheduled_at    INTEGER NOT NULL,
-                timezone        TEXT NOT NULL DEFAULT 'UTC',
-                status          TEXT NOT NULL DEFAULT 'pending',
-                content_type    TEXT NOT NULL DEFAULT 'text',
-                reply_to_id     TEXT,
-                quote_id        TEXT,
-                media_paths     TEXT,
-                created_at      INTEGER NOT NULL,
-                fired_at        INTEGER,
-                tweet_id        TEXT,
-                retry_count     INTEGER NOT NULL DEFAULT 0,
-                last_error      TEXT,
-                preflight_score INTEGER,
-                auto_scheduled  INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_scheduled_status
-                ON scheduled_posts(status, scheduled_at);
-            ",
-            )
-            .map_err(|e| XmasterError::Config(e.to_string()))?;
-        // Claim token for fire() runs — see the phase comments there.
-        crate::intel::add_column_if_missing(&self.conn, "scheduled_posts", "fire_token", "TEXT");
-        Ok(())
+        Ok(Self { store: IntelStore::open()? })
     }
 
     // -- writes --------------------------------------------------------------
@@ -123,7 +90,7 @@ impl PostScheduler {
 
         let media_json = media.map(|m| serde_json::to_string(m).unwrap_or_default());
 
-        self.conn
+        self.store.conn
             .execute(
                 "INSERT INTO scheduled_posts
                     (id, content, scheduled_at, timezone, status, content_type,
@@ -187,6 +154,7 @@ impl PostScheduler {
         };
 
         let mut stmt = self
+            .store
             .conn
             .prepare(sql)
             .map_err(|e| XmasterError::Config(e.to_string()))?;
@@ -230,6 +198,7 @@ impl PostScheduler {
     /// Cancel a pending scheduled post.
     pub fn cancel(&self, id: &str) -> Result<(), XmasterError> {
         let changed = self
+            .store
             .conn
             .execute(
                 "UPDATE scheduled_posts SET status = 'cancelled'
@@ -249,6 +218,7 @@ impl PostScheduler {
     /// Reschedule a pending or failed post to a new time.
     pub fn reschedule(&self, id: &str, new_time: i64) -> Result<(), XmasterError> {
         let changed = self
+            .store
             .conn
             .execute(
                 "UPDATE scheduled_posts SET scheduled_at = ?1
@@ -284,7 +254,7 @@ impl PostScheduler {
         // 'firing' for over an hour means its owning process died mid-fire;
         // re-firing it risks a double post (the tweet may already be live),
         // so mark it failed and let the user decide.
-        self.conn
+        self.store.conn
             .execute(
                 "UPDATE scheduled_posts
                  SET status = 'failed',
@@ -298,7 +268,7 @@ impl PostScheduler {
         // overlapping fire() runs never pick up the same rows (a token-less
         // 'firing' status let a second run re-read rows the first was posting).
         let fire_token = generate_id(now);
-        self.conn
+        self.store.conn
             .execute(
                 "UPDATE scheduled_posts SET status = 'firing', fire_token = ?2
                  WHERE status = 'pending' AND scheduled_at <= ?1",
@@ -308,6 +278,7 @@ impl PostScheduler {
 
         // Phase 2: Fetch the posts THIS run claimed
         let mut stmt = self
+            .store
             .conn
             .prepare(
                 "SELECT id, content, scheduled_at, reply_to_id, quote_id, media_paths, retry_count
@@ -403,7 +374,7 @@ impl PostScheduler {
             match post_result {
                 Ok(tweet) => {
                     let fire_ts = Utc::now().timestamp();
-                    self.conn
+                    self.store.conn
                         .execute(
                             "UPDATE scheduled_posts
                              SET status = 'sent', fired_at = ?1, tweet_id = ?2
@@ -413,7 +384,8 @@ impl PostScheduler {
                         .map_err(|e| XmasterError::Config(e.to_string()))?;
 
                     // Record to intel store with context-aware analysis
-                    if let Ok(store) = IntelStore::open() {
+                    {
+                        let store = &self.store;
                         let is_reply = reply_to.is_some();
                         let is_quote = quote.is_some();
                         let has_media = media_ids.as_ref().is_some_and(|m| !m.is_empty());
@@ -466,7 +438,7 @@ impl PostScheduler {
                     let err_msg = e.to_string();
 
                     if new_retry >= 3 {
-                        self.conn
+                        self.store.conn
                             .execute(
                                 "UPDATE scheduled_posts
                                  SET status = 'failed', retry_count = ?1, last_error = ?2
@@ -476,7 +448,7 @@ impl PostScheduler {
                             .map_err(|e| XmasterError::Config(e.to_string()))?;
                         result.failed += 1;
                     } else {
-                        self.conn
+                        self.store.conn
                             .execute(
                                 "UPDATE scheduled_posts
                                  SET status = 'pending', retry_count = ?1, last_error = ?2
@@ -512,6 +484,7 @@ impl PostScheduler {
     /// future occurrence of that hour as a Unix timestamp.
     pub fn get_best_auto_time(&self) -> Option<i64> {
         let row: Option<(i32, i32)> = self
+            .store
             .conn
             .query_row(
                 "SELECT day_of_week, hour_of_day
@@ -556,7 +529,7 @@ impl PostScheduler {
     // -- internal helpers -----------------------------------------------------
 
     fn mark_failed(&self, id: &str, error: &str) -> Result<(), XmasterError> {
-        self.conn
+        self.store.conn
             .execute(
                 "UPDATE scheduled_posts SET status = 'failed', last_error = ?1 WHERE id = ?2",
                 params![error, id],
@@ -582,10 +555,7 @@ mod tests {
     use super::*;
 
     fn in_memory_scheduler() -> PostScheduler {
-        let conn = Connection::open_in_memory().unwrap();
-        let sched = PostScheduler { conn };
-        sched.init_tables().unwrap();
-        sched
+        PostScheduler { store: IntelStore::in_memory() }
     }
 
     #[test]

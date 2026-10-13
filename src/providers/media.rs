@@ -22,7 +22,7 @@ use crate::errors::XmasterError;
 use base64::Engine as _;
 use reqwest::header::HeaderValue;
 use reqwest::Method;
-use reqwest_oauth1::OAuthClientProvider;
+use crate::providers::oauth1::{self, OAuthClientProvider};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
@@ -348,7 +348,7 @@ async fn oauth1_send(
     timeout: Duration,
 ) -> Result<reqwest::Response, XmasterError> {
     let k = &ctx.config.keys;
-    let secrets = reqwest_oauth1::Secrets::new(&k.api_key, &k.api_secret)
+    let secrets = oauth1::Secrets::new(&k.api_key, &k.api_secret)
         .token(&k.access_token, &k.access_token_secret);
     let client = ctx.client.clone().oauth1(secrets);
     let req = if method == Method::GET { client.get(url) } else { client.post(url) };
