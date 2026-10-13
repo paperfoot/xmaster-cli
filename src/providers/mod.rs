@@ -4,3 +4,4 @@ pub mod oauth2;
 pub mod fxtwitter;
 pub mod web;
 pub mod web_timeline;
+pub mod oauth1;
