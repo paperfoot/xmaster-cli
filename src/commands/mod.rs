@@ -97,6 +97,19 @@ fn command_name(cmd: &Commands) -> &'static str {
     }
 }
 
+/// Other names a deny rule may use for a command: its X-term alias, and
+/// `post` for every command that publishes a post.
+fn deny_aliases(cmd_name: &str) -> &'static [&'static str] {
+    match cmd_name {
+        "reply" | "quote" | "thread" => &["post"],
+        "retweet" => &["repost"],
+        "unretweet" => &["unrepost"],
+        "retweeters" => &["reposters"],
+        "conversation" => &["convo"],
+        _ => &[],
+    }
+}
+
 /// Check XMASTER_ALLOW_COMMANDS / XMASTER_DENY_COMMANDS env vars.
 /// Deny takes precedence over allow. Agent-info and config are always
 /// allowed so operators can still introspect and reconfigure.
@@ -107,10 +120,14 @@ fn check_command_access(cmd_name: &str) -> Result<(), XmasterError> {
     }
 
     if let Ok(deny) = std::env::var("XMASTER_DENY_COMMANDS") {
-        let denied: Vec<&str> = deny.split(',').map(|s| s.trim()).collect();
-        if denied.iter().any(|d| d.eq_ignore_ascii_case(cmd_name)) {
+        let names: Vec<&str> = std::iter::once(cmd_name).chain(deny_aliases(cmd_name).iter().copied()).collect();
+        if let Some(rule) = deny
+            .split(',')
+            .map(str::trim)
+            .find(|d| names.iter().any(|n| d.eq_ignore_ascii_case(n)))
+        {
             return Err(XmasterError::CommandDenied(format!(
-                "'{cmd_name}' is blocked by XMASTER_DENY_COMMANDS"
+                "'{cmd_name}' is blocked by XMASTER_DENY_COMMANDS ({rule})"
             )));
         }
     }
@@ -125,6 +142,39 @@ fn check_command_access(cmd_name: &str) -> Result<(), XmasterError> {
     }
 
     Ok(())
+}
+
+/// A link to any post that needs no lookup of its author's handle.
+pub(crate) fn post_url(id: &str) -> String {
+    format!("https://x.com/i/status/{id}")
+}
+
+/// The route of a write whose path is fixed up front (`via` in results).
+pub(crate) struct WriteRoute;
+
+impl WriteRoute {
+    /// Likes and follows: the web session when it's set up, else the API
+    /// (no fallback either way, so this is the path taken).
+    pub fn web_only(ctx: &AppContext) -> Option<&'static str> {
+        Some(if ctx.config.web_first(true) { "web" } else { "api" })
+    }
+}
+
+/// TRANSITIONAL until xapi.rs builds its errors with
+/// `XmasterError::from_x_error` (lane transport): today every API 403 arrives
+/// as `AuthMissing` ("HTTP 403: <body>"), telling agents to change keys.
+/// Re-classify it from X's body: duplicate text, reply limits, protected
+/// posts and removed endpoints become `Forbidden`/`ReplyRestricted` (exit 5)
+/// or `NotFound`; token-permission 403s stay credentials problems.
+pub(crate) fn reclassify_403(err: XmasterError) -> XmasterError {
+    match err {
+        XmasterError::AuthMissing { provider, message } if message.starts_with("HTTP 403: ") => {
+            let body = &message["HTTP 403: ".len()..];
+            let body = body.rsplit_once(" [txn: ").map_or(body, |(b, _)| b);
+            XmasterError::from_x_error(provider, 403, body)
+        }
+        other => other,
+    }
 }
 
 pub async fn dispatch(
@@ -400,6 +450,30 @@ mod access_tests {
         assert!(check_command_access("agent-info").is_ok());
         assert!(check_command_access("config").is_ok());
         clear_access_env();
+    }
+
+    #[test]
+    fn denying_post_covers_reply_quote_thread_and_x_terms_match() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_DENY_COMMANDS", "post,repost");
+        for cmd in ["post", "reply", "quote", "thread", "retweet"] {
+            assert!(check_command_access(cmd).is_err(), "{cmd} should be denied");
+        }
+        assert!(check_command_access("like").is_ok());
+        clear_access_env();
+    }
+
+    #[test]
+    fn api_403_is_reclassified_from_the_body() {
+        let dup = XmasterError::AuthMissing {
+            provider: "x",
+            message: r#"HTTP 403: {"detail":"You are not allowed to create a Tweet with duplicate content.","type":"about:blank","title":"Forbidden","status":403} [txn: abc]"#.into(),
+        };
+        let e = reclassify_403(dup);
+        assert_eq!(e.exit_code(), 5, "{e}");
+        let keys = XmasterError::AuthMissing { provider: "x", message: "HTTP 401: Unauthorized".into() };
+        assert_eq!(reclassify_403(keys).exit_code(), 2);
     }
 
     #[test]
