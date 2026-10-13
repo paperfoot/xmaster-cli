@@ -149,6 +149,50 @@ fn check_command_access(cmd_name: &str) -> Result<(), XmasterError> {
     Ok(())
 }
 
+/// Does this command change anything on X? (`XMASTER_READ_ONLY` blocks
+/// these.) Dry runs, local bookkeeping (schedule add, watchlist, config) and
+/// the rails switches (pause, resume, reset-cooldown) are not X writes.
+fn writes_to_x(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::Post { dry_run, .. } | Commands::Reply { dry_run, .. } | Commands::Quote { dry_run, .. } => !dry_run,
+        Commands::Thread { .. }
+        | Commands::Delete { .. }
+        | Commands::Like { .. }
+        | Commands::Unlike { .. }
+        | Commands::Retweet { .. }
+        | Commands::Unretweet { .. }
+        | Commands::Bookmark { .. }
+        | Commands::Unbookmark { .. }
+        | Commands::Follow { .. }
+        | Commands::Unfollow { .. }
+        | Commands::HideReply { .. }
+        | Commands::UnhideReply { .. }
+        | Commands::Block { .. }
+        | Commands::Unblock { .. }
+        | Commands::Mute { .. }
+        | Commands::Unmute { .. } => true,
+        Commands::Dm { action } => matches!(action, DmCommands::Send { .. }),
+        Commands::Lists { action } => matches!(
+            action,
+            ListCommands::Create { .. } | ListCommands::Delete { .. } | ListCommands::Add { .. } | ListCommands::Remove { .. }
+        ),
+        Commands::Schedule { action } => matches!(action, ScheduleCommands::Fire),
+        Commands::Article { action } => matches!(action, ArticleCommands::Draft { .. } | ArticleCommands::Publish { .. }),
+        _ => false,
+    }
+}
+
+/// `XMASTER_READ_ONLY=1`: every read works, nothing changes on X.
+fn check_read_only(cmd: &Commands, cmd_name: &str) -> Result<(), XmasterError> {
+    let on = std::env::var("XMASTER_READ_ONLY").is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+    if on && writes_to_x(cmd) {
+        return Err(XmasterError::CommandDenied(format!(
+            "'{cmd_name}' writes to X and XMASTER_READ_ONLY is set (--dry-run still works for post, reply and quote)"
+        )));
+    }
+    Ok(())
+}
+
 /// A link to any post that needs no lookup of its author's handle.
 pub(crate) fn post_url(id: &str) -> String {
     format!("https://x.com/i/status/{id}")
@@ -190,6 +234,7 @@ pub async fn dispatch(
     // Command access guard — check allowlist/denylist before any work.
     let cmd_name = command_name(&cli.command);
     check_command_access(cmd_name)?;
+    check_read_only(&cli.command, cmd_name)?;
 
     match &cli.command {
         Commands::Post { text, reply_to, quote, media, poll, poll_duration, dry_run } => {
@@ -487,6 +532,25 @@ mod access_tests {
         }
         assert!(check_command_access("like").is_ok());
         clear_access_env();
+    }
+
+    #[test]
+    fn read_only_blocks_x_writes_but_not_reads_dry_runs_or_rails() {
+        use clap::Parser;
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_access_env();
+        std::env::set_var("XMASTER_READ_ONLY", "1");
+        let check = |args: &[&str]| {
+            let cli = Cli::try_parse_from(std::iter::once("xmaster").chain(args.iter().copied())).unwrap();
+            check_read_only(&cli.command, command_name(&cli.command))
+        };
+        for w in [&["post", "hi"][..], &["reply", "1", "hi"], &["like", "1"], &["dm", "send", "jack", "hi"], &["lists", "add", "1", "jack"], &["schedule", "fire"]] {
+            assert!(check(w).is_err(), "{w:?} should be blocked");
+        }
+        for r in [&["read", "1"][..], &["post", "hi", "--dry-run"], &["dm", "inbox"], &["rails", "pause"], &["rails", "resume"], &["schedule", "list"]] {
+            assert!(check(r).is_ok(), "{r:?} should be allowed");
+        }
+        std::env::remove_var("XMASTER_READ_ONLY");
     }
 
     #[test]
