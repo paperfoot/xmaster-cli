@@ -14,7 +14,8 @@ Call X content "posts" in everything you write for the user. Command names (`ret
 ## Start
 
 ```
-xmaster agent-info                 # commands, exit codes, cost model, JEV (~6 KB)
+xmaster agent-info                 # every command on one line, exit codes, cost model, JEV (~7 KB)
+xmaster agent-info --command "engage feed"  # one command in full: args, flags, defaults, allowed values
 xmaster agent-info --tips replies  # strategy on demand: algorithm|replies|posting|growth|metrics|avoid
 xmaster config check               # live read-only test of the web session and keys
 ```
@@ -56,7 +57,7 @@ Quote instead of reply when the user has a take worth showing their own follower
 
 ```
 xmaster engage inbox <own post id>   # replies, quote posts and replies under quotes
-xmaster mentions -c 20
+xmaster mentions -n 20
 xmaster replies <id>                 # with JEV: only replies worth reading; --all for every one
 ```
 
@@ -99,9 +100,9 @@ Read `error.code`, `error.suggestion`, `error.retryable` and `error.retry_after_
 
 ```
 xmaster read <id|url>                          # text, author, metrics, media
-xmaster timeline --user <handle> --sort impressions -c 50
+xmaster timeline --user <handle> --sort impressions -n 50
 xmaster timeline --user <handle> --since 24h
-xmaster search "query min_likes:50" -c 20      # X search operators work
+xmaster search "query min_likes:50" -n 20      # X search operators work
 xmaster metrics ID1 ID2 ID3                    # one call for up to 100 posts; never loop per ID
 xmaster track run                              # snapshot recent posts, record reply-backs
 xmaster engage hot-targets                     # accounts where the user's replies did best

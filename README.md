@@ -49,7 +49,7 @@ Log in to x.com in your browser first. To hand X to your agent, run `xmaster ski
 
 - **Replies to any thread.** Since February 2026 the X API only lets you reply to people who mentioned you, and on 20 April 2026 it dropped likes, follows and quote posts from self-serve tiers. xmaster sends these through your logged-in browser session, the way x.com does, and finds X's current request IDs on its own when X rotates them.
 - **No API fees on everyday commands.** With a session, reading posts, threads, replies, search, timelines, mentions and profiles costs nothing (0 of 13 everyday commands billed in a live check). Posts, replies, likes and follows go through the session too, so you skip the API's $0.015 per post and $0.20 per post with a link.
-- **Made for agents.** Compact JSON when piped, one error format with `retryable` and `retry_after_secs`, exit codes that say what to do next, and an `agent-info` summary under 6 KB.
+- **Made for agents.** Compact JSON when piped, one error format with `retryable` and `retry_after_secs`, exit codes that say what to do next, an `agent-info` manifest of about 7 KB with every command, and `agent-info --command PATH` for one command in full. Collections take `-n N` (or `--limit`).
 - **Judgment built in (optional).** With a [JEV](https://typesafe.ai) key, xmaster picks the posts worth a reply out of a feed, sorts your inbox into reply, like, ignore and spam, and flags drafts that read as generic or AI-written. On 110 real posts, its picks ranked good reply targets at AUC 0.93, against 0.59 for the size-and-freshness sort it replaced.
 - **Ranking facts from X's own code.** Draft checks and `agent-info --tips` use the weights X publishes in [xai-org/x-algorithm](https://github.com/xai-org/x-algorithm): copy-link share 20, reply 5, like 0.6, report −234.
 - **Paced writes.** Daily limits and gaps between actions keep agent activity within normal use.
@@ -62,7 +62,7 @@ Log in to x.com in your browser first. To hand X to your agent, run `xmaster ski
 | Like, follow, quote | Yes | Removed from self-serve tiers | Same as the API |
 | Cost of a post | $0 through your session | $0.015, or $0.20 with a link | Same as the API |
 | Reads (posts, threads, search) | $0 through your session or FxTwitter | Billed per read | Billed per read |
-| Agent interface | JSON envelope, exit codes, 6 KB `agent-info`, agent skill | MCP tool schemas or raw JSON | Varies |
+| Agent interface | JSON envelope, exit codes, 7 KB `agent-info` with `--command` drill-down, agent skill | MCP tool schemas or raw JSON | Varies |
 | Draft checks before sending | Rules from X's ranking code, plus JEV | None | Varies |
 
 ## How it works
@@ -101,8 +101,8 @@ Post IDs and URLs work anywhere a post is expected; handles, `@handles` and prof
 xmaster post "Shipped v2 today" --media demo.mp4
 xmaster quote 1234567890 "The key number here is 3x, not the headline"
 xmaster thread "First post" "Second post" "Third post"
-xmaster timeline --user someone --sort impressions -c 50
-xmaster search "longevity min_likes:100" -c 20
+xmaster timeline --user someone --sort impressions -n 50
+xmaster search "longevity min_likes:100" -n 20
 xmaster metrics 111 222 333
 ```
 
@@ -112,7 +112,8 @@ xmaster metrics 111 222 333
 
 ```bash
 xmaster skill install        # installs the skill for Claude Code, Codex, Gemini CLI and ~/.agents
-xmaster agent-info           # commands, exit codes, cost model, JEV: under 6 KB of JSON
+xmaster agent-info           # every command on one line, exit codes, cost model, JEV: about 7 KB of JSON
+xmaster agent-info --command "engage feed"   # one command in full: args, flags, defaults, allowed values
 xmaster agent-info --tips    # ranking weights and strategy, by topic: algorithm, replies, posting, growth, metrics, avoid
 ```
 
