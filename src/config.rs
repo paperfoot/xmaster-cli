@@ -101,6 +101,10 @@ pub struct Keys {
     /// GraphQL CreateNoteTweet query ID for Premium long posts (rotates, auto-updated)
     #[serde(default)]
     pub graphql_create_note_tweet_id: String,
+    /// TypeSafe JEV API key (optional decision model). Falls back to the
+    /// TYPESAFE_API_KEY env var. Set via: xmaster config set keys.jev KEY
+    #[serde(default)]
+    pub jev: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +119,17 @@ pub struct Settings {
     /// Set via: xmaster config set settings.disable_fxtwitter true
     #[serde(default)]
     pub disable_fxtwitter: bool,
+    /// Which writes go through the browser session (web cookies) instead of
+    /// the paid X API: "auto" (default) = replies, quotes, likes, reposts,
+    /// bookmarks and follows, which the self-serve API blocks or removed;
+    /// "always" = every write, plain posts included (no per-post API fee);
+    /// "never" = API only. Without web cookies everything uses the API.
+    /// Set via: xmaster config set settings.web_writes always
+    #[serde(default = "default_web_writes")]
+    pub web_writes: String,
+    /// Turn off JEV judgments even when a key is configured.
+    #[serde(default)]
+    pub disable_jev: bool,
 }
 
 impl Default for Settings {
@@ -122,12 +137,18 @@ impl Default for Settings {
         Self {
             timeout: default_timeout(),
             disable_fxtwitter: false,
+            web_writes: default_web_writes(),
+            disable_jev: false,
         }
     }
 }
 
 fn default_timeout() -> u64 {
     15
+}
+
+fn default_web_writes() -> String {
+    "auto".into()
 }
 
 pub fn config_dir() -> PathBuf {
@@ -176,6 +197,28 @@ impl AppConfig {
 
     pub fn has_web_cookies(&self) -> bool {
         !self.keys.web_ct0.is_empty() && !self.keys.web_auth_token.is_empty()
+    }
+
+    /// Route a write through the browser session first? `blocked_on_api` is
+    /// true for writes the self-serve API rejects (replies to non-mentioners,
+    /// quotes, likes, follows) or that are free on the web (reposts, bookmarks).
+    pub fn web_first(&self, blocked_on_api: bool) -> bool {
+        self.has_web_cookies()
+            && match self.settings.web_writes.as_str() {
+                "never" => false,
+                "always" => true,
+                _ => blocked_on_api,
+            }
+    }
+
+    /// JEV API key from config or TYPESAFE_API_KEY, unless JEV is disabled.
+    pub fn jev_key(&self) -> Option<String> {
+        if self.settings.disable_jev {
+            return None;
+        }
+        Some(self.keys.jev.clone())
+            .filter(|k| !k.is_empty())
+            .or_else(|| std::env::var("TYPESAFE_API_KEY").ok().filter(|k| !k.is_empty()))
     }
 
     pub fn masked_key(key: &str) -> String {
