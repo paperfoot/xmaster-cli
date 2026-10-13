@@ -93,14 +93,6 @@ impl From<rusqlite::Error> for XmasterError {
     }
 }
 
-// TRANSITIONAL: keeps `?` on reqwest-oauth1 sends compiling (xapi.rs,
-// rate_limits.rs) until lane transport drops the crate. Delete at merge.
-impl From<reqwest_oauth1::Error> for XmasterError {
-    fn from(e: reqwest_oauth1::Error) -> Self {
-        XmasterError::OAuth(e.to_string())
-    }
-}
-
 /// Seconds from now until `reset_at` (Unix time); a default when unknown.
 fn secs_until(reset_at: u64) -> u64 {
     if reset_at == 0 {

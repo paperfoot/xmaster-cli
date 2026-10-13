@@ -146,6 +146,9 @@ impl SignedRequest<'_> {
     pub fn multipart(self, form: reqwest::multipart::Form) -> Self {
         Self { inner: self.inner.multipart(form), ..self }
     }
+    pub fn timeout(self, timeout: std::time::Duration) -> Self {
+        Self { inner: self.inner.timeout(timeout), ..self }
+    }
     /// Every OAuth1 call is a billed X API call: logged at debug so a run
     /// can be audited with RUST_LOG=xmaster=debug.
     pub async fn send(self) -> Result<reqwest::Response, reqwest::Error> {
