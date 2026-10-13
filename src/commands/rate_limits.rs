@@ -1,7 +1,7 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::{self, CsvRenderable, OutputFormat, Tableable};
-use reqwest_oauth1::OAuthClientProvider;
+use crate::providers::oauth1::{self, OAuthClientProvider};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -61,9 +61,9 @@ impl CsvRenderable for RateLimitsDisplay {
     }
 }
 
-fn oauth_secrets(ctx: &AppContext) -> reqwest_oauth1::Secrets<'_> {
+fn oauth_secrets(ctx: &AppContext) -> oauth1::Secrets<'_> {
     let k = &ctx.config.keys;
-    reqwest_oauth1::Secrets::new(&k.api_key, &k.api_secret)
+    oauth1::Secrets::new(&k.api_key, &k.api_secret)
         .token(&k.access_token, &k.access_token_secret)
 }
 

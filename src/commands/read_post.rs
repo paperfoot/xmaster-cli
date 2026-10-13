@@ -16,7 +16,10 @@ struct PostDisplay {
     likes: u64,
     retweets: u64,
     replies: u64,
-    impressions: u64,
+    /// Absent when unknown (FxTwitter has no view count for some posts, and
+    /// X shows none for posts from before views existed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    impressions: Option<u64>,
     bookmarks: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     date: Option<String>,
@@ -38,7 +41,9 @@ impl Tableable for PostDisplay {
         table.add_row(vec!["Likes", &self.likes.to_string()]);
         table.add_row(vec!["Retweets", &self.retweets.to_string()]);
         table.add_row(vec!["Replies", &self.replies.to_string()]);
-        table.add_row(vec!["Impressions", &self.impressions.to_string()]);
+        if let Some(n) = self.impressions {
+            table.add_row(vec!["Impressions", &n.to_string()]);
+        }
         table.add_row(vec!["Bookmarks", &self.bookmarks.to_string()]);
         if let Some(ref date) = self.date {
             table.add_row(vec!["Date", date]);
@@ -101,7 +106,7 @@ pub async fn execute(
         likes: metrics.map(|m| m.like_count).unwrap_or(0),
         retweets: metrics.map(|m| m.retweet_count).unwrap_or(0),
         replies: metrics.map(|m| m.reply_count).unwrap_or(0),
-        impressions: metrics.map(|m| m.impression_count).unwrap_or(0),
+        impressions: metrics.map(|m| m.impression_count).filter(|&n| n > 0),
         bookmarks: metrics.map(|m| m.bookmark_count).unwrap_or(0),
         date: tweet.created_at,
         media_urls: tweet.media_urls,

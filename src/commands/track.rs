@@ -1,6 +1,6 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
-use crate::intel::tracker::PostTracker;
+use crate::intel::store::{IntelStore, REPLY_BACK_HOURS};
 use crate::output::{self, OutputFormat};
 use crate::providers::xapi::XApi;
 use std::sync::Arc;
@@ -12,20 +12,20 @@ pub async fn track_run(
     ctx: Arc<AppContext>,
     format: OutputFormat,
 ) -> Result<(), XmasterError> {
-    let tracker = PostTracker::open()?;
-    let summary = tracker.snapshot_all_recent(&ctx, 48).await?;
+    let store = IntelStore::open()?;
+    let summary = store.snapshot_all_recent(&ctx, 48).await?;
 
     // Check pending replies for reply-backs (silent, never fails the run)
-    let reply_backs_checked = check_reply_backs(&ctx).await;
+    let reply_backs_checked = check_reply_backs(&ctx, &store).await;
 
     // Auto-promote high-performing reply targets into the watchlist
     // (silent on errors, never fails the run)
-    let promoted = auto_promote_hot_reply_targets();
+    let promoted = auto_promote_hot_reply_targets(&store);
 
     // Surface cross-post candidates — standalone posts that crossed 5k
     // impressions in the last 14d are worth repurposing on other platforms
     // (IG stills, LinkedIn). The clinstagram skill can take the screenshot.
-    let cross_post_candidates = find_cross_post_candidates_safe();
+    let cross_post_candidates = store.find_cross_post_candidates(5_000, 14, 5).unwrap_or_default();
 
     let mut meta = serde_json::json!({});
     if reply_backs_checked > 0 {
@@ -48,18 +48,6 @@ pub async fn track_run(
     Ok(())
 }
 
-/// Safe wrapper around `find_cross_post_candidates` — returns empty on any
-/// store failure so track_run never breaks just because the amplification
-/// hint couldn't be computed.
-fn find_cross_post_candidates_safe() -> Vec<crate::intel::store::CrossPostCandidate> {
-    match crate::intel::store::IntelStore::open() {
-        Ok(store) => store
-            .find_cross_post_candidates(5_000, 14, 5)
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
-
 /// Run the store-layer hot-target selector and insert each winner into the
 /// watchlist. Returns the list of usernames that were freshly promoted so the
 /// caller can surface it in the track-run output metadata.
@@ -69,15 +57,9 @@ fn find_cross_post_candidates_safe() -> Vec<crate::intel::store::CrossPostCandid
 /// Guardrail: target_followers >= 1_000
 /// Freshness: last 14 days
 /// Already-watchlisted targets are excluded by the SQL join.
-fn auto_promote_hot_reply_targets() -> Vec<String> {
-    let store = match crate::intel::store::IntelStore::open() {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    let hot = match store.find_hot_reply_targets(100, 1, 1_000, 24 * 14) {
-        Ok(h) => h,
-        Err(_) => return Vec::new(),
+fn auto_promote_hot_reply_targets(store: &IntelStore) -> Vec<String> {
+    let Ok(hot) = store.find_hot_reply_targets(100, 1, 1_000, 24 * 14) else {
+        return Vec::new();
     };
 
     hot.into_iter()
@@ -91,46 +73,38 @@ fn auto_promote_hot_reply_targets() -> Vec<String> {
         .collect()
 }
 
-/// Check if targets replied back to our replies.
-async fn check_reply_backs(ctx: &Arc<AppContext>) -> u32 {
-    let store = match crate::intel::store::IntelStore::open() {
-        Ok(s) => s,
-        Err(_) => return 0,
+/// Check whether targets replied to our replies; returns how many were read.
+/// A reply-back closes the row as `true`. No reply-back leaves it pending
+/// until the reply is [`REPLY_BACK_HOURS`] old; only then is it closed as
+/// `false`. Checks back off with age (see `get_pending_replies`), and replies
+/// up to a day past the limit still get their final check.
+async fn check_reply_backs(ctx: &Arc<AppContext>, store: &IntelStore) -> u32 {
+    let Ok(due) = store.get_pending_replies(REPLY_BACK_HOURS + 24) else {
+        return 0;
     };
-
-    let pending = match store.get_pending_replies(72) {
-        Ok(p) => p,
-        Err(_) => return 0,
-    };
-
-    if pending.is_empty() {
+    if due.is_empty() {
         return 0;
     }
 
     let api = XApi::new(ctx.clone());
+    let now = chrono::Utc::now().timestamp();
     let mut checked = 0u32;
 
-    for pr in &pending {
-        // Fetch replies to our reply tweet
-        match api.get_replies(&pr.reply_tweet_id, 10).await {
-            Ok(replies) => {
-                let target_user = pr.target_username.as_deref().unwrap_or("");
-                let got_reply = replies.iter().any(|r| {
-                    r.author_username.as_deref()
-                        .map(|u| u.to_lowercase() == target_user.to_lowercase())
-                        .unwrap_or(false)
-                });
-                let _ = store.set_reply_back(pr.id, got_reply);
-                checked += 1;
-            }
-            Err(_) => {
-                // Timeout old pending replies (>72h without check = assume no reply)
-                let age_hours = (chrono::Utc::now().timestamp() - pr.performed_at) / 3600;
-                if age_hours > 72 {
-                    let _ = store.set_reply_back(pr.id, false);
-                    checked += 1;
-                }
-            }
+    for pr in &due {
+        let target = pr.target_username.as_deref().unwrap_or("");
+        let got_reply = match api.get_replies(&pr.reply_tweet_id, 10).await {
+            Ok(replies) => replies.iter().any(|r| {
+                r.author_username
+                    .as_deref()
+                    .is_some_and(|u| u.eq_ignore_ascii_case(target))
+            }),
+            // A failed read (e.g. the reply was deleted) counts as no reply-back.
+            Err(_) => false,
+        };
+        let closed = now - pr.performed_at >= REPLY_BACK_HOURS * 3600;
+        let verdict = (got_reply || closed).then_some(got_reply);
+        if store.record_reply_check(pr.id, verdict).is_ok() {
+            checked += 1;
         }
     }
 
@@ -142,8 +116,7 @@ pub async fn track_status(
     _ctx: Arc<AppContext>,
     format: OutputFormat,
 ) -> Result<(), XmasterError> {
-    let tracker = PostTracker::open()?;
-    let status = tracker.tracking_status()?;
+    let status = IntelStore::open()?.tracking_status()?;
 
     if status.total == 0 {
         return Err(XmasterError::NotFound(
@@ -170,7 +143,7 @@ pub async fn track_followers(
     let following_count = metrics.map(|m| m.following_count as i64).unwrap_or(0);
     let tweet_count = metrics.map(|m| m.tweet_count as i64).unwrap_or(0);
 
-    let tracker = PostTracker::open()?;
+    let tracker = IntelStore::open()?;
 
     // Snapshot account stats
     let snapshot = tracker.snapshot_account(followers_count, following_count, tweet_count)?;
@@ -206,8 +179,7 @@ pub async fn follower_growth(
     format: OutputFormat,
     days: i64,
 ) -> Result<(), XmasterError> {
-    let tracker = PostTracker::open()?;
-    let history = tracker.follower_history(days)?;
+    let history = IntelStore::open()?.follower_history(days)?;
 
     if history.is_empty() {
         return Err(XmasterError::NotFound(

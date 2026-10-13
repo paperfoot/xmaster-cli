@@ -5,7 +5,9 @@
 //! Every timeline is `instructions[] → entries[] → content`, where content is
 //! a single item, a module of items (conversation threads), or a cursor.
 
-use crate::providers::xapi::{ReferencedTweet, TweetData, TweetMetrics};
+use crate::providers::xapi::{
+    ReferencedTweet, TweetData, TweetLookup, TweetLookupPublicMetrics, TweetMetrics, UserMetrics, UserResponse,
+};
 use serde_json::Value;
 
 /// One page of a timeline: its posts in display order and the cursor for the
@@ -157,8 +159,58 @@ pub fn parse_tweet(result: &Value) -> Option<TweetData> {
             impression_count: u64_at(r, "/views/count"),
             bookmark_count: u64_at(legacy, "/bookmark_count"),
         }),
-        author_followers: user.and_then(|u| u.pointer("/legacy/followers_count")).and_then(Value::as_u64),
+        author_followers: user
+            .and_then(|u| u.pointer("/relationship_counts/followers").or_else(|| u.pointer("/legacy/followers_count")))
+            .and_then(Value::as_u64),
         media_urls,
+    })
+}
+
+/// A `tweet_results.result` → the batch-lookup shape plus the author's ID.
+pub fn parse_lookup(result: &Value) -> Option<(TweetLookup, String)> {
+    let t = parse_tweet(result)?;
+    let r = result.get("tweet").unwrap_or(result);
+    let m = t.public_metrics?;
+    let lookup = TweetLookup {
+        id: t.id,
+        created_at: t.created_at,
+        public_metrics: Some(TweetLookupPublicMetrics {
+            like_count: m.like_count,
+            retweet_count: m.retweet_count,
+            reply_count: m.reply_count,
+            impression_count: m.impression_count,
+            quote_count: u64_at(r, "/legacy/quote_count"),
+            bookmark_count: m.bookmark_count,
+        }),
+        non_public_metrics: None,
+    };
+    Some((lookup, t.author_id?))
+}
+
+/// A `user_results.result` (or `data.user.result`) → the API's user shape.
+/// X has been moving fields out of `legacy` (name, handle and avatar to
+/// `core`/`avatar`, counts to `relationship_counts`/`tweet_counts`, bio to
+/// `profile_bio`); each field reads the new place first, then `legacy`.
+pub fn parse_user(r: &Value) -> Option<UserResponse> {
+    let first = |paths: &[&str]| paths.iter().find_map(|p| str_at(r, p)).map(str::to_string);
+    let count = |paths: &[&str]| paths.iter().find(|p| r.pointer(p).is_some()).map_or(0, |p| u64_at(r, p));
+    Some(UserResponse {
+        id: str_at(r, "/rest_id")?.to_string(),
+        name: first(&["/core/name", "/legacy/name"]).unwrap_or_default(),
+        username: first(&["/core/screen_name", "/legacy/screen_name"])?,
+        description: first(&["/profile_bio/description", "/legacy/description"]),
+        public_metrics: Some(UserMetrics {
+            followers_count: count(&["/relationship_counts/followers", "/legacy/followers_count"]),
+            following_count: count(&["/relationship_counts/following", "/legacy/friends_count"]),
+            tweet_count: count(&["/tweet_counts/tweets", "/legacy/statuses_count"]),
+            listed_count: count(&["/legacy/listed_count"]),
+        }),
+        profile_image_url: first(&["/avatar/image_url", "/legacy/profile_image_url_https"]),
+        verified: r
+            .get("is_blue_verified")
+            .or_else(|| r.pointer("/verification/verified"))
+            .and_then(Value::as_bool),
+        created_at: first(&["/core/created_at", "/legacy/created_at"]).as_deref().and_then(iso_date),
     })
 }
 
@@ -267,6 +319,41 @@ mod tests {
         assert_eq!(t.text, "RT @alice: original text");
         let refs = t.referenced_tweets.unwrap();
         assert_eq!((refs[0].ref_type.as_str(), refs[0].id.as_str()), ("retweeted", "20"));
+    }
+
+    #[test]
+    fn parses_user_new_and_legacy_layouts() {
+        // October 2026 layout: no `legacy` at all
+        let u = parse_user(&json!({
+            "rest_id": "12", "is_blue_verified": true, "verification": { "verified": false },
+            "core": { "name": "Jack", "screen_name": "jack", "created_at": "Tue Mar 21 20:50:14 +0000 2006" },
+            "avatar": { "image_url": "https://pbs.twimg.com/a.jpg" },
+            "profile_bio": { "description": "bio" },
+            "relationship_counts": { "followers": 5, "following": 6 },
+            "tweet_counts": { "tweets": 7, "media_tweets": 1 }
+        }))
+        .unwrap();
+        assert_eq!((u.id.as_str(), u.username.as_str(), u.name.as_str()), ("12", "jack", "Jack"));
+        assert_eq!(u.description.as_deref(), Some("bio"));
+        let m = u.public_metrics.unwrap();
+        assert_eq!((m.followers_count, m.following_count, m.tweet_count, m.listed_count), (5, 6, 7, 0));
+        assert_eq!(u.created_at.as_deref(), Some("2006-03-21T20:50:14.000Z"));
+        assert_eq!(u.verified, Some(true));
+        let old = parse_user(&json!({ "rest_id": "1", "legacy": {
+            "screen_name": "a", "name": "A", "followers_count": 9, "listed_count": 2 } })).unwrap();
+        assert_eq!(old.username, "a");
+        assert_eq!(old.public_metrics.unwrap().followers_count, 9);
+        assert!(parse_user(&json!({ "rest_id": "1", "legacy": {} })).is_none());
+    }
+
+    #[test]
+    fn lookup_carries_quotes_and_author() {
+        let mut t = tweet("40", "zed", "hi");
+        t["legacy"]["quote_count"] = json!(4);
+        let (l, author) = parse_lookup(&t).unwrap();
+        assert_eq!((l.id.as_str(), author.as_str()), ("40", "100"));
+        let m = l.public_metrics.unwrap();
+        assert_eq!((m.quote_count, m.impression_count, m.like_count), (4, 1234, 5));
     }
 
     #[test]
