@@ -135,7 +135,7 @@ impl IntelStore {
         let in_window = rows.len() as u32;
         let due: Vec<(String, i64)> = rows
             .into_iter()
-            .filter(|(_, posted, last)| last.is_none_or(|last| (now_ts - last) * 4 >= now_ts - posted))
+            .filter(|(_, posted, last)| snapshot_due(now_ts, *posted, *last))
             .map(|(id, posted, _)| (id, posted))
             .collect();
         let not_due = in_window - due.len() as u32;
@@ -713,6 +713,12 @@ impl IntelStore {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Snapshot decay: due before the first snapshot, then once the time since
+/// the last one reaches a quarter of the post's age.
+fn snapshot_due(now: i64, posted_at: i64, last_snapshot: Option<i64>) -> bool {
+    last_snapshot.is_none_or(|last| (now - last) * 4 >= now - posted_at)
+}
+
 /// Timing-slot key: local day/hour with UTC fallback for pre-migration rows.
 /// Alias contract for these fragments: `posts p`, `metric_snapshots ms`.
 const SLOT_KEY_SQL: &str =
@@ -952,5 +958,22 @@ impl Tableable for NextPostSuggestion {
             ]);
         }
         table
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_due;
+
+    #[test]
+    fn snapshots_decay_with_post_age() {
+        let h = 3600;
+        assert!(snapshot_due(10 * h, 9 * h, None), "first snapshot is always due");
+        // 2h-old post: due 30 min after the last snapshot, not 20.
+        assert!(!snapshot_due(2 * h, 0, Some(2 * h - 1200)));
+        assert!(snapshot_due(2 * h, 0, Some(2 * h - 1800)));
+        // 40h-old post: 9h since the last snapshot isn't enough, 10h is.
+        assert!(!snapshot_due(40 * h, 0, Some(31 * h)));
+        assert!(snapshot_due(40 * h, 0, Some(30 * h)));
     }
 }

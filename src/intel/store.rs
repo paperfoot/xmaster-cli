@@ -1449,6 +1449,56 @@ mod tests {
         assert_eq!(store.latest_snapshot_full("reply_post").unwrap().unwrap().impressions, 800);
     }
 
+    /// A3: no reply-back keeps a reply pending until REPLY_BACK_HOURS; checks
+    /// back off with age; past the limit a reply is due once for its final
+    /// verdict; beyond the window it is left alone.
+    #[test]
+    fn reply_back_checks_back_off_and_close_after_72h() {
+        let store = test_store();
+        let now = Utc::now().timestamp();
+        let reply = |id: &str, age_h: i64, checked_ago_s: Option<i64>| {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO engagement_actions
+                        (action_type, target_username, performed_at, reply_tweet_id, reply_checked_at)
+                     VALUES ('reply', 'someone', ?1, ?2, ?3)",
+                    params![now - age_h * 3600, id, checked_ago_s.map(|s| now - s)],
+                )
+                .unwrap();
+        };
+        reply("never_checked", 1, None);
+        reply("checked_recently", 10, Some(3600)); // 1h since check < 5h (half of 10h)
+        reply("check_due", 10, Some(6 * 3600)); // 6h since check >= 5h
+        reply("final_check", 80, Some(60)); // past 72h: due regardless of backoff
+        reply("too_old", 100, None); // outside the 96h window
+
+        let due: Vec<String> = store
+            .get_pending_replies(REPLY_BACK_HOURS + 24)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.reply_tweet_id)
+            .collect();
+        assert_eq!(due, vec!["never_checked", "check_due", "final_check"]);
+
+        // A check without a verdict keeps the reply pending but moves its clock.
+        let id: i64 = store
+            .conn
+            .query_row("SELECT id FROM engagement_actions WHERE reply_tweet_id = 'never_checked'", [], |r| r.get(0))
+            .unwrap();
+        store.record_reply_check(id, None).unwrap();
+        let verdict: Option<bool> = store
+            .conn
+            .query_row("SELECT got_reply_back FROM engagement_actions WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(verdict, None);
+        assert!(!store
+            .get_pending_replies(REPLY_BACK_HOURS + 24)
+            .unwrap()
+            .iter()
+            .any(|p| p.id == id));
+    }
+
     #[test]
     fn discovered_posts_upsert_and_query() {
         let store = test_store();
