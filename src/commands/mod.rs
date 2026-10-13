@@ -99,6 +99,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Schedule { .. } => "schedule",
         Commands::Skill { .. } => "skill",
         Commands::Rails { .. } => "rails",
+        Commands::Contract { .. } => "contract",
     }
 }
 
@@ -226,6 +227,34 @@ pub(crate) fn reclassify_403(err: XmasterError) -> XmasterError {
     }
 }
 
+/// Commands that need no config file, network or database, so they answer
+/// even when config.toml is broken. `None` for every other command.
+pub fn dispatch_local(cli: &Cli, format: OutputFormat) -> Option<Result<(), XmasterError>> {
+    match &cli.command {
+        Commands::AgentInfo { command, tips } => Some(agent_info::execute(command.as_deref(), tips.as_deref())),
+        Commands::Config { action: ConfigCommands::Path } => Some(config_cmd::path(format)),
+        Commands::Contract { code } => Some(contract(*code)),
+        _ => None,
+    }
+}
+
+/// Hidden `contract <code>`: leave through the normal output and error path
+/// with exit code 0-5, so tests can pin each code's envelope.
+fn contract(code: i32) -> Result<(), XmasterError> {
+    match code {
+        0 => {
+            crate::output::json::render(&serde_json::json!({"contract": true, "exit_code": 0}), None);
+            Ok(())
+        }
+        1 => Err(XmasterError::ServerError { status: 503 }),
+        2 => Err(XmasterError::Config("contract: config error".into())),
+        3 => Err(XmasterError::InvalidInput("contract: bad input".into())),
+        4 => Err(XmasterError::RateLimited { provider: "x", reset_at: 0 }),
+        5 => Err(XmasterError::Forbidden { reason: "contract: blocked".into(), x_type: None }),
+        other => Err(XmasterError::InvalidInput(format!("unknown contract code {other}; valid: 0-5"))),
+    }
+}
+
 pub async fn dispatch(
     ctx: Arc<AppContext>,
     cli: &Cli,
@@ -291,6 +320,7 @@ pub async fn dispatch(
         Commands::Following { username, count } => social::following(ctx, format, username, *count).await,
         Commands::Config { action } => match action {
             ConfigCommands::Show => config_cmd::show(ctx, format).await,
+            ConfigCommands::Path => config_cmd::path(format),
             ConfigCommands::Get { key } => config_cmd::get(format, key).await,
             ConfigCommands::Set { key, value } => config_cmd::set(format, key, value).await,
             ConfigCommands::Check => config_cmd::check(ctx, format).await,
@@ -298,10 +328,7 @@ pub async fn dispatch(
             ConfigCommands::Auth => { config_cmd::auth(ctx, format).await }
             ConfigCommands::WebLogin => { config_cmd::web_login(format).await }
         },
-        Commands::AgentInfo { tips } => {
-            agent_info::execute(format, tips.as_deref());
-            Ok(())
-        }
+        Commands::AgentInfo { .. } | Commands::Contract { .. } => dispatch_local(cli, format).unwrap_or(Ok(())),
         Commands::Engage { action } => match action {
             EngageCommands::Inbox { id, count, quote_reply_count } => {
                 engage_inbox::execute(ctx, format, id, *count, *quote_reply_count).await

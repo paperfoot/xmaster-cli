@@ -226,6 +226,30 @@ pub async fn show(_ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
     Ok(())
 }
 
+#[derive(Serialize)]
+struct ConfigPath {
+    path: String,
+    exists: bool,
+}
+
+impl Tableable for ConfigPath {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["Path", "Exists"]);
+        table.add_row(vec![self.path.clone(), self.exists.to_string()]);
+        table
+    }
+}
+
+/// `config path`: where config.toml lives. Reads nothing, so it answers
+/// even when the file is missing or broken.
+pub fn path(format: OutputFormat) -> Result<(), XmasterError> {
+    let path = config::config_path();
+    let display = ConfigPath { exists: path.exists(), path: path.to_string_lossy().into_owned() };
+    output::render(format, &display, None);
+    Ok(())
+}
+
 pub async fn get(format: OutputFormat, key: &str) -> Result<(), XmasterError> {
     let cfg = config::load_config()?;
     let value = match key {

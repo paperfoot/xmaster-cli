@@ -1,27 +1,50 @@
 use clap::{Parser, Subcommand};
 
+/// Root `--help` footer: the few facts that save an agent a wrong first call.
+const HELP_FOOTER: &str = "\
+Tips:
+  - Piped output is compact JSON {version,status,data}; errors go to stderr as
+    {error:{code,message,suggestion,retryable}} with exit codes 0-5
+  - `xmaster agent-info`: every command on one line. `agent-info --command \"engage feed\"`:
+    that command's arguments, flags, defaults and allowed values
+  - Posts take an ID or URL; users take a handle, @handle or profile URL
+  - Collections take -n N (also -c, --count, --limit)
+  - post, reply and quote take --dry-run; XMASTER_READ_ONLY=1 blocks every write to X
+  - `xmaster config web-login` once: free reads, and replies to any thread
+
+Examples:
+  xmaster engage feed \"longevity\" -n 5
+  xmaster conversation https://x.com/user/status/1234567890
+  xmaster reply 1234567890 \"The dose-response point is the key one\" --dry-run
+  xmaster metrics 1234567890 1234567891";
+
 #[derive(Parser)]
 #[command(
     name = "xmaster",
     version,
     about = "X CLI for AI agents and people: read, post, reply anywhere, like, repost, search, DM",
-    long_about = "Built by 199 Biotechnologies for AI agents and humans.\n\nAgent-friendly: auto-JSON when piped, semantic exit codes, structured errors."
+    long_about = "X CLI for AI agents and people: read, post, reply anywhere, like, repost, search, DM.\nBuilt by 199 Biotechnologies.",
+    after_long_help = HELP_FOOTER
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output as JSON (auto-enabled when piped)
+    /// Force JSON (the default when piped)
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Output as CSV (list commands: timeline, search, replies, metrics, ...)
+    /// CSV for list commands (timeline, search, replies, metrics, ...)
     #[arg(long, global = true)]
     pub csv: bool,
 
-    /// Pretty-print JSON (compact by default when piped, to save agent tokens)
+    /// Indented JSON (compact when piped, to save tokens)
     #[arg(long, global = true)]
     pub pretty: bool,
+
+    /// Hide notices for people; data and errors still print
+    #[arg(long, global = true)]
+    pub quiet: bool,
 }
 
 #[derive(Subcommand)]
@@ -71,7 +94,7 @@ pub enum Commands {
         #[arg(value_parser = post_id)]
         id: String,
         /// Max replies to include (0 for none)
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
     },
 
@@ -145,7 +168,7 @@ pub enum Commands {
         #[arg(long, value_parser = handle)]
         user: Option<String>,
         /// Number of posts
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
         /// Only show posts after this time (e.g. "12h", "7d", or ISO 8601)
         #[arg(long)]
@@ -161,7 +184,7 @@ pub enum Commands {
     /// View your mentions
     Mentions {
         /// Number of mentions
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
         /// Only show mentions after this post ID
         #[arg(long, value_parser = post_id)]
@@ -177,7 +200,7 @@ pub enum Commands {
         #[arg(long, default_value = "recent", value_parser = ["recent", "latest", "top", "relevancy", "relevant", "popular"])]
         mode: String,
         /// Number of results
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
         /// Only show posts after this time (e.g. "12h", "7d", or ISO 8601)
         #[arg(long)]
@@ -192,7 +215,7 @@ pub enum Commands {
         /// Search query
         query: String,
         /// Number of results
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
         /// Filter by date (from)
         #[arg(long)]
@@ -237,7 +260,7 @@ pub enum Commands {
         #[arg(value_parser = handle)]
         username: String,
         /// Number of results
-        #[arg(long, short, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
     },
 
@@ -247,7 +270,7 @@ pub enum Commands {
         #[arg(value_parser = handle)]
         username: String,
         /// Number of results
-        #[arg(long, short, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
     },
 
@@ -257,8 +280,13 @@ pub enum Commands {
         action: ConfigCommands,
     },
 
-    /// Show agent-readable capabilities (--tips for strategy and X ranking notes)
+    /// Commands for agents, as raw JSON: one line each, or one in full with --command
+    #[command(visible_alias = "info")]
     AgentInfo {
+        /// One command or group in full: arguments, flags, defaults, allowed values
+        /// (e.g. "engage feed", "engage", "repost")
+        #[arg(long, value_name = "PATH", conflicts_with = "tips")]
+        command: Option<String>,
         /// Strategy notes: all, or one topic (algorithm, replies, posting, growth, metrics, avoid)
         #[arg(
             long,
@@ -351,7 +379,7 @@ pub enum Commands {
         #[arg(value_parser = post_id)]
         id: String,
         /// Max replies to fetch
-        #[arg(long, short, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
         /// Show every reply, without JEV trimming
         #[arg(long)]
@@ -364,7 +392,7 @@ pub enum Commands {
         #[arg(value_parser = post_id)]
         id: String,
         /// Max users to fetch (1-100)
-        #[arg(long, short, alias = "limit", default_value = "50")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "50")]
         count: usize,
     },
 
@@ -375,7 +403,7 @@ pub enum Commands {
         #[arg(value_parser = post_id)]
         id: String,
         /// Max users to fetch (1-100)
-        #[arg(long, short, alias = "limit", default_value = "50")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "50")]
         count: usize,
     },
 
@@ -385,7 +413,7 @@ pub enum Commands {
         #[arg(value_parser = post_id)]
         id: String,
         /// Max quotes to fetch (10-100)
-        #[arg(long, short, alias = "limit", default_value = "50")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "50")]
         count: usize,
     },
 
@@ -408,7 +436,7 @@ pub enum Commands {
     /// Who reposts your posts most
     Amplifiers {
         /// Max reposts to scan (10-100)
-        #[arg(long, short, alias = "limit", default_value = "50")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "50")]
         count: usize,
     },
 
@@ -476,7 +504,7 @@ pub enum Commands {
         #[arg(long, default_value = "false")]
         long: bool,
         /// Number of results
-        #[arg(long, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
     },
 
@@ -530,6 +558,12 @@ pub enum Commands {
     Rails {
         #[command(subcommand)]
         action: RailsCommands,
+    },
+
+    /// Exit with a given code (0-5) and its envelope, for contract tests
+    #[command(hide = true)]
+    Contract {
+        code: i32,
     },
 }
 
@@ -625,7 +659,7 @@ pub enum EngageCommands {
         #[arg(value_parser = post_id)]
         id: String,
         /// Max direct replies and quote posts to fetch
-        #[arg(long, short, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
         /// Max replies to inspect under each quote post (0 disables quote-comment scan)
         #[arg(long, default_value = "5")]
@@ -640,7 +674,7 @@ pub enum EngageCommands {
         #[arg(long, default_value = "1000")]
         min_followers: u32,
         /// Number of recommendations
-        #[arg(long, short, alias = "limit", default_value = "5")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "5")]
         count: usize,
     },
     /// Accounts you track without following
@@ -672,7 +706,7 @@ pub enum EngageCommands {
         #[arg(long, default_value = "30")]
         max_age_mins: u64,
         /// Number of posts to return (default 10; with JEV, its best 5 worth a reply)
-        #[arg(long, short, alias = "limit")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n')]
         count: Option<usize>,
     },
     /// Small accounts replying under a big post, for peer replies
@@ -693,7 +727,7 @@ pub enum EngageCommands {
         #[arg(long, default_value = "5000")]
         max_followers: u64,
         /// Number of swarm targets to return
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
     },
     /// Accounts where your past replies did best
@@ -716,7 +750,7 @@ pub enum EngageCommands {
         #[arg(long, default_value = "1")]
         min_samples: i64,
         /// Number of results
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
         /// Sort order: score | avg-impressions | avg-profile-clicks | reply-back-rate
         #[arg(long, default_value = "score")]
@@ -861,7 +895,7 @@ pub enum ListCommands {
         #[arg(value_parser = numeric_id)]
         list_id: String,
         /// Number of posts
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
     },
     /// List the members of a list
@@ -870,13 +904,13 @@ pub enum ListCommands {
         #[arg(value_parser = numeric_id)]
         list_id: String,
         /// Number of members to fetch (1-100)
-        #[arg(long, short, alias = "limit", default_value = "50")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "50")]
         count: usize,
     },
     /// List your owned lists
     Mine {
         /// Number of results
-        #[arg(long, short, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
     },
 }
@@ -894,7 +928,7 @@ pub enum DmCommands {
     /// View DM inbox
     Inbox {
         /// Number of conversations
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
     },
     /// View a DM thread
@@ -902,7 +936,7 @@ pub enum DmCommands {
         /// Conversation ID
         id: String,
         /// Number of messages
-        #[arg(long, short, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
     },
 }
@@ -911,6 +945,8 @@ pub enum DmCommands {
 pub enum ConfigCommands {
     /// Show current configuration (keys masked)
     Show,
+    /// Print the config file path (it may not exist yet)
+    Path,
     /// Get a single configuration value (raw, no masking for non-secret keys)
     Get {
         /// Key path (e.g., style.voice, account.premium)
@@ -937,7 +973,7 @@ pub enum ConfigCommands {
 pub enum BookmarkCommands {
     /// List recent bookmarks
     List {
-        #[arg(long, short, alias = "limit", default_value = "10")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
         /// Show only unread
         #[arg(long)]
@@ -946,7 +982,7 @@ pub enum BookmarkCommands {
     /// Sync bookmarks to the local archive (keeps posts deleted on X)
     Sync {
         /// Number of bookmarks to fetch from X
-        #[arg(long, short, alias = "limit", default_value = "100")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "100")]
         count: usize,
     },
     /// Search saved bookmarks locally
@@ -978,9 +1014,81 @@ pub enum BookmarkCommands {
         /// Folder ID
         id: String,
         /// Number of bookmarks to fetch
-        #[arg(long, short, alias = "limit", default_value = "20")]
+        #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "20")]
         count: usize,
     },
+}
+
+/// A clap parse error as `(message, suggestion)` for the error envelope:
+/// clap's text without its usage block, and a fix scoped to the command the
+/// arguments name (`argv` without the program name).
+pub fn explain_parse_error(e: &clap::Error, argv: &[String]) -> (String, String) {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    use clap::CommandFactory;
+
+    let text = e.to_string();
+    let message = text
+        .lines()
+        .map(str::trim)
+        .take_while(|l| !l.starts_with("Usage:"))
+        .filter(|l| !l.is_empty() && !l.starts_with("tip:"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let message = message.strip_prefix("error: ").unwrap_or(&message).to_string();
+    let usage = text.lines().find_map(|l| l.trim().strip_prefix("Usage: ")).map(str::to_string);
+
+    // The deepest command the arguments name: `timeline`, `engage feed`.
+    let mut root = Cli::command();
+    root.build();
+    let mut cmd = &root;
+    for word in argv.iter().filter(|w| !w.starts_with('-')) {
+        match cmd.find_subcommand(word) {
+            Some(sub) => cmd = sub,
+            None => break,
+        }
+    }
+    let shown = cmd.get_bin_name().unwrap_or("xmaster").to_string();
+    let first = |kind| match e.get(kind) {
+        Some(ContextValue::String(s)) => Some(s.clone()),
+        Some(ContextValue::Strings(v)) => v.first().cloned(),
+        _ => None,
+    };
+
+    let mut fix = Vec::new();
+    if let Some(arg) = first(ContextKind::SuggestedArg) {
+        fix.push(format!("Did you mean {arg}?"));
+    } else if let Some(sub) = first(ContextKind::SuggestedSubcommand) {
+        fix.push(format!("Did you mean `{shown} {sub}`?"));
+    } else if e.kind() == ErrorKind::UnknownArgument {
+        let flags: Vec<String> = cmd
+            .get_arguments()
+            .filter(|a| !a.is_positional() && !a.is_hide_set() && !a.is_global_set() && a.get_id() != "help")
+            .filter_map(|a| {
+                let long = a.get_long()?;
+                Some(match a.get_short() {
+                    Some(s) => format!("-{s}/--{long}"),
+                    None => format!("--{long}"),
+                })
+            })
+            .collect();
+        fix.push(if flags.is_empty() {
+            format!("`{shown}` takes no flags.")
+        } else {
+            format!("Flags for `{shown}`: {}.", flags.join(", "))
+        });
+    } else if matches!(e.kind(), ErrorKind::InvalidSubcommand | ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand) {
+        if std::ptr::eq(cmd, &root) {
+            fix.push("`xmaster agent-info` lists every command.".into());
+        } else {
+            let subs: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).filter(|n| *n != "help").collect();
+            fix.push(format!("Commands under `{shown}`: {}.", subs.join(", ")));
+        }
+    }
+    match usage {
+        Some(usage) if !std::ptr::eq(cmd, &root) => fix.push(format!("Usage: {usage}; `{shown} --help` for details")),
+        _ => fix.push(format!("`{shown} --help` shows the usage")),
+    }
+    (message, fix.join(" "))
 }
 
 /// clap parser: a post ID or post URL (x.com, twitter.com, mirrors),

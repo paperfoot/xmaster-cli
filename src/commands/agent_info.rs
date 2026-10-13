@@ -1,27 +1,44 @@
-//! `xmaster agent-info`: what an agent needs to drive xmaster, in under 6 KB.
-//! Commands come from clap and exit codes from `errors::EXIT_CODES`, so
-//! neither can drift. Strategy and X-algorithm notes sit behind
-//! `--tips [topic]`, loaded only when an agent asks.
+//! `xmaster agent-info`: raw JSON, the same in a terminal and a pipe.
+//!
+//! The default manifest is small enough to load every session: one line per
+//! command, generated from clap so it can't drift from the parser. `--command
+//! PATH` returns one command or group in full (arguments, flags, defaults,
+//! allowed values); `--tips [topic]` returns strategy and X ranking notes.
 
 use crate::config;
-use crate::errors::EXIT_CODES;
-use crate::output::{self, OutputFormat, Tableable};
-use clap::{ArgAction, CommandFactory};
+use crate::errors::{XmasterError, EXIT_CODES};
+use crate::output;
+use clap::{ArgAction, Command, CommandFactory};
+use serde::ser::{SerializeMap, Serializer};
 use serde::Serialize;
+use serde_json::{json, Map, Value};
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
 /// Topics accepted by `agent-info --tips <topic>`.
 pub const TIP_TOPICS: &[&str] = &["all", "algorithm", "replies", "posting", "growth", "metrics", "avoid"];
 
-/// Groups listed leaf by leaf; other groups collapse to one line.
-const EXPAND: &[&str] = &["engage"];
-/// Commands for people, not agents.
-const SKIP_COMMANDS: &[&str] = &["help", "star"];
-/// Flags left out of the command lines: global, described once in `usage`,
-/// or tuning thresholds (`--min-*`, `--max-*`) that `--help` lists.
-const SKIP_FLAGS: &[&str] = &["help", "version", "json", "csv", "pretty", "count"];
+/// Tuning thresholds (`--min-*`, `--max-*`) stay out of the one-line form;
+/// `--command` lists them.
 const SKIP_FLAG_PREFIXES: &[&str] = &["min-", "max-"];
+/// Groups listed leaf by leaf in the default manifest; others take one line.
+const EXPAND: &[&str] = &["engage"];
+/// Commands for people, not agents (`star` opens a browser).
+const SKIP_COMMANDS: &[&str] = &["star"];
+
+/// A JSON object that keeps insertion order (clap's: most-used first).
+struct Ordered<V>(Vec<(String, V)>);
+
+impl<V: Serialize> Serialize for Ordered<V> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(self.0.len()))?;
+        for (k, v) in &self.0 {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
+}
 
 #[derive(Serialize)]
 struct AgentInfo {
@@ -31,9 +48,9 @@ struct AgentInfo {
     usage: &'static str,
     setup: [&'static str; 4],
     workflows: [&'static str; 5],
-    commands: Vec<String>,
+    commands: Ordered<String>,
     exit_codes: BTreeMap<String, &'static str>,
-    errors: &'static str,
+    envelope: Envelope,
     cost: Cost,
     pacing: &'static str,
     jev: Jev,
@@ -41,6 +58,23 @@ struct AgentInfo {
     tips: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     writing_style: Option<&'static str>,
+    global_flags: Ordered<Value>,
+    config: ConfigInfo,
+    auto_json_when_piped: bool,
+}
+
+#[derive(Serialize)]
+struct Envelope {
+    version: &'static str,
+    success: &'static str,
+    error: &'static str,
+}
+
+#[derive(Serialize)]
+struct ConfigInfo {
+    path: String,
+    env_prefix: &'static str,
+    env: &'static str,
 }
 
 #[derive(Serialize)]
@@ -57,34 +91,16 @@ struct Jev {
     setup: &'static str,
 }
 
-impl Tableable for AgentInfo {
-    fn to_table(&self) -> comfy_table::Table {
-        let mut table = comfy_table::Table::new();
-        table.set_header(vec!["Field", "Value"]);
-        table.add_row(vec!["Name", self.name]);
-        table.add_row(vec!["Version", self.version]);
-        table.add_row(vec!["Description", self.description]);
-        table.add_row(vec!["Setup", &self.setup.join("\n")]);
-        table.add_row(vec!["Workflows", &self.workflows.join("\n")]);
-        table.add_row(vec!["Commands", &self.commands.join("\n")]);
-        let codes: Vec<String> = self.exit_codes.iter().map(|(c, m)| format!("{c}: {m}")).collect();
-        table.add_row(vec!["Exit codes", &codes.join("\n")]);
-        table.add_row(vec!["Free", self.cost.free]);
-        table.add_row(vec!["Paid", self.cost.paid]);
-        table.add_row(vec!["Pacing", self.pacing]);
-        table.add_row(vec!["JEV", if self.jev.active { "active" } else { self.jev.setup }]);
-        table.add_row(vec!["Tips", self.tips]);
-        if let Some(style) = self.writing_style {
-            table.add_row(vec!["Writing style", style]);
-        }
-        table
+pub fn execute(command: Option<&str>, tips: Option<&str>) -> Result<(), XmasterError> {
+    match (command, tips) {
+        (_, Some(topic)) => output::json::render_raw(&tips_for(topic)),
+        (Some(path), None) => output::json::render_raw(&scoped(path)?),
+        (None, None) => output::json::render_raw(&manifest()),
     }
+    Ok(())
 }
 
-pub fn execute(format: OutputFormat, tips: Option<&str>) {
-    if let Some(topic) = tips {
-        return render_tips(format, topic);
-    }
+fn manifest() -> AgentInfo {
     let cfg = config::load_config().ok();
     let jev_active = cfg
         .as_ref()
@@ -93,12 +109,13 @@ pub fn execute(format: OutputFormat, tips: Option<&str>) {
     let writing_style = cfg
         .is_some_and(|c| !c.style.voice.is_empty())
         .then_some("set: `config get style.voice` before drafting");
+    let root = root();
 
-    let info = AgentInfo {
+    AgentInfo {
         name: "xmaster",
         version: env!("CARGO_PKG_VERSION"),
         description: "X CLI for AI agents: read, post and reply to any thread through the user's browser session (free); draft checks; JEV judgments",
-        usage: "JSON when piped. Posts: ID or URL; users: handle or URL. Lists: -c N. Flags ending in = take a value. <cmd> --help for more",
+        usage: "<arg> [optional] --flag; flag= takes a value; -n N: how many. Posts: ID or URL; users: handle or URL. agent-info --command PATH: one command in full",
         setup: [
             "config web-login: copy X cookies from the user's browser (free reads and writes)",
             "config check: live read-only test of the web session and keys",
@@ -112,9 +129,13 @@ pub fn execute(format: OutputFormat, tips: Option<&str>) {
             "after: track run; metrics ID1 ID2 ... in one call",
             "failed reply: don't retry blindly or thread it; give the user the text",
         ],
-        commands: command_lines(),
+        commands: Ordered(listing(&root)),
         exit_codes: EXIT_CODES.iter().map(|(c, m)| (c.to_string(), *m)).collect(),
-        errors: "stderr: {error:{code,message,suggestion,retryable,retry_after_secs?}}. write_unconfirmed: may have landed, check first",
+        envelope: Envelope {
+            version: "1",
+            success: "stdout: {version,status,data,metadata?}",
+            error: "stderr: {version,status,error:{code,message,suggestion,retryable,retry_after_secs?}}. write_unconfirmed: may have landed, check first",
+        },
         cost: Cost {
             free: "with web cookies: read, conversation, replies, search, timelines, mentions, profiles, others' metrics; all posts, replies, quotes, likes, reposts, bookmarks, follows, deletes, mutes, blocks",
             paid: "X API ($0.015/post, $0.20 with a link): no web session, polls, DMs, lists, bookmarks, likers, reposters, quotes, followers, users, volume, own private metrics; search-ai, trending: xAI. --dry-run shows route, cost",
@@ -134,68 +155,92 @@ pub fn execute(format: OutputFormat, tips: Option<&str>) {
         access: "XMASTER_READ_ONLY=1 blocks writes to X; XMASTER_ALLOW_COMMANDS / XMASTER_DENY_COMMANDS",
         tips: "agent-info --tips [algorithm|replies|posting|growth|metrics|avoid]: ranking facts from X's code; usage advice",
         writing_style,
-    };
-    output::render(format, &info, None);
+        global_flags: Ordered(
+            root.get_arguments()
+                .filter(|a| a.is_global_set())
+                .filter_map(|a| Some((format!("--{}", a.get_long()?), json!({ "description": help(a) }))))
+                .collect(),
+        ),
+        config: ConfigInfo {
+            path: config::config_path().display().to_string(),
+            env_prefix: "XMASTER_",
+            env: "XMASTER_SECTION__KEY=value overrides config.toml",
+        },
+        auto_json_when_piped: true,
+    }
 }
 
-/// One line per command, generated from clap: `name|alias <arg> [opt] --flag --value=: about`.
-/// An undo command shares its base's line: `like/unlike <id>`.
-fn command_lines() -> Vec<String> {
+fn root() -> Command {
     let mut cli = crate::cli::Cli::command();
     cli.build();
-    let subs: Vec<&clap::Command> = cli.get_subcommands().filter(|c| !SKIP_COMMANDS.contains(&c.get_name())).collect();
-    let has = |n: &str| subs.iter().any(|c| c.get_name() == n);
-    let mut out = Vec::new();
-    for cmd in &subs {
-        let name = cmd.get_name();
-        if name.strip_prefix("un").is_some_and(has) {
-            continue;
+    cli
+}
+
+/// Every public leaf command by its canonical path ("engage feed"), in
+/// clap's order. Hidden commands and clap's `help` are left out.
+fn leaves(cmd: &Command) -> Vec<(String, &Command)> {
+    fn walk<'a>(cmd: &'a Command, prefix: &str, out: &mut Vec<(String, &'a Command)>) {
+        for sub in cmd.get_subcommands().filter(|c| !c.is_hide_set() && c.get_name() != "help") {
+            let path = format!("{prefix}{}", sub.get_name());
+            if sub.has_subcommands() {
+                walk(sub, &format!("{path} "), out);
+            } else {
+                out.push((path, sub));
+            }
         }
-        describe(cmd, "", has(&format!("un{name}")), &mut out);
     }
+    let mut out = Vec::new();
+    walk(cmd, "", &mut out);
     out
 }
 
-fn describe(cmd: &clap::Command, prefix: &str, undo: bool, out: &mut Vec<String>) {
-    let name = format!("{prefix}{}", cmd.get_name());
-    let subs: Vec<&clap::Command> = cmd.get_subcommands().filter(|c| c.get_name() != "help").collect();
-    if !subs.is_empty() {
-        if EXPAND.contains(&name.as_str()) {
-            for sub in subs {
-                describe(sub, &format!("{name} "), false, out);
+/// Arguments and flags a command lists, without globals and `--help`.
+fn own_args(cmd: &Command) -> impl Iterator<Item = &clap::Arg> {
+    cmd.get_arguments().filter(|a| {
+        !a.is_hide_set()
+            && !a.is_global_set()
+            && !matches!(a.get_action(), ArgAction::Help | ArgAction::HelpShort | ArgAction::HelpLong | ArgAction::Version)
+    })
+}
+
+/// The default manifest's `commands`: canonical path -> one line. Groups
+/// outside [`EXPAND`] take one line that names their subcommands; every key
+/// is a valid `--command` path, which returns the group in full.
+fn listing(root: &Command) -> Vec<(String, String)> {
+    fn walk(cmd: &Command, prefix: &str, out: &mut Vec<(String, String)>) {
+        for sub in cmd.get_subcommands().filter(|c| !c.is_hide_set() && c.get_name() != "help") {
+            let path = format!("{prefix}{}", sub.get_name());
+            if SKIP_COMMANDS.contains(&path.as_str()) {
+                continue;
             }
-        } else {
-            let names: Vec<String> = subs.iter().map(|s| leaf_names(s)).collect();
-            out.push(format!("{name} {}: {}", names.join("|"), about(cmd)));
-        }
-        return;
-    }
-    let mut line = name;
-    if undo {
-        let _ = write!(line, "/un{}", cmd.get_name());
-    }
-    for alias in cmd.get_visible_aliases() {
-        let _ = write!(line, "|{alias}");
-        if undo {
-            let _ = write!(line, "/un{alias}");
+            if !sub.has_subcommands() {
+                out.push((path, line(sub)));
+            } else if EXPAND.contains(&path.as_str()) {
+                walk(sub, &format!("{path} "), out);
+            } else {
+                out.push((path, group_line(sub)));
+            }
         }
     }
-    for arg in cmd.get_arguments() {
+    let mut out = Vec::new();
+    walk(root, "", &mut out);
+    out
+}
+
+/// A leaf: `<id> <text> --media= --dry-run: Reply to a post`.
+fn line(cmd: &Command) -> String {
+    let mut syntax = String::new();
+    for arg in own_args(cmd) {
         let id = arg.get_id().as_str();
         if arg.is_positional() {
-            let many = matches!(arg.get_action(), ArgAction::Append);
-            let dots = if many { "..." } else { "" };
-            if arg.is_required_set() {
-                let _ = write!(line, " <{id}{dots}>");
-            } else {
-                let _ = write!(line, " [{id}{dots}]");
-            }
-        } else if let Some(long) = arg
-            .get_long()
-            .filter(|l| !SKIP_FLAGS.contains(l) && !SKIP_FLAG_PREFIXES.iter().any(|p| l.starts_with(p)))
-        {
+            let dots = if matches!(arg.get_action(), ArgAction::Append) { "..." } else { "" };
+            let (open, close) = if arg.is_required_set() { ('<', '>') } else { ('[', ']') };
+            let _ = write!(syntax, " {open}{id}{dots}{close}");
+        } else if id == "count" {
+            syntax.push_str(" -n=");
+        } else if let Some(long) = arg.get_long().filter(|l| !SKIP_FLAG_PREFIXES.iter().any(|p| l.starts_with(p))) {
             let value = if arg.get_action().takes_values() { "=" } else { "" };
-            let _ = write!(line, " --{long}{value}");
+            let _ = write!(syntax, " --{long}{value}");
         }
     }
     // "like <id>" needs no "Like a post"; keep an about that says more.
@@ -203,28 +248,205 @@ fn describe(cmd: &clap::Command, prefix: &str, undo: bool, out: &mut Vec<String>
     let words: Vec<&str> = about.split_whitespace().collect();
     let first = words.first().map(|w| w.to_ascii_lowercase()).unwrap_or_default();
     let restates = words.len() <= 3 && (first == cmd.get_name() || cmd.get_visible_aliases().any(|a| a == first));
-    if !restates && !about.is_empty() {
-        let _ = write!(line, ": {about}");
+    let mut line = match (syntax.trim_start(), restates || about.is_empty()) {
+        (s, true) => s.to_string(),
+        ("", false) => about,
+        (s, false) => format!("{s}: {about}"),
+    };
+    let aliases: Vec<&str> = cmd.get_visible_aliases().collect();
+    if !aliases.is_empty() {
+        let _ = write!(line, " (alias: {})", aliases.join(", "));
     }
-    out.push(line);
+    line.trim_start().to_string()
 }
 
-/// `watchlist` becomes `watchlist(add,list,remove)` inside a collapsed group.
-fn leaf_names(cmd: &clap::Command) -> String {
-    let subs: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).filter(|n| *n != "help").collect();
-    if subs.is_empty() {
-        cmd.get_name().to_string()
-    } else {
-        format!("{}({})", cmd.get_name(), subs.join(","))
-    }
+/// A collapsed group: `list|sync|search <query>|folder <id>: Bookmarks ...`.
+fn group_line(cmd: &Command) -> String {
+    let subs: Vec<String> = cmd
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+        .map(|sub| {
+            let mut name = sub.get_name().to_string();
+            for arg in sub.get_arguments().filter(|a| a.is_positional() && a.is_required_set()) {
+                let _ = write!(name, " <{}>", arg.get_id());
+            }
+            name
+        })
+        .collect();
+    format!("{}: {}", subs.join("|"), about(cmd))
 }
 
 /// The about's first clause: "Reply to a post (shorthand ...)" -> "Reply to a post".
-fn about(cmd: &clap::Command) -> String {
+fn about(cmd: &Command) -> String {
     let text = cmd.get_about().map(|a| a.to_string()).unwrap_or_default();
     let first = text.lines().next().unwrap_or_default();
     let clause = first.split([':', '(']).next().unwrap_or_default();
     clause.trim().trim_end_matches(['.', ',']).to_string()
+}
+
+fn help(arg: &clap::Arg) -> String {
+    let text = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `agent-info --command PATH`: the matching commands in full. A group
+/// selects its leaves; aliases resolve to canonical paths.
+fn scoped(path: &str) -> Result<Value, XmasterError> {
+    let root = root();
+    let mut cmd = &root;
+    let mut canonical = Vec::new();
+    for word in path.split_whitespace() {
+        match cmd.find_subcommand(word).filter(|c| !c.is_hide_set()) {
+            Some(sub) => {
+                canonical.push(sub.get_name());
+                cmd = sub;
+            }
+            None => return Err(unknown_path(&root, path)),
+        }
+    }
+    if canonical.is_empty() {
+        return Err(unknown_path(&root, path));
+    }
+    let prefix = canonical.join(" ");
+    let entries: Vec<(String, Value)> = if cmd.has_subcommands() {
+        leaves(cmd).into_iter().map(|(p, c)| (format!("{prefix} {p}"), full(c))).collect()
+    } else {
+        vec![(prefix, full(cmd))]
+    };
+    Ok(json!({
+        "name": "xmaster",
+        "version": env!("CARGO_PKG_VERSION"),
+        "commands": serde_json::to_value(Ordered(entries)).unwrap_or_default(),
+    }))
+}
+
+/// Unknown path: name the closest real paths (groups too), by edit distance.
+fn unknown_path(root: &Command, path: &str) -> XmasterError {
+    let wanted = path.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let mut paths: Vec<String> = Vec::new();
+    for (leaf, _) in leaves(root) {
+        let words: Vec<&str> = leaf.split(' ').collect();
+        for n in 1..=words.len() {
+            let p = words[..n].join(" ");
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
+    let limit = 2.max(wanted.len() / 4);
+    let mut close: Vec<(usize, String)> = paths
+        .into_iter()
+        .map(|p| (distance(&wanted, &p), p))
+        .filter(|(d, _)| *d <= limit)
+        .collect();
+    close.sort();
+    let hint = if close.is_empty() {
+        "use a key of `xmaster agent-info` commands".to_string()
+    } else {
+        let names: Vec<String> = close.into_iter().take(3).map(|(_, p)| p).collect();
+        format!("did you mean: {}?", names.join(", "))
+    };
+    XmasterError::InvalidInput(format!("unknown command path '{wanted}'; {hint}"))
+}
+
+/// Levenshtein distance between two short strings.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// The JSON type an agent should pass, from the arg's value parser.
+fn value_type(arg: &clap::Arg) -> &'static str {
+    if matches!(arg.get_action(), ArgAction::SetTrue | ArgAction::SetFalse) {
+        return "bool";
+    }
+    let id = arg.get_value_parser().type_id();
+    let ints = [TypeId::of::<usize>(), TypeId::of::<u64>(), TypeId::of::<u32>(), TypeId::of::<i64>(), TypeId::of::<i32>()];
+    if ints.iter().any(|t| id == *t) {
+        "int"
+    } else if id == TypeId::of::<f64>() {
+        "number"
+    } else {
+        "string"
+    }
+}
+
+/// One argument or flag in full.
+fn spec(arg: &clap::Arg) -> Value {
+    let ty = value_type(arg);
+    let mut v = Map::new();
+    let name = match arg.get_long() {
+        Some(long) if !arg.is_positional() => format!("--{long}"),
+        _ => arg.get_id().to_string(),
+    };
+    v.insert("name".into(), json!(name));
+    if let Some(short) = arg.get_short() {
+        v.insert("short".into(), json!(format!("-{short}")));
+    }
+    let mut aliases: Vec<String> = arg.get_visible_aliases().unwrap_or_default().iter().map(|a| format!("--{a}")).collect();
+    aliases.extend(arg.get_visible_short_aliases().unwrap_or_default().iter().map(|a| format!("-{a}")));
+    if !aliases.is_empty() {
+        v.insert("aliases".into(), json!(aliases));
+    }
+    v.insert("type".into(), json!(ty));
+    v.insert("required".into(), json!(arg.is_required_set()));
+    if matches!(arg.get_action(), ArgAction::Append) {
+        v.insert("multiple".into(), json!(true));
+    }
+    if let Some(default) = arg.get_default_values().first().map(|d| d.to_string_lossy()) {
+        let value = match ty {
+            "bool" => json!(default == "true"),
+            "int" => default.parse::<i64>().map(|n| json!(n)).unwrap_or(json!(default)),
+            "number" => default.parse::<f64>().map(|n| json!(n)).unwrap_or(json!(default)),
+            _ => json!(default),
+        };
+        // A switch that defaults to off says nothing.
+        if value != json!(false) {
+            v.insert("default".into(), value);
+        }
+    }
+    if ty != "bool" {
+        if let Some(values) = arg.get_value_parser().possible_values() {
+            let values: Vec<String> = values.filter(|p| !p.is_hide_set()).map(|p| p.get_name().to_string()).collect();
+            v.insert("values".into(), json!(values));
+        }
+    }
+    let description = help(arg);
+    if !description.is_empty() {
+        v.insert("description".into(), json!(description));
+    }
+    Value::Object(v)
+}
+
+/// One command in full, generated from its clap definition.
+fn full(cmd: &Command) -> Value {
+    let (args, options): (Vec<&clap::Arg>, Vec<&clap::Arg>) = own_args(cmd).partition(|a| a.is_positional());
+    let mut entry = Map::new();
+    entry.insert("description".into(), json!(cmd.get_about().map(|a| a.to_string()).unwrap_or_default()));
+    let aliases: Vec<&str> = cmd.get_visible_aliases().collect();
+    if !aliases.is_empty() {
+        entry.insert("aliases".into(), json!(aliases));
+    }
+    // A long doc comment's later paragraphs: when to use it, fallbacks.
+    if let Some(long) = cmd.get_long_about().map(|l| l.to_string()) {
+        let details = long.split_once("\n\n").map(|(_, rest)| rest.trim()).unwrap_or_default();
+        if !details.is_empty() {
+            entry.insert("details".into(), json!(details));
+        }
+    }
+    entry.insert("args".into(), args.into_iter().map(spec).collect());
+    entry.insert("options".into(), options.into_iter().map(spec).collect());
+    Value::Object(entry)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,10 +607,6 @@ const AVOID: &[&str] = &[
     "If X shows a captcha, lock or 'automated' warning (code 226), stop all writes and ask the user to clear it on x.com",
 ];
 
-fn render_tips(format: OutputFormat, topic: &str) {
-    output::render(format, &tips_for(topic), None);
-}
-
 fn tips_for(topic: &str) -> Tips {
     let all = topic == "all";
     let want = |t: &str| all || topic == t;
@@ -407,48 +625,85 @@ fn tips_for(topic: &str) -> Tips {
     }
 }
 
-impl Tableable for Tips {
-    fn to_table(&self) -> comfy_table::Table {
-        let mut table = comfy_table::Table::new();
-        table.set_header(vec!["Topic", "Tips"]);
-        if let Some(a) = &self.algorithm {
-            let weights = serde_json::to_value(&a.weights)
-                .ok()
-                .and_then(|v| v.as_object().cloned())
-                .map(|m| m.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "))
-                .unwrap_or_default();
-            table.add_row(vec!["algorithm".to_string(), format!("{}\n{}\nWeights: {weights}\n{}", a.source, a.score, a.facts.join("\n"))]);
-        }
-        for (name, lines) in [
-            ("replies", self.replies),
-            ("posting", self.posting),
-            ("growth", self.growth),
-            ("metrics", self.metrics),
-            ("avoid", self.avoid),
-        ] {
-            if let Some(lines) = lines {
-                table.add_row(vec![name.to_string(), lines.join("\n")]);
-            }
-        }
-        table
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use clap::Parser;
+
+    fn commands() -> Map<String, Value> {
+        serde_json::to_value(manifest()).unwrap()["commands"].as_object().unwrap().clone()
+    }
+
+    /// Both directions: every public leaf is listed or sits under a listed
+    /// group, and every key is a command clap parses and `--command` accepts.
     #[test]
-    fn every_command_is_listed() {
-        let lines = command_lines();
-        let text = lines.join("\n");
-        for cmd in crate::cli::Cli::command().get_subcommands().filter(|c| !SKIP_COMMANDS.contains(&c.get_name())) {
-            assert!(text.contains(cmd.get_name()), "missing {}", cmd.get_name());
+    fn manifest_covers_every_public_command() {
+        let listed = commands();
+        for (leaf, _) in leaves(&root()) {
+            let covered = SKIP_COMMANDS.contains(&leaf.as_str())
+                || listed.keys().any(|k| leaf == *k || leaf.starts_with(&format!("{k} ")));
+            assert!(covered, "{leaf} missing");
         }
-        assert!(lines.iter().any(|l| l.starts_with("like/unlike <id>")), "{text}");
-        assert!(lines.iter().any(|l| l.starts_with("reply <id> <text>")), "{text}");
-        assert!(lines.iter().any(|l| l.starts_with("engage feed [topics...]")), "{text}");
-        assert!(!text.contains("--json") && !text.contains("--help"), "{text}");
+        for path in listed.keys() {
+            let argv = std::iter::once("xmaster").chain(path.split(' ')).chain(["--help"]);
+            let err = crate::cli::Cli::try_parse_from(argv).err().expect("--help exits through clap");
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp, "{path}");
+            assert!(scoped(path).is_ok(), "{path}");
+        }
+        assert!(!listed.contains_key("contract") && !listed.contains_key("help") && !listed.contains_key("star"));
+        assert_eq!(listed["reply"], "<id> <text> --media= --dry-run: Reply to a post");
+        assert_eq!(listed["retweet"], "<id> (alias: repost)");
+        assert_eq!(listed["me"], "Your own profile");
+        assert!(listed["engage feed"].as_str().unwrap().starts_with("[topics...] -n=: "), "{}", listed["engage feed"]);
+        assert!(listed["bookmarks"].as_str().unwrap().starts_with("list|sync|search <query>|"), "{}", listed["bookmarks"]);
+        let text = Value::Object(listed).to_string();
+        assert!(!text.contains("--json") && !text.contains("--help") && !text.contains("--min-"), "{text}");
+    }
+
+    #[test]
+    fn scoped_paths_return_full_specs() {
+        let v = scoped("timeline").unwrap();
+        assert_eq!(v.as_object().unwrap().keys().collect::<Vec<_>>(), ["commands", "name", "version"]);
+        let count = v["commands"]["timeline"]["options"].as_array().unwrap().iter().find(|o| o["name"] == "--count").unwrap().clone();
+        assert_eq!(count, json!({"name":"--count","short":"-c","aliases":["--limit","-n"],"type":"int","required":false,"default":10,"description":"Number of posts"}));
+        let sort = &v["commands"]["timeline"]["options"].as_array().unwrap().iter().find(|o| o["name"] == "--sort").unwrap()["values"];
+        assert!(sort.as_array().unwrap().contains(&json!("impressions")));
+        // A group selects its leaves; aliases and extra spaces resolve.
+        let engage = scoped("engage").unwrap();
+        assert!(engage["commands"]["engage feed"]["options"].is_array());
+        assert!(engage["commands"]["engage watchlist add"]["args"][0]["required"] == json!(true));
+        assert!(scoped("  repost ").unwrap()["commands"]["retweet"]["aliases"] == json!(["repost"]));
+        assert!(scoped("engage feed").unwrap()["commands"]["engage feed"]["details"].as_str().unwrap().contains("niche.topics"));
+        for bad in ["", "enage feed", "contract", "timeline extra"] {
+            let e = scoped(bad).unwrap_err();
+            assert_eq!(e.exit_code(), 3, "{bad}");
+        }
+        assert!(scoped("enage").unwrap_err().to_string().contains("did you mean: engage?"));
+        assert!(scoped("enage feed").unwrap_err().to_string().contains("did you mean: engage feed"));
+        assert_eq!(distance("timelin", "timeline"), 1);
+    }
+
+    #[test]
+    fn every_count_flag_takes_n_and_limit() {
+        let root = root();
+        let mut seen = 0;
+        for (path, cmd) in leaves(&root) {
+            if let Some(arg) = cmd.get_arguments().find(|a| a.get_id() == "count") {
+                seen += 1;
+                assert_eq!(arg.get_short(), Some('c'), "{path}");
+                assert_eq!(arg.get_visible_short_aliases(), Some(vec!['n']), "{path}");
+                assert_eq!(arg.get_visible_aliases(), Some(vec!["limit"]), "{path}");
+                for flag in ["-n", "--limit", "-c", "--count"] {
+                    let mut argv: Vec<&str> = std::iter::once("xmaster").chain(path.split(' ')).collect();
+                    // Fill required positionals with a value each parser accepts.
+                    argv.extend(cmd.get_arguments().filter(|a| a.is_positional() && a.is_required_set()).map(|_| "123"));
+                    argv.extend([flag, "3"]);
+                    crate::cli::Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+                }
+            }
+        }
+        assert!(seen >= 25, "{seen}");
     }
 
     #[test]
