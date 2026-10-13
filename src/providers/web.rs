@@ -700,8 +700,10 @@ impl<'a> Web<'a> {
         .await
     }
 
-    /// A user's posts and reposts, newest first (UserTweets), within the
-    /// optional RFC 3339 bounds.
+    /// A user's posts, replies and reposts, newest first, within the
+    /// optional RFC 3339 bounds. UserTweetsAndReplies matches the API's user
+    /// timeline (UserTweets leaves replies out); the other people's posts it
+    /// shows for context are dropped.
     pub async fn user_tweets(
         &self,
         user_id: &str,
@@ -713,11 +715,11 @@ impl<'a> Web<'a> {
             "userId": user_id,
             "count": 20,
             "includePromotedContent": true,
-            "withQuickPromoteEligibilityTweetFields": true,
+            "withCommunity": true,
             "withVoice": true,
         });
         let in_range = window(since, until);
-        self.timeline("UserTweets", variables, "https://x.com/home", want, |t| {
+        self.timeline("UserTweetsAndReplies", variables, "https://x.com/home", want, |t| {
             if t.author_id.as_deref() != Some(user_id) {
                 return Take::Skip;
             }

@@ -1612,7 +1612,7 @@ impl XApi {
         end_time: Option<&str>,
     ) -> Result<Vec<TweetData>, XmasterError> {
         if self.ctx.config.web_reads() {
-            let top = matches!(mode, "relevancy" | "relevant" | "top");
+            let top = matches!(mode, "relevancy" | "relevant" | "top" | "popular");
             match Web::new(&self.ctx)?.search(query, top, count, start_time, end_time).await {
                 Ok(t) => return Ok(t),
                 Err(e) => self.web_read_failed("search", e)?,
