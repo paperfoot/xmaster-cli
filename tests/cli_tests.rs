@@ -82,7 +82,7 @@ fn post_without_auth_fails_gracefully() {
         .args(["post", "test tweet"])
         .assert()
         .failure()
-        .code(3); // auth_missing exit code
+        .code(2); // auth_missing: setup problem
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn like_without_auth_fails_gracefully() {
         .args(["like", "12345"])
         .assert()
         .failure()
-        .code(3);
+        .code(2);
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn search_ai_without_auth_fails_gracefully() {
         .args(["search-ai", "test query"])
         .assert()
         .failure()
-        .code(3);
+        .code(2);
 }
 
 // ─── JSON Output Format ─────────────────────────────────────────
@@ -134,7 +134,7 @@ fn parse_tweet_id_from_url() {
         .args(["like", "https://x.com/user/status/1234567890"])
         .assert()
         .failure()
-        .code(3); // Fails on auth, but shouldn't panic on URL parsing
+        .code(2); // Fails on auth, but shouldn't panic on URL parsing
 }
 
 // ─── Subcommand Parsing ─────────────────────────────────────────
@@ -178,7 +178,7 @@ fn engage_inbox_without_auth_fails_gracefully() {
         .args(["engage", "inbox", "12345", "--json"])
         .assert()
         .failure()
-        .code(3)
+        .code(2)
         .stderr(predicate::str::contains("auth_missing"));
 }
 
@@ -242,7 +242,7 @@ fn article_draft_requires_web_cookies_without_publishing() {
         .args(["article", "draft", draft.to_str().unwrap()])
         .assert()
         .failure()
-        .code(3)
+        .code(2)
         .stderr(predicate::str::contains("web-login"));
 }
 
