@@ -1386,7 +1386,7 @@ fn count_body_mentions(text: &str, is_reply: bool) -> usize {
 }
 
 /// Characters left once URLs, @handles and #hashtags are removed.
-fn residual_text_len(text: &str) -> usize {
+pub(crate) fn residual_text_len(text: &str) -> usize {
     let urls = find_urls(text);
     text.split_whitespace()
         .filter(|t| !is_mention(t) && !t.starts_with('#') && !urls.contains(&trim_token(t)))
