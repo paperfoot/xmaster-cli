@@ -1,430 +1,465 @@
+//! `xmaster agent-info`: what an agent needs to drive xmaster, in under 6 KB.
+//! Commands come from clap and exit codes from `errors::EXIT_CODES`, so
+//! neither can drift. Strategy and X-algorithm notes sit behind
+//! `--tips [topic]`, loaded only when an agent asks.
+
 use crate::config;
+use crate::errors::EXIT_CODES;
 use crate::output::{self, OutputFormat, Tableable};
+use clap::{ArgAction, CommandFactory};
 use serde::Serialize;
+use std::collections::BTreeMap;
+use std::fmt::Write;
 
-#[derive(Serialize)]
-struct ExitCodes {
-    success: &'static str,
-    transient: &'static str,
-    config: &'static str,
-    bad_input: &'static str,
-    rate_limited: &'static str,
-}
+/// Topics accepted by `agent-info --tips <topic>`.
+pub const TIP_TOPICS: &[&str] = &["all", "algorithm", "replies", "posting", "growth", "metrics", "avoid"];
 
-#[derive(Serialize)]
-struct Envelope {
-    version: &'static str,
-    success: &'static str,
-    error: &'static str,
-}
+/// Groups listed leaf by leaf; other groups collapse to one line.
+const EXPAND: &[&str] = &["engage"];
+/// Commands for people, not agents.
+const SKIP_COMMANDS: &[&str] = &["help", "star"];
+/// Flags left out of the command lines: global, described once in `usage`,
+/// or tuning thresholds (`--min-*`, `--max-*`) that `--help` lists.
+const SKIP_FLAGS: &[&str] = &["help", "version", "json", "csv", "pretty", "count"];
+const SKIP_FLAG_PREFIXES: &[&str] = &["min-", "max-"];
 
 #[derive(Serialize)]
 struct AgentInfo {
-    name: String,
-    version: String,
-    description: String,
+    name: &'static str,
+    version: &'static str,
+    description: &'static str,
+    usage: &'static str,
+    setup: [&'static str; 4],
+    workflows: [&'static str; 5],
     commands: Vec<String>,
-    capabilities: Vec<String>,
-    env_prefix: String,
-    config_path: String,
-    auto_json_when_piped: bool,
-    exit_codes: ExitCodes,
-    envelope: Envelope,
-    /// Algorithm intelligence — agents read this to understand how to optimise.
-    /// Source: xai-org/x-algorithm open-source code (May 2026 re-release).
-    algorithm: AlgorithmInfo,
-    /// Which signals xmaster can measure, which it can only proxy, and which are blind.
-    measurement_coverage: MeasurementCoverage,
-    /// Hints for optimal usage — the CLI tells agents how to use it well.
-    usage_hints: Vec<String>,
-    /// Workflow handoff hints — tells agents what command to run after each action.
-    handoffs: Vec<Handoff>,
-    /// User's writing style for X posts (only present when configured).
+    exit_codes: BTreeMap<String, &'static str>,
+    errors: &'static str,
+    cost: Cost,
+    pacing: &'static str,
+    jev: Jev,
+    access: &'static str,
+    tips: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    writing_style: Option<String>,
-    /// JEV decision layer: xmaster judges which items matter so agents read less.
-    jev: JevInfo,
+    writing_style: Option<&'static str>,
 }
 
 #[derive(Serialize)]
-struct JevInfo {
+struct Cost {
+    free: &'static str,
+    paid: &'static str,
+}
+
+#[derive(Serialize)]
+struct Jev {
     active: bool,
     model: &'static str,
-    enable: &'static str,
-    disable: &'static str,
-    profile: &'static str,
-    judges: Vec<&'static str>,
-}
-
-#[derive(Serialize)]
-struct MeasurementCoverage {
-    /// Signals that X API returns directly — xmaster can track these.
-    measurable: Vec<String>,
-    /// Signals that X API doesn't expose — xmaster uses heuristic proxies.
-    proxy_only: Vec<ProxySignal>,
-    /// Signals with no API or proxy — completely invisible to xmaster.
-    blind: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct ProxySignal {
-    signal: String,
-    proxy_method: String,
-    confidence: String,
-}
-
-#[derive(Serialize)]
-struct Handoff {
-    after_command: String,
-    next_commands: Vec<String>,
-    reason: String,
-}
-
-#[derive(Serialize)]
-struct AlgorithmInfo {
-    source: &'static str,
-    signals: Vec<AlgorithmSignal>,
-    media_hierarchy: Vec<&'static str>,
-    best_posting_hours: &'static str,
-    best_posting_days: &'static str,
-}
-
-#[derive(Serialize)]
-struct AlgorithmSignal {
-    signal: &'static str,
-    polarity: &'static str, // "positive" | "continuous" | "negative"
+    judges: [&'static str; 4],
+    setup: &'static str,
 }
 
 impl Tableable for AgentInfo {
     fn to_table(&self) -> comfy_table::Table {
         let mut table = comfy_table::Table::new();
         table.set_header(vec!["Field", "Value"]);
-        table.add_row(vec!["Name", &self.name]);
-        table.add_row(vec!["Version", &self.version]);
-        table.add_row(vec!["Description", &self.description]);
-        table.add_row(vec!["Commands", &format!("{} commands", self.commands.len())]);
-        table.add_row(vec!["Capabilities", &self.capabilities.join(", ")]);
-        table.add_row(vec!["Algorithm Source", self.algorithm.source]);
-        let pos = self.algorithm.signals.iter().filter(|s| s.polarity == "positive").count();
-        let cont = self.algorithm.signals.iter().filter(|s| s.polarity == "continuous").count();
-        let neg = self.algorithm.signals.iter().filter(|s| s.polarity == "negative").count();
-        table.add_row(vec!["Signals", &format!("{} total ({pos} positive, {cont} continuous, {neg} negative)", self.algorithm.signals.len())]);
-        table.add_row(vec!["Best Times", self.algorithm.best_posting_hours]);
-        table.add_row(vec!["Best Days", self.algorithm.best_posting_days]);
-        table.add_row(vec![
-            "Measurable Signals",
-            &self.measurement_coverage.measurable.join(", "),
-        ]);
-        table.add_row(vec![
-            "Proxy Signals",
-            &self.measurement_coverage.proxy_only
-                .iter()
-                .map(|p| format!("{} ({})", p.signal, p.confidence))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ]);
-        table.add_row(vec![
-            "Blind Signals",
-            &format!("{} signals (no API/proxy)", self.measurement_coverage.blind.len()),
-        ]);
-        table.add_row(vec!["Hint", &self.usage_hints.first().cloned().unwrap_or_default()]);
-        if let Some(ref style) = self.writing_style {
-            table.add_row(vec!["Writing Style", style]);
+        table.add_row(vec!["Name", self.name]);
+        table.add_row(vec!["Version", self.version]);
+        table.add_row(vec!["Description", self.description]);
+        table.add_row(vec!["Setup", &self.setup.join("\n")]);
+        table.add_row(vec!["Workflows", &self.workflows.join("\n")]);
+        table.add_row(vec!["Commands", &self.commands.join("\n")]);
+        let codes: Vec<String> = self.exit_codes.iter().map(|(c, m)| format!("{c}: {m}")).collect();
+        table.add_row(vec!["Exit codes", &codes.join("\n")]);
+        table.add_row(vec!["Free", self.cost.free]);
+        table.add_row(vec!["Paid", self.cost.paid]);
+        table.add_row(vec!["Pacing", self.pacing]);
+        table.add_row(vec!["JEV", if self.jev.active { "active" } else { self.jev.setup }]);
+        table.add_row(vec!["Tips", self.tips]);
+        if let Some(style) = self.writing_style {
+            table.add_row(vec!["Writing style", style]);
         }
         table
     }
 }
 
-pub fn execute(format: OutputFormat) {
+pub fn execute(format: OutputFormat, tips: Option<&str>) {
+    if let Some(topic) = tips {
+        return render_tips(format, topic);
+    }
     let cfg = config::load_config().ok();
-    let jev_active = cfg.as_ref().and_then(|c| c.jev_key()).is_some();
-    let style = cfg.and_then(|c| (!c.style.voice.is_empty()).then_some(c.style.voice));
+    let jev_active = cfg
+        .as_ref()
+        .is_some_and(|c| c.jev_key().is_some() && !c.settings.disable_jev);
+    // The voice can run to a page; point at it rather than inline it.
+    let writing_style = cfg
+        .is_some_and(|c| !c.style.voice.is_empty())
+        .then_some("set: `config get style.voice` before drafting");
 
     let info = AgentInfo {
-        name: "xmaster".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        description: "Enterprise-grade X/Twitter CLI with built-in algorithm intelligence".into(),
-        commands: vec![
-            // Reading posts (use 'read' as the primary single-post lookup)
-            "read".into(), "replies".into(), "metrics".into(),
-            "timeline".into(), "mentions".into(), "search".into(),
-            "search-ai".into(), "trending".into(), "user".into(), "me".into(),
-            "followers".into(), "following".into(),
-            // Posting
-            "post".into(), "reply".into(), "thread".into(), "article preview".into(), "article draft".into(), "article publish".into(), "delete".into(),
-            // Engagement
-            "like".into(), "unlike".into(),
-            "retweet".into(), "unretweet".into(), "bookmark".into(), "unbookmark".into(),
-            "follow".into(), "unfollow".into(),
-            // Moderation
-            "hide-reply".into(), "unhide-reply".into(), "block".into(), "unblock".into(),
-            "mute".into(), "unmute".into(),
-            // DMs
-            "dm send".into(), "dm inbox".into(), "dm thread".into(),
-            // Bookmarks
-            "bookmarks list".into(), "bookmarks sync".into(), "bookmarks search".into(),
-            "bookmarks export".into(), "bookmarks digest".into(), "bookmarks stats".into(),
-            "bookmarks folders".into(), "bookmarks folder".into(),
-            // Lists
-            "lists create".into(), "lists delete".into(), "lists add".into(),
-            "lists remove".into(), "lists timeline".into(), "lists members".into(),
-            "lists mine".into(),
-            // Intelligence
-            "analyze".into(), "engage inbox".into(), "engage recommend".into(), "engage feed".into(),
-            "engage swarm".into(), "engage hot-targets".into(),
-            "engage watchlist add".into(), "engage watchlist list".into(), "engage watchlist remove".into(),
-            "likers".into(), "retweeters".into(), "quotes".into(), "users".into(),
-            "amplifiers".into(), "volume".into(),
-            "track run".into(), "track status".into(),
-            "track followers".into(), "track growth".into(),
-            "report daily".into(), "report weekly".into(),
-            "suggest best-time".into(), "suggest next-post".into(),
-            // Scheduling
-            "schedule add".into(), "schedule list".into(), "schedule cancel".into(),
-            "schedule reschedule".into(), "schedule fire".into(), "schedule setup".into(),
-            // System
-            "config show".into(), "config get".into(), "config set".into(), "config check".into(),
-            "config auth".into(), "config guide".into(), "config web-login".into(),
-            "inspire".into(),
-            "rate-limits".into(), "agent-info".into(), "update".into(),
-            "skill install".into(), "skill update".into(), "skill status".into(),
-            "star".into(),
+        name: "xmaster",
+        version: env!("CARGO_PKG_VERSION"),
+        description: "X CLI for AI agents: read, post and reply to any thread through the user's browser session (free); draft checks; JEV judgments",
+        usage: "JSON when piped. Posts: ID or URL; users: handle or URL. Lists: -c N. Flags ending in = take a value. <cmd> --help for more",
+        setup: [
+            "config web-login: copy X cookies from the user's browser (free reads and writes)",
+            "config check: live read-only test of the web session and keys",
+            "config set account.bio, niche.topics: what feed and JEV judge fit against",
+            "optional: keys.jev (JEV), keys.xai (search-ai), X API keys (paid fallback)",
         ],
-        capabilities: vec![
-            "tweet_crud".into(), "engagement".into(), "social_graph".into(),
-            "direct_messages".into(), "search".into(), "ai_search".into(),
-            "media_upload".into(), "user_lookup".into(), "lists".into(),
-            "moderation".into(), "analytics".into(), "preflight_scoring".into(),
-            "performance_tracking".into(), "timing_intelligence".into(),
-            "scheduling".into(),
-            "bookmark_intelligence".into(),
-            "engagement_intelligence".into(),
-            "conversation_inbox".into(),
-            "article_preview".into(),
-            "article_draft".into(),
-            "article_publish".into(),
-            "self_update".into(),
+        workflows: [
+            "reply: engage feed -> conversation <id> -> reply <id> \"text\" (--dry-run first)",
+            "inbox: engage inbox <own post id>: reply to recommendations, like triage.like_ids",
+            "post: post \"text\" --dry-run, then post (originals need the user's yes)",
+            "after: track run; metrics ID1 ID2 ... in one call",
+            "failed reply: don't retry blindly or thread it; give the user the text",
         ],
-        env_prefix: "XMASTER_".into(),
-        config_path: config::config_path().to_string_lossy().to_string(),
-        auto_json_when_piped: true,
-        exit_codes: ExitCodes {
-            success: "0: Success — continue",
-            transient: "1: Transient error (IO, network) — retry with backoff",
-            config: "2: Config/billing error (missing key, bad file, API credits exhausted) — fix setup, do not retry",
-            bad_input: "3: Bad input (invalid args, denied command) — fix arguments",
-            rate_limited: "4: Rate limited — wait, then retry",
+        commands: command_lines(),
+        exit_codes: EXIT_CODES.iter().map(|(c, m)| (c.to_string(), *m)).collect(),
+        errors: "stderr: {error:{code,message,suggestion,retryable,retry_after_secs?}}. write_unconfirmed: may have landed, check first",
+        cost: Cost {
+            free: "with web cookies: read, conversation, replies, search, timelines, mentions, profiles, others' metrics; all posts, replies, quotes, likes, reposts, bookmarks, follows, deletes, mutes, blocks",
+            paid: "X API ($0.015/post, $0.20 with a link): no web session, polls, DMs, lists, bookmarks, likers, reposters, quotes, followers, users, volume, own private metrics; search-ai, trending: xAI. --dry-run shows route, cost",
         },
-        envelope: Envelope {
-            version: "1",
-            success: "{ version, status: \"success\", data, metadata }",
-            error: "{ version, status: \"error\", error: { code, message, suggestion } }",
-        },
-        algorithm: AlgorithmInfo {
-            source: "xai-org/x-algorithm (May 15, 2026, home-mixer/scorers/ranking_scorer.rs). Weight magnitudes are runtime params, not public.",
-            signals: vec![
-                AlgorithmSignal { signal: "follow_author",         polarity: "positive" },
-                AlgorithmSignal { signal: "share_via_dm",          polarity: "positive" },
-                AlgorithmSignal { signal: "share_via_copy_link",   polarity: "positive" },
-                AlgorithmSignal { signal: "share",                 polarity: "positive" },
-                AlgorithmSignal { signal: "reply",                 polarity: "positive" },
-                AlgorithmSignal { signal: "profile_click",         polarity: "positive" },
-                AlgorithmSignal { signal: "click",                 polarity: "positive" },
-                AlgorithmSignal { signal: "quote",                 polarity: "positive" },
-                AlgorithmSignal { signal: "quoted_click",          polarity: "positive" },
-                AlgorithmSignal { signal: "photo_expand",          polarity: "positive" },
-                AlgorithmSignal { signal: "vqv",                   polarity: "positive" },
-                AlgorithmSignal { signal: "retweet",               polarity: "positive" },
-                AlgorithmSignal { signal: "favorite",              polarity: "positive" },
-                AlgorithmSignal { signal: "dwell",                 polarity: "continuous" },
-                AlgorithmSignal { signal: "cont_dwell_time",       polarity: "continuous" },
-                AlgorithmSignal { signal: "cont_click_dwell_time", polarity: "continuous" },
-                AlgorithmSignal { signal: "quoted_vqv",            polarity: "continuous" },
-                AlgorithmSignal { signal: "not_dwelled",           polarity: "negative" },
-                AlgorithmSignal { signal: "not_interested",        polarity: "negative" },
-                AlgorithmSignal { signal: "mute_author",           polarity: "negative" },
-                AlgorithmSignal { signal: "block_author",          polarity: "negative" },
-                AlgorithmSignal { signal: "report",                polarity: "negative" },
-            ],
-            media_hierarchy: vec![
-                "text",
-                "native_image",
-                "native_video (>= MIN_VIDEO_DURATION_MS for vqv)",
-                "thread",
-            ],
-            best_posting_hours: "8-11 AM local time",
-            best_posting_days: "Tuesday, Wednesday, Thursday",
-        },
-        measurement_coverage: MeasurementCoverage {
-            measurable: vec![
-                "favorite".into(), "retweet".into(), "reply".into(),
-                "quote".into(), "impressions".into(), "bookmarks".into(),
-                "profile_click".into(), "url_clicks".into(),
-            ],
-            proxy_only: vec![
-                ProxySignal { signal: "follow_author".into(), proxy_method: "profile_click correlation".into(), confidence: "low".into() },
-                ProxySignal { signal: "share".into(), proxy_method: "quotability + save-worthiness heuristics".into(), confidence: "medium".into() },
-                ProxySignal { signal: "share_via_dm".into(), proxy_method: "insider/practical content markers".into(), confidence: "medium".into() },
-                ProxySignal { signal: "share_via_copy_link".into(), proxy_method: "quotability + data content markers".into(), confidence: "medium".into() },
-                ProxySignal { signal: "dwell".into(), proxy_method: "word count + line breaks".into(), confidence: "high".into() },
-                ProxySignal { signal: "cont_dwell_time".into(), proxy_method: "estimated read time in seconds".into(), confidence: "medium".into() },
-                ProxySignal { signal: "photo_expand".into(), proxy_method: "media attachment detection".into(), confidence: "high".into() },
-                ProxySignal { signal: "negative_risk".into(), proxy_method: "sentiment + combative tone analysis".into(), confidence: "medium".into() },
-            ],
-            blind: vec![
-                "report".into(), "block_author".into(), "mute_author".into(),
-                "not_interested".into(), "vqv".into(),
-                "click".into(), "quoted_click".into(),
-            ],
-        },
-        usage_hints: vec![
-            "Always run 'xmaster analyze' before posting — it checks for common issues that hurt reach".into(),
-            "Use 'xmaster search-ai' over 'xmaster search' — cheaper and smarter (xAI vs X API). Supports from:username for hard author filtering (e.g. 'xmaster search-ai \"from:elonmusk AI\"')".into(),
-            "Reply to larger accounts in your niche, and reply back when people reply to you — author reply-back is a strong reciprocity loop".into(),
-            "Create content people want to DM to friends — share_via_dm is a top scoring signal".into(),
-            "Never put external links in the main tweet body — links reduce reach, and since 2026-04-20 a URL-bearing post costs $0.20 via API vs $0.015 plain. Put links in the first reply".into(),
-            "WEB SESSION: likes, follows, quotes and replies to any thread go through your browser session ('xmaster config web-login'). The self-serve API removed like/follow and blocks replies to non-mentioners, so without the session those return 403".into(),
-            "SEARCH OPERATORS (since the May 2026 index migration): min_likes:, min_replies:, min_reposts: work inside 'xmaster search' queries (e.g. 'xmaster search \"longevity min_likes:100\"'). Keyword search no longer returns retweets".into(),
-            "Space posts 2+ hours apart — author_diversity_scorer.rs decays repeated authors per feed pass".into(),
-            "DAILY CAP: ≤4 standalone posts per 24h. Replies don't count — heavy replying beats heavy posting for small accounts".into(),
-            "THREADS: dedup_conversation_filter.rs keeps only the highest-scored tweet per conversation. Long threads dilute their own hook. Keep to ≤4, or split into standalones".into(),
-            "ARTICLES: a strong long-form format. Winners (Jan 2026 $1M Article Contest: @beaverd, @KobeissiLetter, @thedankoe) all hit: timely angle + named subjects + specific numbers + clear payoff".into(),
-            "LONG-FORM POSTS (>280 chars, Premium): xmaster auto-routes through CreateNoteTweet for Premium accounts. 500-2000 char sweet spot. Beyond 2000, prefer Articles. 'xmaster analyze' runs long-form preview-hook, scannability, and payoff-density checks".into(),
-            "LONG-FORM STRUCTURE: hook in first 280 chars (only this surfaces in the feed before 'show more'), then short paragraphs (2-4 lines), data points or named subjects every ~500 chars, payoff/CTA at end. xmaster analyze flags weak-preview, wall-of-text, low-density issues for long drafts".into(),
-            "LONG-FORM EXEMPLARS: 'xmaster inspire --long' surfaces high-impression long-form posts from your local library. Seed it by running 'xmaster timeline --user @beaverd' (etc.) on long-form practitioners — every search/timeline auto-populates discovered_posts".into(),
-            "LONG-FORM COVER IMAGES: generate via the nanaban CLI: `nanaban \"<title-card prompt>\" --ar 3:2`".into(),
-            "ARTICLE PREVIEW: Articles are NOT long posts / Note Tweets. Render locally with `xmaster article preview draft.md --header-image cover.png --author \"Name\" --handle username -o preview.html`. Markdown maps to the official Article feature set (headings, bold, italic, lists, images, video/GIF, embedded posts/Articles, links)".into(),
-            "ARTICLE DRAFTS: `xmaster article draft draft.md --header-image cover.png` saves an unpublished Article draft via the private web endpoint (requires `xmaster config web-login`). Add `--api` to use the official X API v2 endpoint instead (OAuth keys only, no cookies; cover image stays in the body). CAVEAT (live-verified 2026-07-03): the official endpoint accepts paragraphs/headings/lists but currently rejects bold/italic inline styles and links with HTTP 400 — use the web path for richly formatted drafts. NOT `/2/tweets` and NOT CreateNoteTweet".into(),
-            "ARTICLE PUBLISH: `xmaster article publish <article_id>` publishes a draft via the official v2 endpoint (added 2026-06-11) and returns the created post id. This makes the Article PUBLIC — never run it without explicit user approval".into(),
-            "LONG-FORM TIMING: post in the in-network peak (Tue–Thu, 9–11 AM author-local for desk audiences; 7–9 PM for general). Be ready to engage replies in the first 30 min. Avoid Mon mornings (timeline rebuild) and Fri afternoon (drop-off)".into(),
-            "QUOTE TWEETS: quotes enter the in-network candidate pool of YOUR followers (thunder_source.rs serves from following_user_ids). Replies travel through the OP's audience pool. Use 'xmaster post \"your take\" --quote <id>' when extending an idea".into(),
-            "PREMIUM: ~2-3x organic reach in practice. The mechanism is not in the open source but the effect is real".into(),
-            "SMALL-ACCOUNT GROWTH (<1k followers): replies-heavy, to accounts in your niche, early in a post's life. Grox's follower buckets only label metrics; they are not extra-scrutiny tiers. Quality-gate every reply".into(),
-            "REPLY QUALITY: an AI judge scores every reply; generic or AI-slop replies get buried, and an account-level slop label hides all your posts from non-followers for 30 days. Name a specific detail from the post or ask the author something they can answer. 'xmaster analyze \"draft\" --reply-to <id>' flags generic, slop, off_topic and bait (JEV) before you send".into(),
-            "FIRST 30-60 MINUTES: initial traction window matters — Phoenix age enters as learned post-age buckets. Time posts when your audience is online".into(),
-            "Use 'xmaster timeline --sort impressions' to find your best-performing posts".into(),
-            "Use 'xmaster timeline --since 24h' to check recent post performance".into(),
-            "Use 'xmaster engage recommend --topic \"your niche\"' to find high-ROI reply targets".into(),
-            "Use 'xmaster config get style.voice' to read the current voice before updating it — adapt, don't replace".into(),
-            "Every search/timeline/read automatically builds your local post library — use 'xmaster inspire --topic X' to browse it".into(),
-            "Set account.premium to true if you have X Premium — unlocks 25k char limit instead of 280".into(),
-            // ── metrics & tracking — agent-friendly batch patterns ──
-            "BATCH METRICS: 'xmaster metrics ID1 ID2 ID3 ...' fetches multiple tweets in ONE HTTP call (up to 100 IDs). NEVER loop per-id — it wastes tool calls and rate limits".into(),
-            "Every metrics call returns pre-computed age_seconds, age_human ('9 min'), delta vs previous snapshot (+imps since last check), and velocity (imps/min). Top-level 'now' field gives server time. The agent should NOT do clock arithmetic — the CLI already did it".into(),
-            "Each metrics call auto-saves a snapshot to the local DB. The NEXT call gets a delta for free — so running metrics twice with a gap is the cheapest way to see a trend".into(),
-            "Use 'xmaster track run' to batch-snapshot all your recent posts and check for reply-backs on pending replies — one command replaces N metrics calls when auditing recent activity".into(),
-            // ── engagement: watchlist auto-tracking ──
-            "Use 'xmaster engage watchlist add <username> --topic \"your niche\"' to pin important accounts without following. 'xmaster engage watchlist list' shows them. Watchlist accounts are prioritised by 'engage feed'".into(),
-            "'xmaster engage feed \"your niche\"' checks watchlist accounts first (saves API calls) and silently auto-adds high-follower discovered authors (>=10k) back into the watchlist — so the watchlist grows itself as you discover targets".into(),
-            "After replying to targets, run 'xmaster track run' to capture reply-backs (when the target replies to you). The reply-back signal is tracked in engagement_actions and surfaces in 'engage recommend'".into(),
-            "'xmaster track run' now AUTO-PROMOTES hot reply targets into the watchlist — any account where your reply got >=100 imps, >=1 profile click, or a reply-back (last 14d, >=1k followers) is added automatically. Check 'watchlist_auto_promoted' in the track run metadata to see who got added".into(),
-            "'xmaster track run' also surfaces CROSS-POST CANDIDATES — standalone posts that crossed 5k impressions in the last 14d. Check 'cross_post_candidates' in track-run metadata. Pattern from @jackmoses777 (Apr 2026): screenshot a high-perf X text post, upload to Instagram as a still. 198K X views → 325K IG views / 8K followers in one case. Use the clinstagram skill to automate the upload".into(),
-            "'xmaster engage hot-targets --days 7 --json' ranks the accounts you've replied to by avg impressions, profile clicks, and reply-back rate. Use it to find which targets reward your reply effort the most, then prioritise re-engaging them".into(),
-            "Use 'xmaster likers <id>' / 'xmaster retweeters <id>' / 'xmaster quotes <id>' to inspect who engaged with a specific post — each returns a clean user/tweet list. 'quotes' also caches the quote tweets into your discovered_posts library for later 'xmaster inspire' browsing".into(),
-            "Use 'xmaster engage inbox <id>' after publishing or when a post is moving. It checks root replies, quote tweets, and replies under quote tweets in one pass, then ranks where an author reply-back is likely to matter most. This catches the 'comments in reposts' surface that plain metrics/replies checks miss".into(),
-            "Batch-lookup many users at once with 'xmaster users alice bob carol' — one HTTP call for up to 100 usernames. Use this whenever you need to hydrate a list of accounts; never loop per-user".into(),
-            "'xmaster lists members <list_id>' returns the users in a given list (max 100 per call). Useful for auditing community membership or extracting target sets from curated lists".into(),
-            "'xmaster amplifiers' shows who reposts your content. High-frequency reposters are your audience amplifiers — add them to your watchlist to nurture the relationship".into(),
-            "XMASTER_ALLOW_COMMANDS and XMASTER_DENY_COMMANDS env vars restrict which commands agents can run. Deny takes precedence. agent-info, config, rate-limits, update, skill are always allowed".into(),
-        ],
-        handoffs: vec![
-            Handoff {
-                after_command: "post".into(),
-                // track run FIRST — batch-snapshots all your recent posts + checks reply-backs.
-                // metrics <id> is the fallback for spot-checking one specific tweet.
-                next_commands: vec![
-                    "xmaster engage inbox <id>".into(),
-                    "xmaster track run".into(),
-                    "xmaster metrics <id>".into(),
-                ],
-                reason: "Check the conversation inbox first when a post is moving, then batch-snapshot recent posts. Use metrics <id> only for a deep dive on one specific tweet".into(),
-            },
-            Handoff {
-                after_command: "reply".into(),
-                next_commands: vec![
-                    "xmaster track run".into(),
-                    "xmaster metrics <reply_id>".into(),
-                ],
-                reason: "track run snapshots the new reply AND polls the target for a reply-back. metrics <reply_id> gives delta+velocity on this specific reply".into(),
-            },
-            Handoff {
-                after_command: "metrics".into(),
-                // Hint agents to batch next time: if they want to check more posts, use one call.
-                next_commands: vec![
-                    "xmaster engage inbox <id>".into(),
-                    "xmaster metrics ID1 ID2 ID3 ...".into(),
-                    "xmaster track run".into(),
-                ],
-                reason: "If engagement is moving, inspect replies/quotes/quote-comments with engage inbox. For more post metrics, batch IDs in one metrics call".into(),
-            },
-            Handoff {
-                after_command: "analyze".into(),
-                next_commands: vec!["xmaster post \"...\"".into(), "xmaster schedule add \"...\" --at auto".into()],
-                reason: "Post the optimized content or schedule it for the best time".into(),
-            },
-            Handoff {
-                after_command: "schedule add".into(),
-                next_commands: vec!["xmaster schedule list".into()],
-                reason: "Confirm the post is queued at the right time".into(),
-            },
-            Handoff {
-                after_command: "engage recommend".into(),
-                next_commands: vec![
-                    "xmaster reply <id> \"...\"".into(),
-                    "xmaster engage watchlist add <username>".into(),
-                ],
-                reason: "Act on the recommended engagement targets — add proven reciprocators to your watchlist. (API likes/follows were removed for self-serve tiers in Apr 2026 — reply instead, it is the stronger signal anyway)".into(),
-            },
-            Handoff {
-                after_command: "engage feed".into(),
-                next_commands: vec![
-                    "xmaster reply <id> \"...\"".into(),
-                    "xmaster post \"your take\" --quote <id>".into(),
-                    "xmaster engage swarm <id>".into(),
-                    "xmaster engage watchlist list".into(),
-                ],
-                reason: "Reply, quote-tweet (stronger reach than reply — puts the post in your followers' feed), or swarm the replies for peer-to-peer small-account engagement".into(),
-            },
-            Handoff {
-                after_command: "engage swarm".into(),
-                next_commands: vec![
-                    "xmaster reply <reply_id> \"...\"".into(),
-                    "xmaster engage watchlist add <username>".into(),
-                ],
-                reason: "Swarm targets are small-to-mid accounts already engaged with the big post. Replying peer-to-peer builds reciprocal relationships faster than competing for the top slot under the big account. (API likes/follows were removed for self-serve tiers in Apr 2026)".into(),
-            },
-            Handoff {
-                after_command: "track run".into(),
-                next_commands: vec![
-                    "xmaster engage hot-targets --days 7".into(),
-                    "xmaster engage watchlist list".into(),
-                ],
-                reason: "track run auto-promotes hot reply targets. Check hot-targets to see the full ranking and watchlist list to confirm the new entries".into(),
-            },
-            Handoff {
-                after_command: "engage hot-targets".into(),
-                next_commands: vec![
-                    "xmaster engage feed".into(),
-                    "xmaster reply <id> \"...\"".into(),
-                ],
-                reason: "Once you know which targets reward your replies most, fetch fresh posts from them via engage feed and reply immediately".into(),
-            },
-        ],
-        writing_style: style,
-        jev: JevInfo {
+        pacing: "Writes keep daily limits and gaps, within normal use. If one is refused, the error says why: wait or try later, don't loop",
+        jev: Jev {
             active: jev_active,
             model: crate::providers::jev::MODEL,
-            enable: "xmaster config set keys.jev <key> (or env TYPESAFE_API_KEY)",
-            disable: "xmaster config set settings.disable_jev true",
-            profile: "Judges fit against account.bio + niche.topics (else your recent posts); set both for sharper picks",
-            judges: vec![
-                "engage feed: returns its best 5 reply targets with a 'why'; jev.dropped counts the rest",
-                "engage inbox: triage reply/like/ignore/spam; recommendations = what needs a reply, triage.like_ids = what to like",
-                "replies: leaves out replies not worth reading (trimmed count); --all shows every reply",
-                "analyze / post / reply: advisory jev flags generic, slop, off_topic, bait with a fix; never blocks",
-                "analyze: jev.reach (0-1) beside the rule score; weak signal, blind to promoted posts",
+            judges: [
+                "engage feed: best 5 targets with jev_score, why",
+                "engage inbox: recommendations need a reply; like triage.like_ids",
+                "replies: drops low-value replies (--all: all)",
+                "analyze, post, reply, quote: advisory flags generic/slop/off_topic/bait",
             ],
+            setup: "keys.jev or TYPESAFE_API_KEY; off: settings.disable_jev true; on failure: heuristics",
         },
+        access: "XMASTER_READ_ONLY=1 blocks writes to X; XMASTER_ALLOW_COMMANDS / XMASTER_DENY_COMMANDS",
+        tips: "agent-info --tips [algorithm|replies|posting|growth|metrics|avoid]: ranking facts from X's code; usage advice",
+        writing_style,
     };
     output::render(format, &info, None);
+}
+
+/// One line per command, generated from clap: `name|alias <arg> [opt] --flag --value=: about`.
+/// An undo command shares its base's line: `like/unlike <id>`.
+fn command_lines() -> Vec<String> {
+    let mut cli = crate::cli::Cli::command();
+    cli.build();
+    let subs: Vec<&clap::Command> = cli.get_subcommands().filter(|c| !SKIP_COMMANDS.contains(&c.get_name())).collect();
+    let has = |n: &str| subs.iter().any(|c| c.get_name() == n);
+    let mut out = Vec::new();
+    for cmd in &subs {
+        let name = cmd.get_name();
+        if name.strip_prefix("un").is_some_and(has) {
+            continue;
+        }
+        describe(cmd, "", has(&format!("un{name}")), &mut out);
+    }
+    out
+}
+
+fn describe(cmd: &clap::Command, prefix: &str, undo: bool, out: &mut Vec<String>) {
+    let name = format!("{prefix}{}", cmd.get_name());
+    let subs: Vec<&clap::Command> = cmd.get_subcommands().filter(|c| c.get_name() != "help").collect();
+    if !subs.is_empty() {
+        if EXPAND.contains(&name.as_str()) {
+            for sub in subs {
+                describe(sub, &format!("{name} "), false, out);
+            }
+        } else {
+            let names: Vec<String> = subs.iter().map(|s| leaf_names(s)).collect();
+            out.push(format!("{name} {}: {}", names.join("|"), about(cmd)));
+        }
+        return;
+    }
+    let mut line = name;
+    if undo {
+        let _ = write!(line, "/un{}", cmd.get_name());
+    }
+    for alias in cmd.get_visible_aliases() {
+        let _ = write!(line, "|{alias}");
+        if undo {
+            let _ = write!(line, "/un{alias}");
+        }
+    }
+    for arg in cmd.get_arguments() {
+        let id = arg.get_id().as_str();
+        if arg.is_positional() {
+            let many = matches!(arg.get_action(), ArgAction::Append);
+            let dots = if many { "..." } else { "" };
+            if arg.is_required_set() {
+                let _ = write!(line, " <{id}{dots}>");
+            } else {
+                let _ = write!(line, " [{id}{dots}]");
+            }
+        } else if let Some(long) = arg
+            .get_long()
+            .filter(|l| !SKIP_FLAGS.contains(l) && !SKIP_FLAG_PREFIXES.iter().any(|p| l.starts_with(p)))
+        {
+            let value = if arg.get_action().takes_values() { "=" } else { "" };
+            let _ = write!(line, " --{long}{value}");
+        }
+    }
+    // "like <id>" needs no "Like a post"; keep an about that says more.
+    let about = about(cmd);
+    let words: Vec<&str> = about.split_whitespace().collect();
+    let first = words.first().map(|w| w.to_ascii_lowercase()).unwrap_or_default();
+    let restates = words.len() <= 3 && (first == cmd.get_name() || cmd.get_visible_aliases().any(|a| a == first));
+    if !restates && !about.is_empty() {
+        let _ = write!(line, ": {about}");
+    }
+    out.push(line);
+}
+
+/// `watchlist` becomes `watchlist(add,list,remove)` inside a collapsed group.
+fn leaf_names(cmd: &clap::Command) -> String {
+    let subs: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).filter(|n| *n != "help").collect();
+    if subs.is_empty() {
+        cmd.get_name().to_string()
+    } else {
+        format!("{}({})", cmd.get_name(), subs.join(","))
+    }
+}
+
+/// The about's first clause: "Reply to a post (shorthand ...)" -> "Reply to a post".
+fn about(cmd: &clap::Command) -> String {
+    let text = cmd.get_about().map(|a| a.to_string()).unwrap_or_default();
+    let first = text.lines().next().unwrap_or_default();
+    let clause = first.split([':', '(']).next().unwrap_or_default();
+    clause.trim().trim_end_matches(['.', ',']).to_string()
+}
+
+// ---------------------------------------------------------------------------
+// --tips
+// ---------------------------------------------------------------------------
+
+/// Production ranking weights: xai-org/x-algorithm home-mixer/params/param.rs
+/// (cron-synced from X's config; last sync 2026-10-12). Each multiplies the
+/// viewer's predicted probability of the action, not raw counts.
+#[derive(Serialize)]
+struct Weights {
+    share_via_copy_link: f64,
+    reply: f64,
+    quote: f64,
+    share_via_dm: f64,
+    follow_author: f64,
+    share: f64,
+    retweet: f64,
+    favorite: f64,
+    cont_click_dwell_time: f64,
+    click: f64,
+    open_link: f64,
+    photo_expand: f64,
+    dwell: f64,
+    quoted_click: f64,
+    video_open: f64,
+    post_unexplored: f64,
+    cont_dwell_time: f64,
+    profile_click: f64,
+    vqv: f64,
+    quoted_vqv: f64,
+    not_dwelled: f64,
+    block_author: f64,
+    not_interested: f64,
+    mute_author: f64,
+    report: f64,
+}
+
+const WEIGHTS: Weights = Weights {
+    share_via_copy_link: 20.0,
+    reply: 5.0,
+    quote: 5.0,
+    share_via_dm: 5.0,
+    follow_author: 4.0,
+    share: 2.0,
+    retweet: 1.0,
+    favorite: 0.6,
+    cont_click_dwell_time: 0.4,
+    click: 0.3,
+    open_link: 0.2,
+    photo_expand: 0.05,
+    dwell: 0.05,
+    quoted_click: 0.05,
+    video_open: 0.02,
+    post_unexplored: 0.015,
+    cont_dwell_time: 0.006,
+    profile_click: 0.0,
+    vqv: 0.0,
+    quoted_vqv: 0.0,
+    not_dwelled: -0.02,
+    block_author: -31.2,
+    not_interested: -47.52,
+    mute_author: -58.8,
+    report: -234.0,
+};
+
+#[derive(Serialize)]
+struct Algorithm {
+    source: &'static str,
+    score: &'static str,
+    weights: Weights,
+    facts: &'static [&'static str],
+}
+
+#[derive(Serialize)]
+struct Tips {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    algorithm: Option<Algorithm>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replies: Option<&'static [&'static str]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    posting: Option<&'static [&'static str]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    growth: Option<&'static [&'static str]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<&'static [&'static str]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avoid: Option<&'static [&'static str]>,
+}
+
+const ALGORITHM_FACTS: &[&str] = &[
+    "Reply weight is 20 (5 + 15) on an original post by an author the viewer mutually follows; the dwell boost is 0",
+    "A post whose predicted negatives outweigh its positives sinks below every positive post for that viewer",
+    "An author's 1st/2nd/3rd/4th unseen post in one feed request scores x1/x0.625/x0.44/x0.34 (floor x0.25)",
+    "Out-of-network posts score x0.75, and so do in-network replies and reposts; topic feeds x0.5",
+    "Hard 48 h age cutoff and no continuous time decay; the model sees post age in 1 h buckets",
+    "Cold start: each For You request lifts at most one post to rank 16: an original (not a reply or repost) by an author with <=50,000 followers, <=2 h old, under 200 home impressions, picked by a bandit on likes per impression",
+    "For You never shows a reply to people who don't follow the replier; strangers see replies only under the post, in the OP's notifications and in search",
+    "Only the top-scored post of a conversation reaches a feed (DedupConversationFilter), so a long thread competes with itself",
+    "Links carry no ranking penalty (open_link +0.2). The risks are URL reputation and the API's $0.20 fee for a post with a link",
+    "Profile clicks, video watch time (vqv) and bookmarks have no ranking weight",
+    "The ranker sees post content (text and media embeddings), like/reply/repost/quote/view counts, post age, and whether the author follows the viewer. It does not see follower count, Premium status or hashtags",
+    "Premium has no For You multiplier. It seeds user-cred (a PageRank), and verified status is a feature when replies under a post are ordered",
+    "Replies under a post are ordered by a model that uses: the OP liked or replied to the reply, the OP follows the replier, verified status, a Grok reply score (0-3), and blocks, mutes and reports on the reply",
+];
+
+const REPLIES: &[&str] = &[
+    "`reply <id|url> \"text\"` reaches any thread through the web session. Without it, the X API only allows replies to people who mentioned you",
+    "Read first: `conversation <id>` returns the parent chain, the post and its top replies in one free call",
+    "Name a specific detail from the post (a claim, number, method or result), or ask the author something they can answer. An OP who likes or answers your reply lifts its place under the post",
+    "Check drafts with `reply <id> \"text\" --dry-run` or `analyze \"text\" --reply-to <id>`; rewrite once if JEV flags generic, slop, off_topic or bait",
+    "X's LLM judge scores every reply to someone else's thread from 0 to 3; a 0 down-ranks it. An account-level AI-slop label hides all your posts from non-followers for 30 days",
+    "One reply per stranger's conversation. Don't reply to your own reply under someone else's post: X runs a separate spam check on those chains",
+    "Quote or reply: both weigh 5. A quote goes to your followers' feeds and can win the cold-start slot; a reply reaches the people reading that thread",
+    "Answer people who reply to you within the first hour: `engage inbox <your post id>`",
+    "If a reply fails, never auto-thread or split it: give the user the text to post themselves",
+];
+
+const POSTING: &[&str] = &[
+    "Front-load the hook: the first line decides whether people stop. Posts over 280 chars (Premium) show their first 280 as the preview",
+    "Write for sends and saves: a copy-link share weighs 20 and a DM share 5, against 0.6 for a like",
+    "Space originals: your 2nd and 3rd unseen post in a viewer's feed score x0.625 and x0.44. Don't post a new original while the last one is in its first 2 h",
+    "Avoid what people mute or report (-58.8, -234): insults, rage bait, spammy claims",
+    "Keep threads short, or split strong ideas into standalone posts",
+    "Links are fine in the post body; avoid shorteners. A link via the paid API costs $0.20, via the web session nothing",
+    "`post \"text\" --dry-run` returns preflight score, JEV flags, X-weighted length, route and cost without posting",
+    "`suggest best-time` picks hours from your own history; `schedule add \"text\" --at auto` uses it",
+    "Articles are not long posts: `article preview`, `article draft` (web session; --api for the official endpoint), `article publish` makes it public, only with the user's yes",
+    "Original posts, DMs, article publish and deletes need the user's explicit approval",
+];
+
+const GROWTH: &[&str] = &[
+    "Small accounts grow by replying early to bigger accounts in their niche: replies are the only way to reach non-followers without For You",
+    "`engage feed [topics]` finds fresh posts worth a reply (with JEV: the best 5, each with a why). With no topics it uses niche.topics",
+    "`engage watchlist add <handle>` pins accounts without following; engage feed checks them first",
+    "After replying, `track run` records reply-backs and promotes accounts where your replies did well; `engage hot-targets` ranks them",
+    "Mutual follows matter: your original posts get reply weight 20 instead of 5 from mutuals. Follow back people who engage with you",
+    "`engage swarm <id>` lists smaller accounts replying under a big post, for peer-to-peer replies",
+    "Your own originals need early likes in their first 2 h to win the cold-start slot (accounts up to 50k followers)",
+];
+
+const METRICS: &[&str] = &[
+    "`metrics ID1 ID2 ...` reads up to 100 posts in one call with age, delta since the last snapshot and velocity; never loop per ID",
+    "`track run` snapshots recent posts and checks pending reply-backs in one call; `track status`, `report daily|weekly` summarise",
+    "`timeline --user <handle> --sort impressions` finds top posts; `--since 24h` shows recent ones",
+    "`engage inbox <id>` covers replies, quote posts and replies under quotes; with JEV it triages them",
+    "Every read feeds a local library: `inspire --topic X` (or --long) browses it",
+];
+
+const AVOID: &[&str] = &[
+    "Engagement-bait wording (like if, RT to win, follow for follow, comment X and I'll DM you) hides the post from non-followers, with no reputation exemption",
+    "Link shorteners or low-quality redirects hide the post from non-followers; a pinned post with a bad link labels the whole account for 7 days",
+    "Near-duplicate text across replies is grouped as copy-paste spam",
+    "2 or more @mentions in a post trigger X's real-time spam check",
+    "Second-person insults hide the post from non-followers",
+    "Replying under a spam- or NSFW-labelled post: your reply is dropped with it",
+    "Under the Hood (x.com/i/jf/under_the_hood) lists most labels on your posts, but not the reply down-rank or copy-paste labels, and you never see your own hidden replies",
+    "If X shows a captcha, lock or 'automated' warning (code 226), stop all writes and ask the user to clear it on x.com",
+];
+
+fn render_tips(format: OutputFormat, topic: &str) {
+    output::render(format, &tips_for(topic), None);
+}
+
+fn tips_for(topic: &str) -> Tips {
+    let all = topic == "all";
+    let want = |t: &str| all || topic == t;
+    Tips {
+        algorithm: want("algorithm").then_some(Algorithm {
+            source: "xai-org/x-algorithm: home-mixer/params/param.rs (production values, last sync 2026-10-12) and vm-ranker/params.rs",
+            score: "score = sum of weight x the viewer's predicted probability of each action",
+            weights: WEIGHTS,
+            facts: ALGORITHM_FACTS,
+        }),
+        replies: want("replies").then_some(REPLIES),
+        posting: want("posting").then_some(POSTING),
+        growth: want("growth").then_some(GROWTH),
+        metrics: want("metrics").then_some(METRICS),
+        avoid: want("avoid").then_some(AVOID),
+    }
+}
+
+impl Tableable for Tips {
+    fn to_table(&self) -> comfy_table::Table {
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["Topic", "Tips"]);
+        if let Some(a) = &self.algorithm {
+            let weights = serde_json::to_value(&a.weights)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .map(|m| m.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            table.add_row(vec!["algorithm".to_string(), format!("{}\n{}\nWeights: {weights}\n{}", a.source, a.score, a.facts.join("\n"))]);
+        }
+        for (name, lines) in [
+            ("replies", self.replies),
+            ("posting", self.posting),
+            ("growth", self.growth),
+            ("metrics", self.metrics),
+            ("avoid", self.avoid),
+        ] {
+            if let Some(lines) = lines {
+                table.add_row(vec![name.to_string(), lines.join("\n")]);
+            }
+        }
+        table
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_is_listed() {
+        let lines = command_lines();
+        let text = lines.join("\n");
+        for cmd in crate::cli::Cli::command().get_subcommands().filter(|c| !SKIP_COMMANDS.contains(&c.get_name())) {
+            assert!(text.contains(cmd.get_name()), "missing {}", cmd.get_name());
+        }
+        assert!(lines.iter().any(|l| l.starts_with("like/unlike <id>")), "{text}");
+        assert!(lines.iter().any(|l| l.starts_with("reply <id> <text>")), "{text}");
+        assert!(lines.iter().any(|l| l.starts_with("engage feed [topics...]")), "{text}");
+        assert!(!text.contains("--json") && !text.contains("--help"), "{text}");
+    }
+
+    #[test]
+    fn each_topic_returns_one_section() {
+        for topic in TIP_TOPICS.iter().filter(|t| **t != "all") {
+            let v = serde_json::to_value(tips_for(topic)).unwrap();
+            let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+            assert_eq!(keys, vec![*topic], "{topic}");
+        }
+        let all = serde_json::to_value(tips_for("all")).unwrap();
+        assert_eq!(all.as_object().unwrap().len(), TIP_TOPICS.len() - 1);
+        assert_eq!(all["algorithm"]["weights"]["share_via_copy_link"], 20.0);
+    }
 }

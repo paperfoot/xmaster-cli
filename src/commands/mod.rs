@@ -65,7 +65,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Followers { .. } => "followers",
         Commands::Following { .. } => "following",
         Commands::Config { .. } => "config",
-        Commands::AgentInfo => "agent-info",
+        Commands::AgentInfo { .. } => "agent-info",
         Commands::Engage { .. } => "engage",
         Commands::Update { .. } => "update",
         Commands::Star => "star",
@@ -298,8 +298,8 @@ pub async fn dispatch(
             ConfigCommands::Auth => { config_cmd::auth(ctx, format).await }
             ConfigCommands::WebLogin => { config_cmd::web_login(format).await }
         },
-        Commands::AgentInfo => {
-            agent_info::execute(format);
+        Commands::AgentInfo { tips } => {
+            agent_info::execute(format, tips.as_deref());
             Ok(())
         }
         Commands::Engage { action } => match action {

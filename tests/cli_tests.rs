@@ -43,7 +43,7 @@ fn agent_info_outputs_json() {
         .success()
         .stdout(predicate::str::contains("\"name\":\"xmaster\""))
         .stdout(predicate::str::contains("\"commands\""))
-        .stdout(predicate::str::contains("\"env_prefix\":\"XMASTER_\""));
+        .stdout(predicate::str::contains("\"exit_codes\""));
 }
 
 #[test]
@@ -355,24 +355,31 @@ const REQUIRED_SIGNALS: &[&str] = &["not_dwelled", "quoted_vqv", "cont_click_dwe
 
 #[test]
 fn agent_info_has_no_banned_phrases() {
-    let stdout = String::from_utf8_lossy(
-        &xmaster().arg("agent-info").output().expect("run").stdout,
-    )
-    .into_owned();
-    for phrase in BANNED_PHRASES {
-        assert!(!stdout.contains(phrase), "agent-info contains banned phrase: {phrase}");
+    for args in [&["agent-info"][..], &["agent-info", "--tips"]] {
+        let stdout = String::from_utf8_lossy(&xmaster().args(args).output().expect("run").stdout).into_owned();
+        for phrase in BANNED_PHRASES {
+            assert!(!stdout.contains(phrase), "{args:?} contains banned phrase: {phrase}");
+        }
     }
 }
 
 #[test]
-fn agent_info_lists_all_22_scorer_terms() {
+fn agent_info_tips_list_the_scorer_terms() {
     let stdout = String::from_utf8_lossy(
-        &xmaster().arg("agent-info").output().expect("run").stdout,
+        &xmaster().args(["agent-info", "--tips", "algorithm"]).output().expect("run").stdout,
     )
     .into_owned();
     for signal in REQUIRED_SIGNALS {
-        assert!(stdout.contains(signal), "agent-info missing scorer term: {signal}");
+        assert!(stdout.contains(signal), "agent-info --tips missing scorer term: {signal}");
     }
+}
+
+/// Agents load agent-info on every session; keep it under 6 KB.
+#[test]
+fn agent_info_stays_small() {
+    let out = xmaster().arg("agent-info").env("XMASTER_CONFIG_DIR", "/nonexistent-xmaster-test").output().expect("run");
+    assert!(out.status.success());
+    assert!(out.stdout.len() <= 6000, "agent-info is {} bytes", out.stdout.len());
 }
 
 #[test]
