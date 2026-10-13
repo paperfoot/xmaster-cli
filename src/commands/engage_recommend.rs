@@ -509,7 +509,7 @@ pub struct FeedPost {
     pub opportunity_score: f32,
     /// JEV pick score (0-1) when JEV ranked the feed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jev_score: Option<f32>,
+    pub jev_score: Option<f64>,
     /// Why JEV picked it, built from its judgments.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub why: String,
@@ -841,7 +841,7 @@ async fn jev_pick(ctx: &AppContext, posts: &mut Vec<FeedPost>, keep: usize) -> O
         .zip(picks)
         .filter_map(|(mut post, pick)| {
             let pick = pick.filter(|p| p.score >= judge::PICK_FLOOR)?;
-            post.jev_score = Some((pick.score * 100.0).round() as f32 / 100.0);
+            post.jev_score = Some((pick.score * 100.0).round() / 100.0);
             post.why = pick.why;
             Some((pick.score, post))
         })

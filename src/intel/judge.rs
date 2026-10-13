@@ -193,7 +193,7 @@ pub struct DraftFlag {
 }
 
 const FLAGS: [(&str, &str); 4] = [
-    ("generic", "Name something specific in the post and add your own fact, number or experience"),
+    ("generic", "Name a specific detail from the post and add your own fact, number or experience, or ask the author something they can answer"),
     ("slop", "Rewrite plainly: one concrete point, no hype words, emoji decoration or hashtags"),
     ("off_topic", "Answer what the post actually says, or post this as a standalone"),
     ("bait", "Drop the ask for likes, follows or reposts, the plug or the insult; people mute these"),
