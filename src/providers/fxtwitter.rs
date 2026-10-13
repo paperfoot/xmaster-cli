@@ -18,7 +18,7 @@
 //!
 //! Reference: https://github.com/FixTweet/FxTwitter
 
-use crate::providers::xapi::{ReferencedTweet, TweetData, TweetMetrics};
+use crate::providers::xapi::{ReferencedTweet, TweetData, TweetMetrics, UserMetrics, UserResponse};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -47,6 +47,39 @@ pub struct Article {
 #[derive(Deserialize)]
 struct FxResponse {
     tweet: Option<FxTweet>,
+}
+
+#[derive(Deserialize)]
+struct FxUserResponse {
+    user: Option<FxUser>,
+}
+
+#[derive(Deserialize)]
+struct FxUser {
+    id: String,
+    screen_name: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    followers: u64,
+    #[serde(default)]
+    following: u64,
+    #[serde(default)]
+    tweets: u64,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    joined: Option<String>,
+    #[serde(default)]
+    verification: Option<FxVerification>,
+}
+
+#[derive(Deserialize)]
+struct FxVerification {
+    #[serde(default)]
+    verified: bool,
 }
 
 #[derive(Deserialize)]
@@ -139,7 +172,7 @@ struct FxMediaInfo {
 
 // --- Public API ---
 
-async fn fetch_status(tweet_id: &str) -> Option<FxTweet> {
+async fn fetch_json<T: serde::de::DeserializeOwned>(path: &str) -> Option<T> {
     static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
     let client = CLIENT
         .get_or_init(|| {
@@ -150,11 +183,41 @@ async fn fetch_status(tweet_id: &str) -> Option<FxTweet> {
                 .ok()
         })
         .as_ref()?;
-    let resp = client.get(format!("{FX_BASE}/i/status/{tweet_id}")).send().await.ok()?;
+    let resp = client.get(format!("{FX_BASE}{path}")).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
-    resp.json::<FxResponse>().await.ok()?.tweet
+    resp.json::<T>().await.ok()
+}
+
+async fn fetch_status(tweet_id: &str) -> Option<FxTweet> {
+    fetch_json::<FxResponse>(&format!("/i/status/{tweet_id}")).await?.tweet
+}
+
+/// Look up a profile for free (username → ID, bio, counts). `None` on any
+/// failure — the caller falls back to the paid API lookup.
+pub async fn fetch_user(username: &str) -> Option<UserResponse> {
+    let u = fetch_json::<FxUserResponse>(&format!("/{}", urlencoding::encode(username)))
+        .await?
+        .user?;
+    Some(UserResponse {
+        id: u.id,
+        name: u.name,
+        username: u.screen_name,
+        description: u.description,
+        public_metrics: Some(UserMetrics {
+            followers_count: u.followers,
+            following_count: u.following,
+            tweet_count: u.tweets,
+            listed_count: 0,
+        }),
+        profile_image_url: u.avatar_url,
+        verified: u.verification.map(|v| v.verified),
+        created_at: u
+            .joined
+            .and_then(|j| chrono::DateTime::parse_from_str(&j, "%a %b %d %H:%M:%S %z %Y").ok())
+            .map(|d| d.to_utc().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+    })
 }
 
 /// Fetch an Article for a tweet ID via FxTwitter. Returns `Ok(None)` when the

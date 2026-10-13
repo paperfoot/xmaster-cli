@@ -1239,7 +1239,15 @@ impl XApi {
 
     // -- User lookup --------------------------------------------------------
 
+    /// Username → profile. Tries FxTwitter first (free); the API lookup is
+    /// the fallback. Every command that resolves a handle goes through here.
     pub async fn get_user_by_username(&self, username: &str) -> Result<UserResponse, XmasterError> {
+        let username = username.trim_start_matches('@');
+        if !self.ctx.config.settings.disable_fxtwitter {
+            if let Some(user) = super::fxtwitter::fetch_user(username).await {
+                return Ok(user);
+            }
+        }
         let url = format!(
             "{BASE}/users/by/username/{username}?{fields}",
             fields = Self::user_fields_param()
