@@ -333,8 +333,9 @@ pub enum Commands {
         id: String,
     },
 
-    /// Get replies to a tweet (uses conversation_id search). With JEV, replies
-    /// not worth reading (thanks, emoji, spam, no substance) are left out.
+    /// Direct replies to a post: the whole conversation through the web
+    /// session (free, no 7-day limit). With JEV, replies not worth reading
+    /// (thanks, emoji, spam, no substance) are left out.
     Replies {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
@@ -513,6 +514,30 @@ pub enum Commands {
 
     /// Open the xmaster GitHub repo to star it
     Star,
+
+    /// Pacing rails: write budget, cooldowns, pause
+    Rails {
+        #[command(subcommand)]
+        action: RailsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RailsCommands {
+    /// Today's write counts vs caps, next allowed time, cooldown
+    Status,
+    /// Pause all writes (optionally for N hours)
+    Pause {
+        #[arg(long)]
+        hours: Option<f64>,
+    },
+    /// Resume writes after a pause
+    Resume,
+    /// Clear an X-challenge cooldown (only after clearing it on x.com)
+    ResetCooldown {
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

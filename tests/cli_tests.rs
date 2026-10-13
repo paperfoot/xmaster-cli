@@ -1,8 +1,12 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// Every test runs with the pacing rails off: a test that reaches a write
+/// path must fail on credentials, not wait on a cooldown.
 fn xmaster() -> Command {
-    Command::cargo_bin("xmaster").unwrap()
+    let mut cmd = Command::cargo_bin("xmaster").unwrap();
+    cmd.env("XMASTER_RAILS", "off");
+    cmd
 }
 
 // ─── Help & Version ──────────────────────────────────────────────

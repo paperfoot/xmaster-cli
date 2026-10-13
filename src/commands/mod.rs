@@ -32,8 +32,9 @@ pub mod amplifiers;
 pub mod volume;
 pub mod article;
 pub mod conversation;
+pub mod rails_cmd;
 
-use crate::cli::{ArticleCommands, Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
+use crate::cli::{ArticleCommands, Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, RailsCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::output::OutputFormat;
@@ -97,6 +98,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Suggest { .. } => "suggest",
         Commands::Schedule { .. } => "schedule",
         Commands::Skill { .. } => "skill",
+        Commands::Rails { .. } => "rails",
     }
 }
 
@@ -406,6 +408,12 @@ pub async fn dispatch(
             ScheduleCommands::Reschedule { id, at } => schedule::reschedule(format, id, at).await,
             ScheduleCommands::Fire => schedule::fire(ctx, format).await,
             ScheduleCommands::Setup => schedule::setup(format).await,
+        },
+        Commands::Rails { action } => match action {
+            RailsCommands::Status => rails_cmd::status(ctx, format).await,
+            RailsCommands::Pause { hours } => rails_cmd::pause(format, *hours).await,
+            RailsCommands::Resume => rails_cmd::resume(format).await,
+            RailsCommands::ResetCooldown { yes } => rails_cmd::reset_cooldown(ctx, format, *yes).await,
         },
         Commands::Skill { action } => match action {
             SkillCommands::Install => skill_cmd::install(format).await,
