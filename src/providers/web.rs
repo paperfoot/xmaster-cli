@@ -17,8 +17,12 @@ use reqwest::{RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, warn};
+
+use super::web_timeline::{self, Page};
+use super::xapi::TweetData;
 
 /// Public bearer token used by the X web app (same for all users, not secret).
 const WEB_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
@@ -41,7 +45,20 @@ const FALLBACK_IDS: &[(&str, &str)] = &[
     ("DeleteBookmark", "Wlmlj2-xzyS1GN3a6cj-mQ"),
     ("ArticleEntityDraftCreate", "g1l5N8BxGewYuCy5USe_bQ"),
     ("ArticleEntityUpdateCoverMedia", "Es8InPh7mEkK9PxclxFAVQ"),
+    ("HomeLatestTimeline", "NmDBT3APtNxDpMqIEauu7A"),
+    ("NotificationsTimeline", "EUX2EwvgT4f9F7sC4A59Eg"),
 ];
+
+/// Read operations main.js doesn't declare, and the lazy chunk (a `~`-joined
+/// chunk-name segment) that does.
+const LAZY_OPS: &[(&str, &str)] = &[
+    ("HomeLatestTimeline", "bundle.HomeTimeline"),
+    ("NotificationsTimeline", "bundle.Notifications"),
+];
+
+/// Every timeline query declares the same feature switches; a read whose
+/// operation wasn't discovered borrows them from this one.
+const TIMELINE_FEATURES_OP: &str = "SearchTimeline";
 
 /// Feature flags x.com sends with CreateTweet / CreateNoteTweet.
 const TWEET_FEATURES: &[&str] = &[
@@ -71,6 +88,10 @@ const TWEET_FEATURES_OFF: &[&str] = &[
     "responsive_web_enhance_cards_enabled",
 ];
 
+/// Field toggles x.com sends with timeline queries (Article bodies off: the
+/// timeline only needs the post).
+const READ_FIELD_TOGGLES: &str = r#"{"withPayments":false,"withAuxiliaryUserLabels":false,"withArticleRichContentState":false,"withArticlePlainText":false,"withGrokAnalyze":false,"withDisallowedReplyControls":false}"#;
+
 /// One GraphQL operation as declared in main.js.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpMeta {
@@ -90,6 +111,11 @@ struct State {
     #[serde(default)]
     switches: HashMap<String, bool>,
     tx: Option<TxKeys>,
+    /// The logged-in account's user ID and handle (from the page's state).
+    #[serde(default)]
+    viewer_id: String,
+    #[serde(default)]
+    viewer_handle: String,
 }
 
 impl State {
@@ -140,6 +166,37 @@ pub fn parse_switches(html: &str) -> HashMap<String, bool> {
         .collect()
 }
 
+/// URLs of the lazy JS chunks whose `~`-joined name includes `segment`
+/// (e.g. `bundle.HomeTimeline`), from the page's chunk-name and hash maps.
+pub fn lazy_chunk_urls(html: &str, segment: &str) -> Vec<String> {
+    let names = regex::Regex::new(r#"(\d+):"((?:bundle|shared|loader)[\w.~-]*)""#).unwrap();
+    names
+        .captures_iter(html)
+        .filter(|c| c[2].split('~').any(|s| s == segment))
+        .filter_map(|c| {
+            let hash = regex::Regex::new(&format!(r#"[{{,]{}:"([0-9a-f]{{8,}})""#, &c[1])).ok()?;
+            let h = hash.captures(html)?;
+            Some(format!("https://abs.twimg.com/responsive-web/client-web/{}.{}a.js", &c[2], &h[1]))
+        })
+        .collect()
+}
+
+/// The logged-in user's ID from the page's `"session":{…"user_id":"…"}`.
+fn viewer_id(html: &str) -> Option<String> {
+    regex::Regex::new(r#""session":\{.{0,2000}?"user_id":"(\d+)""#)
+        .unwrap()
+        .captures(html)
+        .map(|c| c[1].to_string())
+}
+
+/// The logged-in user's handle, from their entry in the page's user store.
+fn viewer_handle(html: &str, id: &str) -> Option<String> {
+    regex::Regex::new(&format!(r#""{id}":\{{"name":.{{0,3000}}?"screen_name":"(\w+)""#))
+        .ok()?
+        .captures(html)
+        .map(|c| c[1].to_string())
+}
+
 fn main_js_url(html: &str) -> Option<String> {
     regex::Regex::new(r#"https://abs\.twimg\.com/responsive-web/client-web/main\.[0-9a-f]+\.js"#)
         .unwrap()
@@ -177,6 +234,46 @@ fn errors_to_err(op: &str, errors: &Value) -> XmasterError {
         _ => "",
     };
     web_err("web_error", format!("{op} failed: {msg} [code {code}]{hint}"))
+}
+
+/// An operation's declared feature switches with the logged-in page's values.
+fn features(state: &State, op: &str) -> Option<Value> {
+    let meta = state.ops.get(op).filter(|m| !m.features.is_empty())?;
+    Some(Value::Object(
+        meta.features
+            .iter()
+            .map(|f| (f.clone(), Value::Bool(state.switches.get(f).copied().unwrap_or(false))))
+            .collect(),
+    ))
+}
+
+/// What a timeline read does with one post.
+enum Take {
+    Keep,
+    Skip,
+    /// Out of range: skip it and fetch no further pages.
+    Done,
+}
+
+/// RFC 3339 → Unix seconds.
+fn unix(ts: Option<&str>) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts?).ok().map(|d| d.timestamp())
+}
+
+/// Keep posts created inside [since, until); newest-first timelines are done
+/// once a post predates `since`.
+fn window(since: Option<&str>, until: Option<&str>) -> impl Fn(&TweetData) -> Take {
+    let (since, until) = (unix(since), unix(until));
+    move |t| {
+        let Some(at) = unix(t.created_at.as_deref()) else { return Take::Keep };
+        if since.is_some_and(|s| at < s) {
+            Take::Done
+        } else if until.is_some_and(|u| at >= u) {
+            Take::Skip
+        } else {
+            Take::Keep
+        }
+    }
 }
 
 pub struct Web<'a> {
@@ -264,12 +361,23 @@ impl<'a> Web<'a> {
         }
 
         let main_js = main_js_url(&html).unwrap_or_default();
-        let ops = if !main_js.is_empty() && (main_js != prev.main_js || prev.ops.is_empty()) {
+        let mut ops = if !main_js.is_empty() && (main_js != prev.main_js || prev.ops.is_empty()) {
             let found = parse_ops(&self.get_text(&main_js).await.unwrap_or_default());
             if found.is_empty() { prev.ops } else { found }
         } else {
             prev.ops
         };
+        for (op, segment) in LAZY_OPS {
+            if ops.contains_key(*op) {
+                continue;
+            }
+            for url in lazy_chunk_urls(&html, segment) {
+                ops.extend(parse_ops(&self.get_text(&url).await.unwrap_or_default()));
+                if ops.contains_key(*op) {
+                    break;
+                }
+            }
+        }
         let ondemand = self.get_text(&transaction_id::ondemand_url(&html)?).await?;
         // Keep only the switches some operation declares (the page has ~1k)
         let used: std::collections::HashSet<&String> = ops.values().flat_map(|m| &m.features).collect();
@@ -280,6 +388,10 @@ impl<'a> Web<'a> {
             ops,
             switches,
             tx: Some(transaction_id::derive(&html, &ondemand)?),
+            viewer_handle: viewer_id(&html)
+                .and_then(|id| viewer_handle(&html, &id))
+                .unwrap_or(prev.viewer_handle),
+            viewer_id: viewer_id(&html).unwrap_or(prev.viewer_id),
         };
         if let Ok(bytes) = serde_json::to_vec(&state) {
             let _ = std::fs::write(state_path(), bytes);
@@ -356,6 +468,15 @@ impl<'a> Web<'a> {
                     message: "X rejected the web session (HTTP 401). Run: xmaster config web-login".into(),
                 });
             }
+            if body.trim_start().starts_with('<') {
+                return Err(web_err(
+                    "web_challenge",
+                    format!(
+                        "{op}: X served a browser challenge page (HTTP {status}) instead of data. \
+                         Open x.com in Chrome, then retry"
+                    ),
+                ));
+            }
             let val: Value = serde_json::from_str(&body).map_err(|_| {
                 web_err(
                     "web_error",
@@ -395,19 +516,7 @@ impl<'a> Web<'a> {
         referer: &str,
     ) -> Result<Value, XmasterError> {
         let state = self.state(false).await?;
-        let features = state
-            .ops
-            .get(op)
-            .filter(|m| !m.features.is_empty())
-            .map(|m| {
-                let map: serde_json::Map<String, Value> = m
-                    .features
-                    .iter()
-                    .map(|f| (f.clone(), Value::Bool(state.switches.get(f).copied().unwrap_or(false))))
-                    .collect();
-                Value::Object(map)
-            })
-            .or(fallback_features);
+        let features = features(&state, op).or(fallback_features);
         self.send(op, referer, |qid| {
             let path = format!("/i/api/graphql/{qid}/{op}");
             let mut body = json!({ "variables": variables, "queryId": qid });
@@ -419,6 +528,27 @@ impl<'a> Web<'a> {
             }
             let req = self.ctx.client.post(format!("https://x.com{path}")).json(&body);
             ("POST", path, req)
+        })
+        .await
+    }
+
+    /// Run a GraphQL query the way x.com does: a GET with the variables,
+    /// feature switches and field toggles in the query string.
+    pub async fn query(&self, op: &str, variables: Value, referer: &str) -> Result<Value, XmasterError> {
+        let state = self.state(false).await?;
+        let features = features(&state, op)
+            .or_else(|| features(&state, TIMELINE_FEATURES_OP))
+            .unwrap_or_else(|| json!({}));
+        let variables = variables.to_string();
+        let features = features.to_string();
+        self.send(op, referer, |qid| {
+            let path = format!("/i/api/graphql/{qid}/{op}");
+            let req = self.ctx.client.get(format!("https://x.com{path}")).query(&[
+                ("variables", variables.as_str()),
+                ("features", features.as_str()),
+                ("fieldToggles", READ_FIELD_TOGGLES),
+            ]);
+            ("GET", path, req)
         })
         .await
     }
@@ -435,29 +565,215 @@ impl<'a> Web<'a> {
     /// Read-only end-to-end check of the session: cookies, query IDs,
     /// feature flags and transaction signing. Returns the logged-in handle.
     pub async fn probe(&self, handle: &str) -> Result<String, XmasterError> {
-        let op = "UserByScreenName";
-        let state = self.state(false).await?;
-        let features: serde_json::Map<String, Value> = state
-            .ops
-            .get(op)
-            .map(|m| m.features.iter().map(|f| (f.clone(), Value::Bool(state.switches.get(f).copied().unwrap_or(false)))).collect())
-            .unwrap_or_default();
-        let variables = json!({ "screen_name": handle });
         let val = self
-            .send(op, "https://x.com/home", |qid| {
-                let path = format!("/i/api/graphql/{qid}/{op}");
-                let req = self.ctx.client.get(format!("https://x.com{path}")).query(&[
-                    ("variables", variables.to_string()),
-                    ("features", Value::Object(features.clone()).to_string()),
-                ]);
-                ("GET", path, req)
-            })
+            .query("UserByScreenName", json!({ "screen_name": handle }), "https://x.com/home")
             .await?;
         val.pointer("/data/user/result/core/screen_name")
             .or_else(|| val.pointer("/data/user/result/legacy/screen_name"))
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| web_err("probe", format!("Unexpected response: {}", crate::utils::safe_truncate(&val.to_string(), 200))))
+    }
+
+    // -- Reads --------------------------------------------------------------
+
+    /// The logged-in account's (user ID, handle), free from the cached page
+    /// state. The handle may be empty.
+    async fn viewer(&self) -> Result<(String, String), XmasterError> {
+        let mut state = self.state(false).await?;
+        if state.viewer_id.is_empty() {
+            // State cached before these fields existed
+            state = self.state(true).await?;
+        }
+        if state.viewer_id.is_empty() {
+            return Err(web_err("no_viewer_id", "The x.com page carried no user ID".into()));
+        }
+        Ok((state.viewer_id, state.viewer_handle))
+    }
+
+    /// The logged-in account's user ID.
+    pub async fn viewer_id(&self) -> Result<String, XmasterError> {
+        Ok(self.viewer().await?.0)
+    }
+
+    /// Page through a timeline query until `want` posts are taken, the
+    /// timeline ends, or `take` reports the rest is out of range. Pauses
+    /// between pages like someone scrolling.
+    async fn timeline(
+        &self,
+        op: &str,
+        variables: Value,
+        referer: &str,
+        want: usize,
+        mut take: impl FnMut(&TweetData) -> Take,
+    ) -> Result<Vec<TweetData>, XmasterError> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        for page_no in 0..want / 10 + 3 {
+            if page_no > 0 {
+                tokio::time::sleep(Duration::from_millis(400 + rand::random::<u64>() % 600)).await;
+            }
+            let mut vars = variables.clone();
+            if let Some(c) = &cursor {
+                vars["cursor"] = json!(c);
+            }
+            let Page { tweets, bottom } = web_timeline::parse_timeline(&self.query(op, vars, referer).await?);
+            let (mut fresh, mut done) = (false, false);
+            for t in tweets {
+                if !seen.insert(t.id.clone()) {
+                    continue;
+                }
+                fresh = true;
+                match take(&t) {
+                    Take::Keep => out.push(t),
+                    Take::Skip => {}
+                    Take::Done => done = true,
+                }
+            }
+            if done || !fresh || out.len() >= want || bottom.is_none() || bottom == cursor {
+                break;
+            }
+            cursor = bottom;
+        }
+        out.truncate(want);
+        debug!("{op}: {} posts served by the web session (free)", out.len());
+        Ok(out)
+    }
+
+    /// SearchTimeline. `top` picks the Top tab, else Latest; the time bounds
+    /// (RFC 3339) become `since_time:` / `until_time:` operators.
+    pub async fn search(
+        &self,
+        query: &str,
+        top: bool,
+        want: usize,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Vec<TweetData>, XmasterError> {
+        let mut raw = query.to_string();
+        if let Some(t) = unix(since) {
+            raw.push_str(&format!(" since_time:{t}"));
+        }
+        if let Some(t) = unix(until) {
+            raw.push_str(&format!(" until_time:{t}"));
+        }
+        let product = if top { "Top" } else { "Latest" };
+        let referer = format!(
+            "https://x.com/search?q={}&src=typed_query{}",
+            urlencoding::encode(query),
+            if top { "" } else { "&f=live" }
+        );
+        let variables = json!({
+            "rawQuery": raw,
+            "count": 20,
+            "querySource": "typed_query",
+            "product": product,
+            "withGrokTranslatedBio": false,
+            "withQuickPromoteEligibilityTweetFields": false,
+        });
+        self.timeline("SearchTimeline", variables, &referer, want, |_| Take::Keep).await
+    }
+
+    /// Direct replies to a post, from its conversation view (TweetDetail):
+    /// the whole thread, with no 7-day search window.
+    pub async fn replies(&self, tweet_id: &str, want: usize) -> Result<Vec<TweetData>, XmasterError> {
+        let variables = json!({
+            "focalTweetId": tweet_id,
+            "referrer": "tweet",
+            "with_rux_injections": false,
+            "rankingMode": "Recency",
+            "includePromotedContent": true,
+            "withCommunity": true,
+            "withQuickPromoteEligibilityTweetFields": true,
+            "withBirdwatchNotes": true,
+            "withVoice": true,
+        });
+        let referer = format!("https://x.com/i/status/{tweet_id}");
+        self.timeline("TweetDetail", variables, &referer, want, |t| {
+            let direct = t
+                .referenced_tweets
+                .as_ref()
+                .is_some_and(|r| r.iter().any(|r| r.ref_type == "replied_to" && r.id == tweet_id));
+            if direct { Take::Keep } else { Take::Skip }
+        })
+        .await
+    }
+
+    /// A user's posts and reposts, newest first (UserTweets), within the
+    /// optional RFC 3339 bounds.
+    pub async fn user_tweets(
+        &self,
+        user_id: &str,
+        want: usize,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Vec<TweetData>, XmasterError> {
+        let variables = json!({
+            "userId": user_id,
+            "count": 20,
+            "includePromotedContent": true,
+            "withQuickPromoteEligibilityTweetFields": true,
+            "withVoice": true,
+        });
+        let in_range = window(since, until);
+        self.timeline("UserTweets", variables, "https://x.com/home", want, |t| {
+            if t.author_id.as_deref() != Some(user_id) {
+                return Take::Skip;
+            }
+            in_range(t)
+        })
+        .await
+    }
+
+    /// The Following tab (HomeLatestTimeline): the API's reverse-chronological
+    /// home timeline.
+    pub async fn home_latest(
+        &self,
+        want: usize,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Vec<TweetData>, XmasterError> {
+        let variables = json!({
+            "count": 20,
+            "includePromotedContent": true,
+            "latestControlAvailable": true,
+            "requestContext": "launch",
+            "withCommunity": true,
+            "seenTweetIds": [],
+        });
+        self.timeline("HomeLatestTimeline", variables, "https://x.com/home", want, window(since, until))
+            .await
+    }
+
+    /// Posts that mention the logged-in account, newest first, after
+    /// `since_id`. The Mentions tab and a search for the handle each hide
+    /// some posts behind their own quality filters, so this merges both.
+    pub async fn mentions(&self, want: usize, since_id: Option<&str>) -> Result<Vec<TweetData>, XmasterError> {
+        let since: u64 = since_id.and_then(|s| s.parse().ok()).unwrap_or(0);
+        let after = |t: &TweetData| t.id.parse::<u64>().unwrap_or(u64::MAX) > since;
+        let variables = json!({ "timeline_type": "Mentions", "count": 40 });
+        let mut all = self
+            .timeline("NotificationsTimeline", variables, "https://x.com/notifications/mentions", want, |t| {
+                if after(t) { Take::Keep } else { Take::Done }
+            })
+            .await?;
+        let (_, handle) = self.viewer().await?;
+        if !handle.is_empty() {
+            let mut q = format!("@{handle} -from:{handle}");
+            if since > 0 {
+                q.push_str(&format!(" since_id:{since}"));
+            }
+            match self.search(&q, false, want, None, None).await {
+                Ok(found) => all.extend(found.into_iter().filter(after)),
+                Err(e) => warn!("Mention search failed ({e}); using the Mentions tab alone"),
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        all.retain(|t| seen.insert(t.id.clone()));
+        all.sort_by_key(|t| std::cmp::Reverse(t.id.parse::<u64>().unwrap_or(0)));
+        all.truncate(want);
+        Ok(all)
     }
 
     // -- Writes -------------------------------------------------------------
@@ -612,6 +928,38 @@ mod tests {
             main_js_url(html).as_deref(),
             Some("https://abs.twimg.com/responsive-web/client-web/main.22feefda9e8e84cca.js")
         );
+    }
+
+    #[test]
+    fn finds_viewer_id_past_nested_objects() {
+        let html = r#""session":{"communitiesActions":{"create":false},"guestId":"1","ssoInitTokens":{},"user_id":"12345","x":{}}"#;
+        assert_eq!(viewer_id(html).as_deref(), Some("12345"));
+        assert_eq!(viewer_id(r#""session":{"isLoaded":true}"#), None);
+        let page = r#""users":{"entities":{"12345":{"name":"Me","x":{"a":1},"screen_name":"me_here"}},"#;
+        assert_eq!(viewer_handle(page, "12345").as_deref(), Some("me_here"));
+        assert_eq!(viewer_handle(page, "999"), None);
+    }
+
+    #[test]
+    fn finds_lazy_chunks_by_name_segment() {
+        let html = r#"{69195:"bundle.HomeTimeline",53852:"shared~bundle.Compose~bundle.HomeTimeline~bundle.LoggedInMain",1:"bundle.HomeTimelineX"}[e]+"."+{53852:"abc12345def",69195:"538dc3798a981289"}"#;
+        let urls = lazy_chunk_urls(html, "bundle.HomeTimeline");
+        assert_eq!(urls.len(), 2);
+        assert!(urls.contains(&"https://abs.twimg.com/responsive-web/client-web/bundle.HomeTimeline.538dc3798a981289a.js".to_string()));
+        assert!(urls.iter().any(|u| u.contains("shared~bundle.Compose~bundle.HomeTimeline~bundle.LoggedInMain.abc12345defa.js")));
+    }
+
+    #[test]
+    fn time_window() {
+        let at = |ts: &str| TweetData {
+            id: "1".into(), text: String::new(), author_id: None, author_username: None,
+            created_at: Some(ts.into()), conversation_id: None, referenced_tweets: None,
+            public_metrics: None, author_followers: None, media_urls: vec![],
+        };
+        let w = window(Some("2026-10-10T00:00:00Z"), Some("2026-10-12T00:00:00Z"));
+        assert!(matches!(w(&at("2026-10-11T00:00:00.000Z")), Take::Keep));
+        assert!(matches!(w(&at("2026-10-12T00:00:00.000Z")), Take::Skip));
+        assert!(matches!(w(&at("2026-10-09T23:59:59.000Z")), Take::Done));
     }
 
     #[test]

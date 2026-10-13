@@ -611,6 +611,12 @@ impl XApi {
     pub async fn get_authenticated_user_id(&self) -> Result<String, XmasterError> {
         self.cached_user_id
             .get_or_try_init(|| async {
+                if self.ctx.config.web_reads() {
+                    match Web::new(&self.ctx)?.viewer_id().await {
+                        Ok(id) => return Ok(id),
+                        Err(e) => self.web_read_failed("user ID lookup", e)?,
+                    }
+                }
                 let user: UserResponse = self.request_data(
                     Method::GET,
                     &format!("{BASE}/users/me?user.fields=id"),
@@ -620,6 +626,16 @@ impl XApi {
             })
             .await
             .cloned()
+    }
+
+    /// A failed free web read falls back to the paid API, unless there is no
+    /// API configured to fall back to.
+    fn web_read_failed(&self, what: &str, e: XmasterError) -> Result<(), XmasterError> {
+        if !self.ctx.config.has_x_auth() {
+            return Err(e);
+        }
+        warn!("Web {what} failed ({e}); falling back to the paid API");
+        Ok(())
     }
 
     // -- Tweet fields query string helpers ----------------------------------
@@ -1049,17 +1065,25 @@ impl XApi {
         Ok(tweet)
     }
 
-    /// Get replies to a tweet (last 7 days).
+    /// Direct replies to a post. The web session reads the post's
+    /// conversation view (free, any age); the API fallback searches the last
+    /// 7 days.
     ///
-    /// The conversation_id of a reply equals the root tweet of the thread, not
-    /// the reply's own ID.  So we first fetch the target tweet to learn its
-    /// conversation_id, search the whole conversation, then filter to only
-    /// direct replies to the target tweet.
+    /// API path: the conversation_id of a reply equals the root tweet of the
+    /// thread, not the reply's own ID. So we first fetch the target tweet to
+    /// learn its conversation_id, search the whole conversation, then filter
+    /// to only direct replies to the target tweet.
     pub async fn get_replies(
         &self,
         tweet_id: &str,
         count: usize,
     ) -> Result<Vec<TweetData>, XmasterError> {
+        if self.ctx.config.web_reads() {
+            match Web::new(&self.ctx)?.replies(tweet_id, count).await {
+                Ok(t) => return Ok(t),
+                Err(e) => self.web_read_failed("replies read", e)?,
+            }
+        }
         // 1. Fetch the target tweet to get its conversation_id
         let target = self.get_tweet(tweet_id).await?;
         let conv_id = target
@@ -1373,6 +1397,16 @@ impl XApi {
         count: usize,
         since_id: Option<&str>,
     ) -> Result<Vec<TweetData>, XmasterError> {
+        // The web Mentions tab is the logged-in account's own
+        if self.ctx.config.web_reads() {
+            let web = Web::new(&self.ctx)?;
+            if web.viewer_id().await.is_ok_and(|id| id == user_id) {
+                match web.mentions(count, since_id).await {
+                    Ok(t) => return Ok(t),
+                    Err(e) => self.web_read_failed("mentions read", e)?,
+                }
+            }
+        }
         let max = count.clamp(5, 100);
         let since_param = since_id
             .map(|id| format!("&since_id={id}"))
@@ -1392,6 +1426,12 @@ impl XApi {
         start_time: Option<&str>,
         end_time: Option<&str>,
     ) -> Result<Vec<TweetData>, XmasterError> {
+        if self.ctx.config.web_reads() {
+            match Web::new(&self.ctx)?.home_latest(count, start_time, end_time).await {
+                Ok(t) => return Ok(t),
+                Err(e) => self.web_read_failed("home timeline read", e)?,
+            }
+        }
         let user_id = self.get_authenticated_user_id().await?;
         let max = count.clamp(1, 100);
         let time_params = Self::time_params(start_time, end_time);
@@ -1571,6 +1611,13 @@ impl XApi {
         start_time: Option<&str>,
         end_time: Option<&str>,
     ) -> Result<Vec<TweetData>, XmasterError> {
+        if self.ctx.config.web_reads() {
+            let top = matches!(mode, "relevancy" | "relevant" | "top");
+            match Web::new(&self.ctx)?.search(query, top, count, start_time, end_time).await {
+                Ok(t) => return Ok(t),
+                Err(e) => self.web_read_failed("search", e)?,
+            }
+        }
         let encoded_query =
             percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC)
                 .to_string();
@@ -1598,6 +1645,12 @@ impl XApi {
         start_time: Option<&str>,
         end_time: Option<&str>,
     ) -> Result<Vec<TweetData>, XmasterError> {
+        if self.ctx.config.web_reads() {
+            match Web::new(&self.ctx)?.user_tweets(user_id, count, start_time, end_time).await {
+                Ok(t) => return Ok(t),
+                Err(e) => self.web_read_failed("user timeline read", e)?,
+            }
+        }
         let time_params = Self::time_params(start_time, end_time);
 
         self.paginate_tweets(count, 5, |page_size| {
