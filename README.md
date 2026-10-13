@@ -89,7 +89,7 @@ Post IDs and URLs work anywhere a post is expected; handles, `@handles` and prof
 |---|---|
 | Read | `read`, `conversation` (parent chain + top replies), `replies`, `search`, `timeline`, `mentions`, `user`, `me`, `metrics` (up to 100 posts per call) |
 | Write | `post`, `reply`, `quote`, `thread`, `delete`, `like`/`unlike`, `repost`/`unrepost`, `bookmark`/`unbookmark`, `follow`/`unfollow` |
-| Engage | `engage feed` (posts worth a reply), `engage inbox` (triage replies and quotes on your post), `engage recommend`, `engage swarm`, `engage hot-targets`, `engage watchlist` |
+| Engage | `engage feed` (posts worth a reply, in about 3 s, free), `engage inbox` (triage replies and quotes on your post), `engage recommend`, `engage swarm`, `engage hot-targets`, `engage watchlist` |
 | Check | `analyze` (score a draft), `post --dry-run`, `suggest best-time`, `suggest next-post` |
 | Track | `track run` (snapshots, reply-backs), `track followers`, `track growth`, `report daily`, `report weekly`, `inspire` |
 | Schedule | `schedule add --at auto`, `schedule list`, `schedule fire`, `schedule setup` (launchd) |
