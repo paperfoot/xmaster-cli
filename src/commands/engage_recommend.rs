@@ -203,7 +203,7 @@ pub async fn recommend(
 
     // Phase 1d: Enrich with reciprocity data from store
     if let Ok(store) = IntelStore::open() {
-        for (_, cand) in candidates.iter_mut() {
+        for cand in candidates.values_mut() {
             if cand.reply_rate == 0.0 {
                 if let Ok(Some(info)) = store.get_engagement_reciprocity(&cand.username) {
                     cand.reply_rate = info.reply_rate;
