@@ -35,23 +35,26 @@ pub async fn next_post(
     let best_time = tracker.get_best_time(None)?;
 
     let safe_to_post = cannibalization.is_none();
-    let recommendation = if safe_to_post {
-        match &best_time {
-            Some(bt) => format!(
-                "Safe to post now. Your best historical slot is {} {:02}:00 ({:.2}% avg ER).",
-                bt.day_name,
-                bt.hour_of_day,
-                bt.avg_engagement_rate * 100.0,
-            ),
-            None => "Safe to post now. Not enough data yet to suggest an optimal time (need 10+ tracked posts).".into(),
-        }
-    } else {
-        let w = cannibalization.as_ref().unwrap();
-        format!(
-            "Hold off — your post from {} min ago is still gaining traction ({:.1} eng/hr). {}",
+    let mut recommendation = match (&cannibalization, &best_time) {
+        (None, Some(bt)) => format!(
+            "Safe to post now. Your best historical slot is {} {:02}:00 ({:.2}% avg ER).",
+            bt.day_name,
+            bt.hour_of_day,
+            bt.avg_engagement_rate * 100.0,
+        ),
+        (None, None) => "Safe to post now. Not enough data yet to suggest an optimal time (need 10+ tracked posts).".into(),
+        (Some(w), _) => format!(
+            "Hold off: your post from {} min ago is still gaining traction ({:.1} eng/hr). A second unseen post from you in a viewer's feed scores ×0.625, a third ×0.44 (author diversity). {}",
             w.posted_minutes_ago, w.current_velocity, w.suggestion,
-        )
+        ),
     };
+    // Cold start (param.rs:489-562): one bandit slot per feed request for
+    // originals under 2 h / 200 home impressions by authors with ≤50k followers.
+    if crate::intel::preflight::own_follower_count().is_none_or(|f| f <= 50_000) {
+        recommendation.push_str(
+            " Cold start: for its first 2 h (under 200 home impressions) an original can win one exploration slot, picked by likes per impression, so post when your followers are online and keep originals 2 h apart.",
+        );
+    }
 
     let suggestion = NextPostSuggestion {
         safe_to_post,
