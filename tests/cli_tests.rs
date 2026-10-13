@@ -37,9 +37,9 @@ fn agent_info_outputs_json() {
         .arg("agent-info")
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"name\": \"xmaster\""))
+        .stdout(predicate::str::contains("\"name\":\"xmaster\""))
         .stdout(predicate::str::contains("\"commands\""))
-        .stdout(predicate::str::contains("\"env_prefix\": \"XMASTER_\""));
+        .stdout(predicate::str::contains("\"env_prefix\":\"XMASTER_\""));
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn agent_info_with_json_flag() {
         .args(["--json", "agent-info"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""));
+        .stdout(predicate::str::contains("\"status\":\"success\""));
 }
 
 // ─── Config ──────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ fn config_show_json() {
         .args(["--json", "config", "show"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""));
+        .stdout(predicate::str::contains("\"status\":\"success\""));
 }
 
 // ─── Auth Required Commands (graceful failure) ───────────────────
@@ -118,7 +118,7 @@ fn json_error_has_correct_envelope() {
 
     // Error envelopes go to stderr per agent-cli-framework invariant 6.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("\"status\": \"error\""));
+    assert!(stderr.contains("\"status\":\"error\""));
     assert!(stderr.contains("\"code\""));
     assert!(stderr.contains("\"suggestion\""));
 }
@@ -254,7 +254,7 @@ fn json_flag_with_agent_info() {
         .args(["--json", "agent-info"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""));
+        .stdout(predicate::str::contains("\"status\":\"success\""));
 }
 
 // ─── Analyze (Preflight) ────────────────────────────────────────
