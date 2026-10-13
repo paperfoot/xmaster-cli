@@ -1,8 +1,8 @@
 <div align="center">
 
-# XMaster
+# xmaster
 
-**The X/Twitter CLI for developers and AI agents**
+**Let your AI agent use X the way you do: read anything, reply to any thread, post, like and follow through your own browser session. No API fees on everyday commands. One Rust binary.**
 
 <br />
 
@@ -13,336 +13,181 @@
 <br />
 
 [![Crates.io](https://img.shields.io/crates/v/xmaster?style=for-the-badge&logo=rust&logoColor=white&label=crates.io)](https://crates.io/crates/xmaster)
+[![CI](https://img.shields.io/github/actions/workflow/status/paperfoot/xmaster-cli/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/paperfoot/xmaster-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](https://github.com/paperfoot/xmaster-cli/blob/main/LICENSE)
 [![Homebrew](https://img.shields.io/badge/Homebrew-available-orange?style=for-the-badge&logo=homebrew&logoColor=white)](https://github.com/paperfoot/homebrew-tap)
 [![Built with Rust](https://img.shields.io/badge/Built_with-Rust-dea584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 ---
 
-Post, reply, like, retweet, DM, search, schedule, and analyze -- all from your terminal. XMaster is a single Rust binary that wraps the X API v2, xAI/Grok search, and a web session fallback into one tool. It outputs structured JSON for AI agents and readable tables for humans.
+For people who run Claude Code, Codex or Gemini on their X account, and for developers who want X in the shell with JSON out.
 
-[Install](#install) | [How It Works](#how-it-works) | [Commands](#commands) | [Contributing](#contributing)
+[Install](#install) | [Quick start](#quick-start) | [Why xmaster](#why-xmaster) | [Commands](#commands) | [For agents](#for-ai-agents) | [Cost](#cost)
 
 </div>
 
-## Why This Exists
-
-I wanted my AI agents to handle X for me. Find posts in my niche, draft replies in my voice, track what works. Not for spamming -- just a less tedious way to stay engaged when I'd rather be building things.
-
-Most X tools make you pick between the official API and scraping. XMaster gives you both, plus the parts nobody else builds: pre-flight post analysis, engagement scoring, reply bypass, local scheduling, and a bookmarks archive that survives tweet deletions.
-
 ## Install
 
-**One-liner (macOS / Linux):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/paperfoot/xmaster-cli/main/install.sh | sh
+brew install paperfoot/tap/xmaster                                                    # macOS, Linux
+cargo install xmaster                                                                 # any platform with Rust
+curl -fsSL https://raw.githubusercontent.com/paperfoot/xmaster-cli/main/install.sh | sh   # prebuilt binary
 ```
 
-**Homebrew:**
-```bash
-brew tap paperfoot/tap
-brew install xmaster
-```
-
-**Cargo (crates.io):**
-```bash
-cargo install xmaster
-```
-
-**From source:**
-```bash
-cargo install --git https://github.com/paperfoot/xmaster-cli
-```
-
-### Quick Start
+## Quick start
 
 ```bash
-# 1. Get your X API keys from https://developer.x.com
-
-# 2. Configure credentials
-xmaster config set keys.api_key YOUR_API_KEY
-xmaster config set keys.api_secret YOUR_API_SECRET
-xmaster config set keys.access_token YOUR_ACCESS_TOKEN
-xmaster config set keys.access_token_secret YOUR_ACCESS_TOKEN_SECRET
-
-# 3. Verify setup
-xmaster config check
-
-# 4. Post
-xmaster post "Hello from xmaster"
+xmaster config web-login                    # copy your X session from Chrome, Firefox, Brave, Chromium or Edge
+xmaster config check                        # live, read-only test of the session
+xmaster engage feed "your niche"            # fresh posts worth a reply
+xmaster reply https://x.com/someone/status/123 "your reply" --dry-run   # check the draft, send nothing
 ```
 
-Optional extras:
-```bash
-xmaster config set keys.xai YOUR_XAI_KEY          # AI-powered search via xAI/Grok
-xmaster config web-login                           # Reply anywhere, like, follow, quote (auto-captures browser cookies)
-xmaster config set style.voice "your style here"   # Agents write in your voice
-xmaster config set account.premium true            # 25k char limit instead of 280
+Log in to x.com in your browser first. To hand X to your agent, run `xmaster skill install` and ask it in plain words: "reply to the best three posts about longevity from the last hour".
+
+## Why xmaster
+
+- **Replies to any thread.** Since February 2026 the X API only lets you reply to people who mentioned you, and on 20 April 2026 it dropped likes, follows and quote posts from self-serve tiers. xmaster sends these through your logged-in browser session, the way x.com does, and finds X's current request IDs on its own when X rotates them.
+- **No API fees on everyday commands.** With a session, reading posts, threads, replies, search, timelines, mentions and profiles costs nothing (0 of 13 everyday commands billed in a live check). Posts, replies, likes and follows go through the session too, so you skip the API's $0.015 per post and $0.20 per post with a link.
+- **Made for agents.** Compact JSON when piped, one error format with `retryable` and `retry_after_secs`, exit codes that say what to do next, and an `agent-info` summary under 6 KB.
+- **Judgment built in (optional).** With a [JEV](https://typesafe.ai) key, xmaster picks the posts worth a reply out of a feed, sorts your inbox into reply, like, ignore and spam, and flags drafts that read as generic or AI-written. On 110 real posts, its picks ranked good reply targets at AUC 0.93, against 0.59 for the size-and-freshness sort it replaced.
+- **Ranking facts from X's own code.** Draft checks and `agent-info --tips` use the weights X publishes in [xai-org/x-algorithm](https://github.com/xai-org/x-algorithm): copy-link share 20, reply 5, like 0.6, report −234.
+- **Paced writes.** Daily limits and gaps between actions keep agent activity within normal use.
+
+### How it compares
+
+| | xmaster | X API, X MCP, xmcp | X CLIs built on API keys |
+|---|---|---|---|
+| Reply to any thread | Yes, through your session | Only to people who mentioned you | Same as the API |
+| Like, follow, quote | Yes | Removed from self-serve tiers | Same as the API |
+| Cost of a post | $0 through your session | $0.015, or $0.20 with a link | Same as the API |
+| Reads (posts, threads, search) | $0 through your session or FxTwitter | Billed per read | Billed per read |
+| Agent interface | JSON envelope, exit codes, 6 KB `agent-info`, agent skill | MCP tool schemas or raw JSON | Varies |
+| Draft checks before sending | Rules from X's ranking code, plus JEV | None | Varies |
+
+## How it works
+
+```
+               your agent / your shell
+                         |
+                      xmaster  ── draft checks, JEV, pacing, local SQLite
+                         |
+   ┌──────────────┬──────┴───────┬──────────────┬─────────────┐
+ web session     FxTwitter      X API v2        xAI          JEV
+ (your cookies)  (no login)     (paid fallback) (search-ai)  (judgments)
+ reads + writes  post reads     polls, DMs,
+ free            free           lists, no-session
 ```
 
-## How It Works
-
-XMaster has three backends behind one CLI:
-
-| Backend | Auth | Used for |
-|---------|------|----------|
-| **X API v2** | OAuth 1.0a | Posting, DMs, search, timelines, Articles |
-| **xAI / Grok** | Bearer token | AI-powered semantic search, trending topics |
-| **Web session** | Browser cookies | Replies to any thread, quotes, likes, reposts, bookmarks, follows |
-| **FxTwitter** | None | Free single-post reads (`read`), Article bodies |
-
-> The self-serve X API blocks replies to people who haven't @mentioned you (Feb 2026) and removed likes, follows and quote posts (Apr 20, 2026). With `xmaster config web-login`, those writes go straight through your browser session, the way the x.com app sends them. Query IDs and feature flags are read from x.com itself and refreshed automatically when X rotates them. Plain posts also go through the web session by default, so they skip the API's per-post fee ($0.015, $0.20 with a link); `xmaster config set settings.web_writes auto` keeps plain posts on the API, `never` keeps everything there. `xmaster config check` runs a live read-only test of the web session.
-
-Every command returns JSON when piped (or with `--json`); list commands also support `--csv` for spreadsheet-ready output. Exit codes are semantic: 0 success, 1 runtime error, 2 config/billing error, 3 auth missing, 4 rate limited. Your agent always knows what happened.
-
-```
-┌─────────────────────────────────────────────┐
-│                 CLI Layer                    │
-│   clap + comfy-table (--json / human)       │
-├─────────────────────────────────────────────┤
-│          Command Router + Pre-flight        │
-│   Analyze, score, cannibalization guard     │
-├──────────┬──────────────┬───────────────────┤
-│ X API v2 │  xAI / Grok  │  Web GraphQL      │
-│(OAuth1.0a│(Bearer token)│  (Cookie auth +   │
-│ Post, DM,│ AI search,   │   transaction ID) │
-│ Search,  │ Trending,    │  Replies, quotes, │
-│ Timeline,│ Semantic     │  likes, reposts,  │
-│ Articles)│ search       │  follows          │
-├──────────┴──────────────┴───────────────────┤
-│  Rate Limiter │ Intel Store │ Scheduler     │
-│  (header-based)│  (SQLite)  │  (launchd)    │
-├─────────────────────────────────────────────┤
-│             Config (figment)                │
-│   TOML + env vars + browser cookies         │
-└─────────────────────────────────────────────┘
-```
+Every command tries the free route first and falls back to the API only when it has to. `post --dry-run` shows which route a post will take and what it would cost.
 
 ## Commands
 
-### Posting and Engagement
+Post IDs and URLs work anywhere a post is expected; handles, `@handles` and profile URLs anywhere a user is.
 
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `post` | Post text, media, replies, quotes, polls | `xmaster post "Hello world"` |
-| `reply` | Reply to a post (auto-bypasses API restrictions) | `xmaster reply 1234567890 "Great point"` |
-| `thread` | Post a multi-tweet thread | `xmaster thread "First" "Second" "Third"` |
-| `article preview` | Generate an X Articles-style HTML preview from Markdown | `xmaster article preview draft.md --header-image cover.png -o preview.html` |
-| `article draft` | Save a native X Article draft without publishing | `xmaster article draft draft.md --header-image cover.png` |
-| `article publish` | Publish a draft Article via the official API (makes it public) | `xmaster article publish 1234567890` |
-| `delete` | Delete a post | `xmaster delete 1234567890` |
-| `like` | Like a post (ID or URL) — via the web session | `xmaster like 1234567890` |
-| `unlike` | Unlike a post — via the web session | `xmaster unlike 1234567890` |
-| `retweet` | Retweet a tweet | `xmaster retweet 1234567890` |
-| `unretweet` | Undo a retweet | `xmaster unretweet 1234567890` |
-| `bookmark` | Bookmark a tweet | `xmaster bookmark 1234567890` |
-| `unbookmark` | Remove a bookmark | `xmaster unbookmark 1234567890` |
-
-Post options:
-```bash
-xmaster post "Great point!" --reply-to 1234567890      # Reply
-xmaster post "This is big" --quote 1234567890           # Quote tweet
-xmaster post "Check this" --media photo.jpg             # Attach media (up to 4)
-xmaster post "Best language?" --poll "Rust,Go,Python"   # Create a poll
-xmaster like https://x.com/user/status/1234567890       # URLs work too
-```
-
-`article preview` and `article draft` are for X Articles, not long posts / Note Tweets. Drafts use Markdown and map to the native Article surface: `#` title, `##`/`###` headings, `**bold**`, `*italic*`, `~~strikethrough~~`, indentation/quotes, numbered/bulleted lists, links, images, video/GIF directives, and embedded X posts. Use `::video[Caption](clip.mp4)`, `::gif[Caption](loop.gif)`, `::post(https://x.com/user/status/123)`, or `::article(https://x.com/i/article/123)` for media and embeds that Markdown does not model directly. Native draft creation uses X's private web Article entity endpoint (`ArticleEntityDraftCreate`) with browser cookies from `xmaster config web-login`; it saves a draft and does not publish. Add `--api` to create the draft through the official X API v2 Articles endpoint instead (added June 2026 — plain OAuth keys, no cookies; cover images stay in the body). `xmaster article publish <article_id>` then publishes it via the official endpoint and returns the created post ID.
-
-### Reading and Discovery
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `read` | Full post lookup (text, author, metrics, media) | `xmaster read 1234567890` |
-| `replies` | Get replies on a post | `xmaster replies 1234567890 -c 30` |
-| `metrics` | Detailed engagement metrics | `xmaster metrics 1234567890` |
-| `timeline` | Home or user timeline | `xmaster timeline --user elonmusk --since 24h` |
-| `mentions` | Your mentions | `xmaster mentions -c 20` |
-| `user` | User profile info | `xmaster user elonmusk` |
-| `me` | Your own profile | `xmaster me` |
-
-### Search
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `search` | X API v2 search (structured, filterable; supports `min_likes:`/`min_replies:`/`min_reposts:` operators) | `xmaster search "rust lang min_likes:100"` |
-| `search-ai` | AI-powered search via xAI/Grok | `xmaster search-ai "latest AI news"` |
-| `trending` | Trending topics by region | `xmaster trending --region US` |
-
-### Social Graph
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `follow` | Follow a user — via the web session | `xmaster follow elonmusk` |
-| `unfollow` | Unfollow a user — via the web session | `xmaster unfollow elonmusk` |
-| `followers` | List followers | `xmaster followers elonmusk -c 50` |
-| `following` | List who a user follows | `xmaster following elonmusk -c 50` |
-
-### Direct Messages
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `dm send` | Send a DM | `xmaster dm send alice "Hey!"` |
-| `dm inbox` | View DM inbox | `xmaster dm inbox -c 20` |
-| `dm thread` | View a DM conversation | `xmaster dm thread CONV_ID` |
-
-### Scheduling
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `schedule add` | Schedule a post for later | `xmaster schedule add "text" --at "2026-03-24 09:00"` |
-| `schedule add --at auto` | Auto-pick best posting time | `xmaster schedule add "text" --at auto` |
-| `schedule list` | List scheduled posts | `xmaster schedule list --status pending` |
-| `schedule cancel` | Cancel a scheduled post | `xmaster schedule cancel sched_abc123` |
-| `schedule fire` | Execute due posts (for cron) | `xmaster schedule fire` |
-| `schedule setup` | Install launchd auto-scheduler | `xmaster schedule setup` |
-
-Posts are stored in local SQLite. No X Ads API needed. The launchd daemon fires every 5 minutes on macOS. Use `--at auto` to pick the best time from your engagement history.
-
-### Bookmark Intelligence
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `bookmarks list` | List recent bookmarks | `xmaster bookmarks list -c 20` |
-| `bookmarks sync` | Archive bookmarks locally (survives deletions) | `xmaster bookmarks sync -c 200` |
-| `bookmarks search` | Search your archive | `xmaster bookmarks search "longevity"` |
-| `bookmarks export` | Export as markdown | `xmaster bookmarks export -o bookmarks.md` |
-| `bookmarks digest` | Weekly summary | `xmaster bookmarks digest -d 7` |
-
-`bookmarks sync` archives content in SQLite. If the original tweet gets deleted, your copy survives.
-
-### Engagement Intelligence
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `engage inbox` | Audit replies, quote tweets, and comments under quote tweets for a post | `xmaster engage inbox 123 --json` |
-| `engage recommend` | Find high-ROI reply targets | `xmaster engage recommend --topic "AI" -c 10` |
-| `engage feed` | Fresh posts from large accounts | `xmaster engage feed "AI agents" --min-followers 5000` |
-| `engage watchlist add` | Track accounts without following | `xmaster engage watchlist add elonmusk` |
-| `engage watchlist list` | List watched accounts | `xmaster engage watchlist list` |
-
-`engage inbox` is the post-launch check: it pulls root replies, quote tweets, and replies under those quote tweets, then ranks likely reply-back opportunities as a reciprocity heuristic.
-
-The opportunity scorer ranks targets by reciprocity, reply ROI, size fit (adaptive to your follower count), topicality, and freshness.
-
-### Pre-Flight Analysis
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `analyze` | Score a post before publishing | `xmaster analyze "your text" --goal replies` |
-| `suggest best-time` | Best posting time from history | `xmaster suggest best-time` |
-| `suggest next-post` | Cannibalization guard | `xmaster suggest next-post` |
-| `report daily` | Daily performance digest | `xmaster report daily` |
-| `report weekly` | Weekly performance digest | `xmaster report weekly` |
-| `track run` | Snapshot recent post metrics | `xmaster track run` |
-| `track followers` | Track follower changes | `xmaster track followers` |
-| `track growth` | Follower growth history | `xmaster track growth -d 30` |
-| `inspire` | Browse your discovered posts library | `xmaster inspire --topic "longevity"` |
-| `inspire --long` | Surface long-form / Article-candidate exemplars (>=500 chars) | `xmaster inspire --long --topic "biotech"` |
-
-`analyze` estimates 9 proxy signals aligned with the 2026 X algorithm and scores per goal (replies, quotes, shares, follows, impressions). For drafts above 500 chars it also runs **long-form heuristics** (preview-card hook on the first 280 chars, scannability, payoff density, dwell sweet-spot 500–2000 chars) — informed by the Jan 2026 $1M Article Contest results. Run `xmaster agent-info` for the full long-form pattern set including timing, structure, and a `nanaban` pointer for cover-image generation.
-
-### Lists
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `lists create` | Create a list | `xmaster lists create "AI Builders"` |
-| `lists add` | Add user to a list | `xmaster lists add LIST_ID username` |
-| `lists timeline` | View a list timeline | `xmaster lists timeline LIST_ID` |
-| `lists mine` | View your lists | `xmaster lists mine` |
-
-### Moderation
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `block` / `unblock` | Block or unblock a user | `xmaster block spammer123` |
-| `mute` / `unmute` | Mute or unmute a user | `xmaster mute username` |
-| `hide-reply` / `unhide-reply` | Hide replies on your posts | `xmaster hide-reply 1234567890` |
-
-### System
-
-| Command | What it does | Example |
-|---------|-------------|---------|
-| `config show` | View config (keys masked) | `xmaster config show` |
-| `config check` | Validate credentials | `xmaster config check` |
-| `config web-login` | Capture browser cookies for the web session | `xmaster config web-login` |
-| `agent-info` | Machine-readable capabilities for AI agents | `xmaster agent-info --json` |
-| `rate-limits` | Check API quota status | `xmaster rate-limits` |
-| `update` | Self-update from GitHub releases | `xmaster update` |
-
-## For AI Agents
-
-XMaster is built for AI agents from day one. Every command supports `--json` and returns structured envelopes with semantic exit codes.
+| Area | Commands |
+|---|---|
+| Read | `read`, `conversation` (parent chain + top replies), `replies`, `search`, `timeline`, `mentions`, `user`, `me`, `metrics` (up to 100 posts per call) |
+| Write | `post`, `reply`, `quote`, `thread`, `delete`, `like`/`unlike`, `repost`/`unrepost`, `bookmark`/`unbookmark`, `follow`/`unfollow` |
+| Engage | `engage feed` (posts worth a reply), `engage inbox` (triage replies and quotes on your post), `engage recommend`, `engage swarm`, `engage hot-targets`, `engage watchlist` |
+| Check | `analyze` (score a draft), `post --dry-run`, `suggest best-time`, `suggest next-post` |
+| Track | `track run` (snapshots, reply-backs), `track followers`, `track growth`, `report daily`, `report weekly`, `inspire` |
+| Schedule | `schedule add --at auto`, `schedule list`, `schedule fire`, `schedule setup` (launchd) |
+| Articles | `article preview`, `article draft`, `article publish` |
+| More | `bookmarks` (local archive that keeps deleted posts), `lists`, `dm`, `likers`, `reposters`, `quotes`, `users`, `followers`, `following`, `block`, `mute`, `hide-reply`, `search-ai`, `trending` |
+| System | `config`, `agent-info`, `skill`, `rails`, `update` |
 
 ```bash
-# JSON output (auto-enabled when piped)
-xmaster --json post "Hello from my agent"
-xmaster post "Hello" | jq '.data.id'
+xmaster post "Shipped v2 today" --media demo.mp4
+xmaster quote 1234567890 "The key number here is 3x, not the headline"
+xmaster thread "First post" "Second post" "Third post"
+xmaster timeline --user someone --sort impressions -c 50
+xmaster search "longevity min_likes:100" -c 20
+xmaster metrics 111 222 333
 ```
 
-**Response envelope:**
+`xmaster <command> --help` lists every flag.
+
+## For AI agents
+
+```bash
+xmaster skill install        # installs the skill for Claude Code, Codex, Gemini CLI and ~/.agents
+xmaster agent-info           # commands, exit codes, cost model, JEV: under 6 KB of JSON
+xmaster agent-info --tips    # ranking weights and strategy, by topic: algorithm, replies, posting, growth, metrics, avoid
+```
+
+A typical reply loop:
+
+```bash
+xmaster engage feed                          # best 5 targets, each with a reason (JEV)
+xmaster conversation <id>                    # read the thread before writing
+xmaster reply <id> "draft" --dry-run         # preflight, JEV flags, route, cost
+xmaster reply <id> "final text"
+xmaster engage inbox <your post id>          # later: who needs an answer, what to like
+```
+
+Output is JSON when piped (or with `--json`; `--pretty` indents it):
+
 ```json
-{
-  "version": "1",
-  "status": "success",
-  "data": { "..." },
-  "metadata": {
-    "elapsed_ms": 342,
-    "provider": "x_api"
-  }
-}
+{"version":"1","status":"success","data":{"id":"1234567890","url":"https://x.com/i/status/1234567890","text":"Shipped v2 today","undo":"xmaster delete 1234567890","via":"web"}}
 ```
 
-**Exit codes:** 0 = success, 1 = runtime error, 2 = config error, 3 = auth missing, 4 = rate limited.
+Errors go to stderr in the same shape:
 
-**Agent discovery:**
-```bash
-xmaster agent-info --json
-# Returns: 64 commands, 18 capabilities, 15 algorithm weights,
-# measurement coverage, workflow handoffs, writing style config
+```json
+{"version":"1","status":"error","error":{"code":"rate_limited","message":"Rate limited by x; retry in 60s","suggestion":"Wait 60s, then retry. Limits: `xmaster rate-limits`","retryable":true,"retry_after_secs":60}}
 ```
 
-**Pre-flight analysis:**
-```bash
-xmaster analyze "your tweet" --goal replies --json
-# Returns per-signal scores and per-goal scores (0-100)
-```
+| Exit code | Meaning | Agent should |
+|---|---|---|
+| 0 | success | continue |
+| 1 | runtime error (network, X server, local DB, media) | retry only if `retryable`, after `retry_after_secs` |
+| 2 | setup: missing or rejected credentials, bad config, no API credits | follow `suggestion`; don't retry |
+| 3 | bad input: invalid arguments, unknown post or user, denied command | fix the arguments |
+| 4 | rate limited | wait `retry_after_secs`, then retry |
+| 5 | blocked by X (duplicate text, reply limits, protected account) | don't retry unchanged |
 
-**Works with:** [Claude Code](https://github.com/anthropics/claude-code), [OpenClaw](https://github.com/openclaw/openclaw), or any agent that can shell out and parse JSON.
+Guard rails for unattended agents: `XMASTER_READ_ONLY=1` blocks every write to X (dry runs still work), and `XMASTER_ALLOW_COMMANDS` / `XMASTER_DENY_COMMANDS` limit which commands run.
+
+## Cost
+
+| Route | What goes through it | Price |
+|---|---|---|
+| Web session | reads (posts, threads, replies, search, timelines, mentions, profiles) and writes (posts, replies, quotes, likes, reposts, bookmarks, follows, deletes, mutes, blocks) | free |
+| FxTwitter | post reads and profiles without a login | free |
+| X API v2 | fallback without a session; polls, DMs, lists, bookmarks sync, likers, reposters, quote lists, follower lists, your own private metrics | pay-per-use: $0.015 per post, $0.20 with a link |
+| xAI | `search-ai`, `trending` | your xAI key |
+| JEV | feed picks, inbox triage, draft flags | your JEV key; optional |
+
+API keys are optional once the web session works. Add them for polls, DMs and lists: `xmaster config guide` walks through it.
 
 ## Configuration
 
-Config lives at `~/.config/xmaster/config.toml` on all platforms. Override with `XMASTER_CONFIG_DIR`.
+Config lives at `~/.config/xmaster/config.toml` (override the folder with `XMASTER_CONFIG_DIR`). Environment variables override it: `XMASTER_KEYS__API_KEY`, `XMASTER_SETTINGS__WEB_WRITES`, and so on.
 
 ```bash
-xmaster config show       # View current config (keys masked)
-xmaster config check      # Validate credentials
-xmaster config set K V    # Set a value
-xmaster config get K      # Read a value
+xmaster config set account.bio "What you do, in one line"   # JEV and engage feed judge fit against it
+xmaster config set niche.topics "longevity,AI agents"         # default topics for engage feed
+xmaster config set style.voice "short, concrete, no hype"     # voice for drafts
+xmaster config set account.premium true                       # 25,000-character posts
+xmaster config set settings.web_writes auto                   # always (default), auto, never
+xmaster config set settings.web_reads false                   # read through the API instead
+xmaster config set keys.jev YOUR_KEY                          # JEV judgments
+xmaster config set keys.xai YOUR_KEY                          # search-ai, trending
+xmaster config show                                           # everything, keys masked
 ```
 
-**Environment variables** override the config file. Use `XMASTER_` prefix with double underscore for nesting:
-
-```bash
-export XMASTER_KEYS__API_KEY=your-api-key
-export XMASTER_KEYS__API_SECRET=your-api-secret
-export XMASTER_KEYS__ACCESS_TOKEN=your-access-token
-export XMASTER_KEYS__ACCESS_TOKEN_SECRET=your-access-token-secret
-export XMASTER_KEYS__XAI=your-xai-key
-```
-
-## Building from Source
+## Build from source
 
 ```bash
 git clone https://github.com/paperfoot/xmaster-cli
-cd xmaster
-cargo build --release
-# Binary at target/release/xmaster
+cd xmaster-cli
+cargo build --release        # binary at target/release/xmaster
 ```
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
@@ -352,14 +197,12 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 <div align="center">
 
-Built by [Boris Djordjevic](https://github.com/longevityboris) at [199 Biotechnologies](https://github.com/199-biotechnologies) | [Paperfoot AI](https://paperfoot.ai)
-
-<br />
-
-**If this is useful to you:**
+**If xmaster saves you time, a star helps other people find it.**
 
 [![Star this repo](https://img.shields.io/github/stars/paperfoot/xmaster-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/xmaster-cli/stargazers)
 &nbsp;&nbsp;
 [![Follow @longevityboris](https://img.shields.io/badge/Follow_%40longevityboris-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/longevityboris)
+
+Built by [Boris Djordjevic](https://github.com/longevityboris) at [Paperfoot AI](https://paperfoot.com) | [borisdjordjevic.com](https://borisdjordjevic.com)
 
 </div>
