@@ -1777,4 +1777,9 @@ impl XApi {
         super::media::upload(&self.ctx, file_path).await
     }
 
+    /// Upload several files concurrently; IDs keep the order of `paths`.
+    pub async fn upload_media_many(&self, paths: &[String]) -> Result<Vec<String>, XmasterError> {
+        super::media::upload_many(&self.ctx, paths).await
+    }
+
 }

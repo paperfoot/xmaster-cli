@@ -364,22 +364,7 @@ impl PostScheduler {
             let media_upload = if let Some(paths_json) = media_json {
                 let paths: Vec<String> = serde_json::from_str(paths_json).unwrap_or_default();
                 if !paths.is_empty() {
-                    let mut ids = Vec::new();
-                    let mut upload_err = None;
-                    for path in &paths {
-                        match api.upload_media(path).await {
-                            Ok(mid) => ids.push(mid),
-                            Err(e) => {
-                                upload_err = Some(e);
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(e) = upload_err {
-                        Err(e)
-                    } else {
-                        Ok(Some(ids))
-                    }
+                    api.upload_media_many(&paths).await.map(Some)
                 } else {
                     Ok(None)
                 }

@@ -1,5 +1,6 @@
 //! Media upload (images, GIFs, video) for posts, threads, scheduled posts and
-//! Article drafts. `XApi::upload_media` delegates here.
+//! Article drafts. `XApi::upload_media` and `XApi::upload_media_many` delegate
+//! here.
 //!
 //! Routes, tried in order until one returns a media ID:
 //! 1. Web session (free): `upload.x.com/i/media/upload.json` with the browser
@@ -24,6 +25,7 @@ use reqwest::Method;
 use reqwest_oauth1::OAuthClientProvider;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
@@ -36,6 +38,8 @@ const V2_UPLOAD: &str = "https://api.x.com/2/media/upload";
 const V1_UPLOAD: &str = "https://upload.twitter.com/1.1/media/upload.json";
 
 const MIB: usize = 1024 * 1024;
+/// Files uploaded at once by `upload_many` (a post carries at most 4).
+const MAX_PARALLEL: usize = 4;
 /// Floor for one APPEND request: a multi-MB chunk on a slow uplink outlasts
 /// the default 15 s client timeout.
 const CHUNK_TIMEOUT_SECS: u64 = 120;
@@ -512,6 +516,26 @@ pub async fn upload(ctx: &AppContext, file_path: &str) -> Result<String, Xmaster
             .collect::<Vec<_>>()
             .join("; "),
     ))
+}
+
+/// Upload several files, up to `MAX_PARALLEL` at once; IDs come back in the
+/// order of `paths`. The first failure aborts the rest.
+pub async fn upload_many(ctx: &Arc<AppContext>, paths: &[String]) -> Result<Vec<String>, XmasterError> {
+    let gate = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (i, path) in paths.iter().enumerate() {
+        let (ctx, gate, path) = (Arc::clone(ctx), Arc::clone(&gate), path.clone());
+        tasks.spawn(async move {
+            let _permit = gate.acquire_owned().await;
+            (i, upload(&ctx, &path).await)
+        });
+    }
+    let mut ids = vec![String::new(); paths.len()];
+    while let Some(done) = tasks.join_next().await {
+        let (i, result) = done.map_err(|e| XmasterError::Media(format!("Upload task failed: {e}")))?;
+        ids[i] = result?;
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]
