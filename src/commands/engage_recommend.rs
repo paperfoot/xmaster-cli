@@ -1,10 +1,11 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::store::IntelStore;
-use crate::intel::judge;
+use crate::intel::{judge, preflight};
 use crate::output::{self, OutputFormat, Tableable};
 use crate::providers::jev::{self, Jev};
 use crate::providers::xai::XaiSearch;
+use crate::providers::xapi::TweetData;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -221,10 +222,8 @@ pub async fn recommend(
 
     // Phase 2: Score with opportunity model
     // Try to get user's follower count for adaptive sizing
-    let my_followers = {
-        let api = crate::providers::xapi::XApi::new(ctx.clone());
-        api.get_me().await.ok().and_then(|u| u.public_metrics.as_ref().map(|m| m.followers_count)).unwrap_or(100) as u64
-    };
+    let my_followers = preflight::own_follower_count().unwrap_or(100);
+    let facts = LocalFacts::load();
 
     let mut scored: Vec<RecommendCandidate> = filtered
         .into_iter()
@@ -238,12 +237,19 @@ pub async fn recommend(
             let size_fit = compute_size_fit(c.followers, my_followers);
             let relevance = c.relevance;
 
-            // Opportunity scoring: reply_roi proxy + size_fit + reciprocity + reach + relevance.
-            // (No small-account penalty: Grox's follower buckets only label
+            // Reciprocity first: the reply ranker under a post weighs the OP
+            // following you, liking your reply and replying to it. (No
+            // small-account penalty: Grox's follower buckets only label
             // metrics, they are not scrutiny tiers.)
-            let score = 0.25 * reciprocity + 0.25 * size_fit + 0.20 * reach + 0.20 * relevance + 0.10;
+            let follows_you = facts.followers.contains(&c.username.to_lowercase());
+            let score = 0.30 * reciprocity
+                + 0.20 * size_fit
+                + 0.15 * reach
+                + 0.20 * relevance
+                + 0.15 * if follows_you { 1.0 } else { 0.0 };
 
             let mut reasons = Vec::new();
+            if follows_you { reasons.push("follows you: they see your posts, and your reply ranks higher under theirs".into()); }
             if reciprocity > 0.3 { reasons.push(format!("replied back {:.0}% of the time", reciprocity * 100.0)); }
             if size_fit > 0.8 { reasons.push("in your ideal follower band".into()); }
             if reach > 0.6 { reasons.push("large audience amplifies your reply".into()); }
@@ -505,17 +511,25 @@ pub struct FeedPost {
     pub likes: u64,
     pub replies: u64,
     pub reply_command: String,
-    #[serde(skip_serializing_if = "is_zero_f32")]
-    pub opportunity_score: f32,
+    /// Reply-target score (0-1): fresh, early, traction, reply-back odds,
+    /// follows you, on topic.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub opportunity_score: f64,
     /// JEV pick score (0-1) when JEV ranked the feed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jev_score: Option<f64>,
-    /// Why JEV picked it, built from its judgments.
+    /// Why it was picked: JEV's judgment, then the reply-target signals.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub why: String,
+    /// Mentions one of the feed's topics (keyword overlap).
+    #[serde(skip)]
+    pub on_topic: bool,
+    /// Which search found it (topics in order, then watchlist chunks).
+    #[serde(skip)]
+    pub source: usize,
 }
 
-fn is_zero_f32(v: &f32) -> bool { *v == 0.0 }
+fn is_zero(v: &f64) -> bool { *v == 0.0 }
 
 /// How JEV ranked the feed: posts judged, and how many were dropped as
 /// off-niche, promo, nothing to add, or unjudged.
@@ -535,9 +549,18 @@ pub struct FeedResult {
     pub posts: Vec<FeedPost>,
     pub total_found: usize,
     pub filtered_by_followers: usize,
+    /// Post-age window used: the preferred `--max-age-mins`, widened in ×2
+    /// steps (up to 6 h) when it held too few posts.
+    pub window_mins: i64,
+    /// Searches that failed (usually X's search rate limit); the feed is
+    /// built from the rest. Retry later for a fuller list.
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub failed_searches: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jev: Option<FeedJev>,
 }
+
+fn is_zero_usize(v: &usize) -> bool { *v == 0 }
 
 impl Tableable for FeedResult {
     fn to_table(&self) -> comfy_table::Table {
@@ -597,6 +620,329 @@ fn resolve_topics(cli_topics: &[String]) -> Vec<String> {
     out
 }
 
+/// The feed's preferred window widens in ×2 steps up to this when thin
+/// (niche topics can have only a handful of posts in 8 h).
+const FEED_WINDOW_CAP_MINS: i64 = 480;
+/// Topic and watchlist searches in flight at once.
+const FEED_PARALLEL: usize = 4;
+/// Searches per `engage feed` call, so one call can't eat X's web search
+/// limit (~50 per 15 min): topics first, then up to 2 watchlist chunks.
+const FEED_MAX_SEARCHES: usize = 8;
+/// Like floor for topic searches: drops zero-traction spam, keeps fresh posts.
+const FEED_MIN_FAVES: u32 = 2;
+/// X caps a search query at 512 chars; watchlist handles are chunked under this.
+const FROM_QUERY_MAX: usize = 450;
+/// Most posts kept per author before judging.
+const PER_AUTHOR: usize = 2;
+/// Every feed search: English originals, no replies or reposts (web
+/// search operators, then the API v2 spelling).
+const FEED_FILTERS_WEB: &str = "lang:en -filter:replies -filter:nativeretweets";
+const FEED_FILTERS_API: &str = "lang:en -is:reply -is:retweet";
+
+fn feed_filters(web: bool) -> &'static str {
+    if web { FEED_FILTERS_WEB } else { FEED_FILTERS_API }
+}
+
+/// What the local DB knows about you, read once per feed (free).
+#[derive(Default)]
+struct LocalFacts {
+    /// Lowercase handles that follow you, from the last `track followers`.
+    followers: std::collections::HashSet<String>,
+    /// Lowercase handle → (replies you sent them, times they replied back).
+    reply_stats: HashMap<String, (i64, i64)>,
+    /// Posts you already replied to, and your own posts.
+    handled: std::collections::HashSet<String>,
+}
+
+impl LocalFacts {
+    fn load() -> Self {
+        let mut facts = Self::default();
+        let Ok(conn) = crate::intel::open_db("xmaster.db") else { return facts };
+        let strings = |sql: &str| -> Vec<String> {
+            conn.prepare(sql)
+                .and_then(|mut s| s.query_map([], |r| r.get::<_, String>(0))?.collect())
+                .unwrap_or_default()
+        };
+        facts.followers = strings(
+            "SELECT lower(username) FROM follower_list
+             WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM follower_list)",
+        )
+        .into_iter()
+        .collect();
+        facts.handled = strings(
+            "SELECT target_tweet_id FROM engagement_actions
+             WHERE action_type = 'reply' AND target_tweet_id IS NOT NULL
+             UNION SELECT tweet_id FROM posts",
+        )
+        .into_iter()
+        .collect();
+        facts.reply_stats = conn
+            .prepare(
+                "SELECT lower(target_username), COUNT(*), SUM(CASE WHEN got_reply_back = 1 THEN 1 ELSE 0 END)
+                 FROM engagement_actions
+                 WHERE action_type = 'reply' AND target_username IS NOT NULL GROUP BY 1",
+            )
+            .and_then(|mut s| {
+                s.query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))))?
+                    .collect()
+            })
+            .unwrap_or_default();
+        facts
+    }
+}
+
+/// Search for one topic: all its words (exact phrases are too rare in niche
+/// topics), plus the aging/ageing spelling; English originals, with a like
+/// floor on the web. A topic that already uses search operators passes
+/// through.
+fn topic_query(topic: &str, web: bool) -> String {
+    let t = topic.trim();
+    let core = if t.contains('"') || t.contains(" OR ") || t.contains(':') || t.contains('(') {
+        format!("({t})")
+    } else {
+        let lower = t.to_lowercase();
+        let mut forms = vec![lower.clone()];
+        if lower.contains("ageing") {
+            forms.push(lower.replace("ageing", "aging"));
+        } else if lower.contains("aging") {
+            forms.push(lower.replace("aging", "ageing"));
+        }
+        let grouped: Vec<String> =
+            forms.iter().map(|f| if f.contains(' ') { format!("({f})") } else { f.clone() }).collect();
+        if grouped.len() == 1 { grouped[0].clone() } else { format!("({})", grouped.join(" OR ")) }
+    };
+    let filters = feed_filters(web);
+    if web { format!("{core} {filters} min_faves:{FEED_MIN_FAVES}") } else { format!("{core} {filters}") }
+}
+
+/// Watchlist handles as `(from:a OR from:b …)` searches: one call per ~20
+/// accounts instead of one timeline read each.
+fn watchlist_queries(handles: &[String], web: bool) -> Vec<String> {
+    let mut chunks: Vec<Vec<String>> = vec![Vec::new()];
+    let mut len = 0;
+    for h in handles {
+        let term = format!("from:{}", h.trim_start_matches('@'));
+        let chunk = chunks.last_mut().expect("never empty");
+        if !chunk.is_empty() && len + term.len() + 4 > FROM_QUERY_MAX {
+            chunks.push(Vec::new());
+            len = 0;
+        }
+        len += term.len() + 4;
+        chunks.last_mut().expect("never empty").push(term);
+    }
+    chunks
+        .into_iter()
+        .filter(|c| !c.is_empty())
+        .map(|c| format!("({}) {}", c.join(" OR "), feed_filters(web)))
+        .collect()
+}
+
+/// Run searches, at most `FEED_PARALLEL` at once, results in query order.
+/// With web reads on, a failed web search is skipped rather than retried on
+/// the paid API. Errors only when every search failed.
+async fn run_searches(
+    ctx: &Arc<AppContext>,
+    queries: Vec<String>,
+    want: usize,
+    since: &str,
+) -> Result<(Vec<Vec<TweetData>>, usize), XmasterError> {
+    let web = ctx.config.web_reads();
+    let gate = Arc::new(tokio::sync::Semaphore::new(FEED_PARALLEL));
+    let mut set = tokio::task::JoinSet::new();
+    let n = queries.len();
+    for (i, q) in queries.into_iter().enumerate() {
+        let (ctx, gate, since) = (ctx.clone(), gate.clone(), since.to_string());
+        set.spawn(async move {
+            let _permit = gate.acquire_owned().await;
+            let res = if web {
+                match crate::providers::web::Web::new(&ctx) {
+                    // No since_time: X's web search drops posts it should
+                    // keep with it (13 Oct 2026). Latest is newest-first and
+                    // the feed filters by age itself.
+                    Ok(w) => w.search(&q, false, want, None, None).await,
+                    Err(e) => Err(e),
+                }
+            } else {
+                let api = crate::providers::xapi::XApi::new(ctx.clone());
+                api.search_tweets_paginated(&q, "recent", want, Some(&since), None).await
+            };
+            (i, res)
+        });
+    }
+    let mut out = vec![Vec::new(); n];
+    let mut first_err = None;
+    let (mut ok, mut failed) = (0, 0);
+    while let Some(Ok((i, res))) = set.join_next().await {
+        match res {
+            Ok(tweets) => {
+                tracing::debug!("engage feed search {i}: {} posts", tweets.len());
+                out[i] = tweets;
+                ok += 1;
+            }
+            Err(e) => {
+                failed += 1;
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) if ok == 0 => Err(e),
+        _ => Ok((out, failed)),
+    }
+}
+
+/// Lowercase alphanumeric tokens.
+fn tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+}
+
+/// `word` appears in `toks`: exact for short words ("ai"), else as a prefix
+/// of a token, plural-insensitive ("agents" matches "agent", "agentic").
+fn has_word(toks: &[String], word: &str) -> bool {
+    let stem = if word.len() > 4 && word.ends_with('s') { &word[..word.len() - 1] } else { word };
+    let alt = if stem.contains("ageing") { stem.replace("ageing", "aging") } else { stem.replace("aging", "ageing") };
+    toks.iter().any(|t| {
+        if stem.len() <= 3 { t == stem } else { t.starts_with(stem) || t.starts_with(alt.as_str()) }
+    })
+}
+
+/// Whether the post is about one of `topics`: every word of a plain topic,
+/// or any 4+ letter term of an operator topic.
+fn mentions_topic(toks: &[String], topics: &[String]) -> bool {
+    topics.iter().any(|t| {
+        let lower = t.to_lowercase();
+        if lower.contains(" or ") || lower.contains('"') || lower.contains(':') {
+            tokens(&lower).iter().filter(|w| w.len() >= 4 && *w != "from").any(|w| has_word(toks, w))
+        } else {
+            lower.split_whitespace().all(|w| has_word(toks, w))
+        }
+    })
+}
+
+/// Link-only, mention-stuffed, hashtag-stuffed or cashtag-shill posts.
+fn looks_spammy(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let count = |p: char| words.iter().filter(|w| w.starts_with(p) && w.len() > 1).count();
+    preflight::residual_text_len(text) < 40
+        || count('@') >= 3
+        || count('#') >= 4
+        || words.iter().filter(|w| w.starts_with('$') && w[1..].chars().next().is_some_and(char::is_alphabetic)).count() >= 2
+}
+
+/// Smallest window (preferred, ×2, … up to `cap`) holding `want` posts.
+fn select_window(ages: &[i64], preferred: i64, cap: i64, want: usize) -> i64 {
+    let mut w = preferred.clamp(1, cap);
+    while w < cap && ages.iter().filter(|a| **a <= w).count() < want {
+        w = (w * 2).min(cap);
+    }
+    w
+}
+
+/// Up to `pool` posts (sorted best first), shared round-robin between the
+/// searches that found them, on-topic posts before the rest. Each search
+/// contributes from its own smallest window (preferred, ×2, … `cap`)
+/// holding its share. Returns the picks, best first, and the widest window.
+fn balance(posts: Vec<FeedPost>, pool: usize, preferred: i64, cap: i64) -> (Vec<FeedPost>, i64) {
+    let mut groups: std::collections::BTreeMap<usize, Vec<FeedPost>> = std::collections::BTreeMap::new();
+    for p in posts {
+        groups.entry(p.source).or_default().push(p);
+    }
+    let share = pool.div_ceil(groups.len().max(1));
+    let mut widest = preferred.clamp(1, cap);
+    let mut queues: Vec<std::collections::VecDeque<FeedPost>> = groups
+        .into_values()
+        .map(|g| {
+            let ages: Vec<i64> = g.iter().map(|p| p.age_minutes).collect();
+            let w = select_window(&ages, preferred, cap, share);
+            widest = widest.max(w);
+            g.into_iter().filter(|p| p.age_minutes <= w).collect()
+        })
+        .collect();
+    let mut out = Vec::new();
+    for on_topic in [true, false] {
+        let mut lanes: Vec<std::collections::VecDeque<FeedPost>> = queues
+            .iter_mut()
+            .map(|q| {
+                let (take, keep): (Vec<_>, Vec<_>) = q.drain(..).partition(|p| p.on_topic == on_topic);
+                q.extend(keep);
+                take.into()
+            })
+            .collect();
+        while out.len() < pool && lanes.iter().any(|q| !q.is_empty()) {
+            for q in &mut lanes {
+                if out.len() < pool {
+                    out.extend(q.pop_front());
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.opportunity_score.total_cmp(&a.opportunity_score).then(a.age_minutes.cmp(&b.age_minutes)));
+    (out, widest)
+}
+
+/// 1.0 for 2-30 min old (or inside the preferred window), sliding to 0.1 at
+/// `cap`. Under 2 min is shaded: X labels too-fast replies
+/// (fast_reply_spam_post), so the reply should wait anyway.
+fn freshness(age: i64, preferred: i64, cap: i64) -> f64 {
+    let peak = preferred.max(30);
+    if age < 2 {
+        0.8
+    } else if age <= peak {
+        1.0
+    } else {
+        1.0 - 0.9 * ((age - peak) as f64 / (cap - peak).max(1) as f64).min(1.0)
+    }
+}
+
+/// Chance the author replies back, by size (GOS reply-back data: 45% under
+/// 20K, 12% to 50K, 5% above), or your own record with them after 2+ replies.
+fn reply_back_rate(followers: u64, record: Option<(i64, i64)>) -> f64 {
+    match record {
+        Some((sent, back)) if sent >= 2 => back as f64 / sent as f64,
+        _ if followers < 20_000 => 0.45,
+        _ if followers < 50_000 => 0.12,
+        _ => 0.05,
+    }
+}
+
+/// Reply-target score in 0-1 and the reasons behind it. The reply ranker
+/// under a post weighs early likes per hour of age, the OP replying to or
+/// liking you, and the OP following you (reply two-tower features).
+fn score_target(p: &FeedPost, facts: &LocalFacts, preferred: i64, cap: i64) -> (f64, Vec<String>) {
+    let handle = p.author.to_lowercase();
+    let follows_you = facts.followers.contains(&handle);
+    let record = facts.reply_stats.get(&handle).copied();
+    let fresh = freshness(p.age_minutes, preferred, cap);
+    let open = 1.0 / (1.0 + p.replies as f64 / 8.0);
+    let per_hour = p.likes as f64 / (p.age_minutes.max(15) as f64 / 60.0);
+    let traction = ((1.0 + per_hour).ln() / 51f64.ln()).min(1.0);
+    let back = (reply_back_rate(p.author_followers, record) / 0.45).min(1.0);
+    let score = 0.25 * fresh
+        + 0.15 * open
+        + 0.15 * traction
+        + 0.15 * back
+        + 0.15 * if follows_you { 1.0 } else { 0.0 }
+        + 0.15 * if p.on_topic { 1.0 } else { 0.0 };
+
+    let mut why = Vec::new();
+    if follows_you {
+        why.push("follows you".to_string());
+    }
+    if let Some((sent, back)) = record.filter(|r| r.1 > 0) {
+        why.push(format!("replied back {back}/{sent}"));
+    }
+    if (2..=30).contains(&p.age_minutes) {
+        why.push(format!("fresh ({} min)", p.age_minutes));
+    }
+    if p.replies <= 3 {
+        why.push(format!("early ({} replies)", p.replies));
+    }
+    if p.author_followers < 20_000 && record.is_none() {
+        why.push("peer-sized (reply-backs ~45%)".into());
+    }
+    (score, why)
+}
+
 pub async fn feed(
     ctx: Arc<AppContext>,
     format: OutputFormat,
@@ -605,225 +951,150 @@ pub async fn feed(
     max_age_mins: u64,
     count: Option<usize>,
 ) -> Result<(), XmasterError> {
-    let api = crate::providers::xapi::XApi::new(ctx.clone());
-    // Search budget and heuristic page size; JEV mode returns its best 5.
-    let budget = count.unwrap_or(10);
+    let mut topics = resolve_topics(cli_topics);
+    let keep = count.unwrap_or(if ctx.config.jev_key().is_some() { 5 } else { 10 });
+    let preferred = max_age_mins as i64;
+    let cap = preferred.max(FEED_WINDOW_CAP_MINS);
+    let facts = LocalFacts::load();
 
-    // Resolve topics: CLI args → split commas → fallback to niche.topics.
-    // Empty result is not fatal — watchlist-only mode still returns posts
-    // from watched accounts, which is often the most useful path anyway.
-    let topics = resolve_topics(cli_topics);
+    // One concurrent round of searches: each topic, then the watchlist as
+    // `from:` chunks. Free through the web session; on the paid API, fewer
+    // posts per search.
+    let watchlist: Vec<String> = IntelStore::open()
+        .ok()
+        .and_then(|s| s.list_watchlist().ok())
+        .map(|w| w.into_iter().map(|e| e.username).collect())
+        .unwrap_or_default();
+    let web = ctx.config.web_reads();
+    let wl_queries = watchlist_queries(&watchlist, web);
+    topics.truncate(FEED_MAX_SEARCHES - wl_queries.len().min(2));
+    let mut queries: Vec<String> = topics.iter().map(|t| topic_query(t, web)).collect();
+    let room = FEED_MAX_SEARCHES - queries.len();
+    queries.extend(wl_queries.into_iter().take(room));
+    let want = if web { 20 } else { 10 };
+    let since = (chrono::Utc::now() - chrono::Duration::minutes(cap))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (results, failed_searches) = run_searches(&ctx, queries, want, &since).await?;
 
-    // Phase 1: Check watchlist accounts first (saves API search calls).
-    // This runs regardless of whether we have topics — watchlist accounts
-    // are intrinsically interesting.
-    //
-    // Batch-hydrate missing user_ids in a single GET /2/users/by call
-    // instead of looping per-user (was O(n) calls, now O(ceil(n/100))).
-    let mut watchlist_tweets = Vec::new();
-    if let Ok(store) = IntelStore::open() {
-        if let Ok(mut watchlist) = store.list_watchlist() {
-            // Identify entries missing user_id and batch-resolve them.
-            let missing_uids: Vec<String> = watchlist
-                .iter()
-                .filter(|e| e.user_id.is_none())
-                .map(|e| e.username.clone())
-                .collect();
-            if !missing_uids.is_empty() {
-                if let Ok(users) = api.get_users_by_usernames(&missing_uids).await {
-                    for user in &users {
-                        let followers = user
-                            .public_metrics
-                            .as_ref()
-                            .map(|m| m.followers_count as i64)
-                            .unwrap_or(0);
-                        // Find the matching entry and backfill
-                        if let Some(entry) = watchlist.iter_mut().find(|e| {
-                            e.username.to_lowercase() == user.username.to_lowercase()
-                        }) {
-                            let _ = store.add_watchlist(
-                                &entry.username,
-                                Some(&user.id),
-                                entry.topic.as_deref(),
-                                followers,
-                            );
-                            entry.user_id = Some(user.id.clone());
-                            entry.followers = followers;
-                        }
-                    }
-                }
-            }
-
-            for entry in &watchlist {
-                if let Some(ref uid) = entry.user_id {
-                    let start_time = {
-                        let since = chrono::Utc::now() - chrono::Duration::minutes(max_age_mins as i64);
-                        since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                    };
-                    if let Ok(tweets) = api.get_user_tweets_paginated(uid, 5, Some(&start_time), None).await {
-                        for mut t in tweets {
-                            // Inject known follower count from watchlist (avoids missing data)
-                            if t.author_followers.is_none() {
-                                t.author_followers = Some(entry.followers as u64);
-                            }
-                            if t.author_username.is_none() {
-                                t.author_username = Some(entry.username.clone());
-                            }
-                            watchlist_tweets.push(t);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Phase 2: Cold search across ALL resolved topics in parallel.
-    // Each topic becomes one search call; results are unioned + deduped.
-    // This replaces the previous single-topic path — the agent never has to
-    // loop per-topic anymore.
-    let start_time = {
-        let now = chrono::Utc::now();
-        let since = now - chrono::Duration::minutes(max_age_mins as i64);
-        since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-    };
-
-    let search_tweets = if watchlist_tweets.len() < budget && !topics.is_empty() {
-        // Budget per topic: split `count*5` evenly, min 10 per topic so even
-        // a 5-topic fanout with count=10 still pulls 10/topic not 10/total.
-        let per_topic_cap = (budget * 5 / topics.len()).clamp(10, 100);
-        let mut collected = Vec::new();
-        for topic in &topics {
-            let tweets = api
-                .search_tweets_paginated(
-                    topic,
-                    "recent",
-                    per_topic_cap,
-                    Some(&start_time),
-                    None,
-                )
-                .await
-                .unwrap_or_default();
-            collected.extend(tweets);
-        }
-        collected
-    } else {
-        Vec::new()
-    };
-
-    // Combine: watchlist first, then search results, dedupe by tweet id.
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut tweets = Vec::new();
-    for t in watchlist_tweets.into_iter().chain(search_tweets) {
-        if seen_ids.insert(t.id.clone()) {
-            tweets.push(t);
-        }
-    }
-
+    // Dedupe by id; a post keeps the first search (topic before watchlist)
+    // that found it.
+    let mut seen = std::collections::HashSet::new();
+    let (sources, tweets): (Vec<usize>, Vec<TweetData>) = results
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, ts)| ts.into_iter().map(move |t| (i, t)))
+        .filter(|(_, t)| seen.insert(t.id.clone()))
+        .unzip();
     if let Ok(store) = IntelStore::open() {
         let _ = store.record_discovered_posts("engage_feed", &tweets);
     }
 
-    let now = chrono::Utc::now();
-    let mut posts: Vec<FeedPost> = Vec::new();
     let total_found = tweets.len();
     let mut filtered_count = 0usize;
-
-    for t in tweets {
+    let judged = ctx.config.jev_key().is_some() && judge::owner(&ctx.config).is_some();
+    let now = chrono::Utc::now();
+    let mut posts: Vec<FeedPost> = Vec::new();
+    for (source, t) in sources.into_iter().zip(tweets) {
         let author_followers = t.author_followers.unwrap_or(0);
         if author_followers < min_followers {
             filtered_count += 1;
             continue;
         }
-
-        // Skip replies and retweets — we want original posts
-        if let Some(refs) = &t.referenced_tweets {
-            if refs.iter().any(|r| r.ref_type == "retweeted" || r.ref_type == "replied_to") {
-                continue;
-            }
-        }
-
-        let age_minutes = t.created_at.as_deref()
+        let is_reply_or_repost = t
+            .referenced_tweets
+            .as_ref()
+            .is_some_and(|refs| refs.iter().any(|r| r.ref_type == "retweeted" || r.ref_type == "replied_to"));
+        let age_minutes = t
+            .created_at
+            .as_deref()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_minutes())
             .unwrap_or(0);
-
+        if is_reply_or_repost || age_minutes > cap || facts.handled.contains(&t.id) || looks_spammy(&t.text) {
+            continue;
+        }
+        // Without JEV, keyword overlap is the niche check (watchlist posts too).
+        let on_topic = topics.is_empty() || mentions_topic(&tokens(&t.text), &topics);
+        if !judged && !on_topic {
+            continue;
+        }
         let metrics = t.public_metrics.as_ref();
-        let author_user_id = t.author_id.clone();
-        let watchlist_username = t.author_username.clone();
-        let author = watchlist_username
-            .clone()
-            .unwrap_or_else(|| author_user_id.clone().unwrap_or_default());
-
+        let author = t.author_username.clone().unwrap_or_else(|| t.author_id.clone().unwrap_or_default());
         posts.push(FeedPost {
             reply_command: format!("xmaster reply {} \"your reply\"", t.id),
             id: t.id,
-            author: author.clone(),
-            watchlist_username,
-            author_user_id,
+            author,
+            watchlist_username: t.author_username,
+            author_user_id: t.author_id,
             author_followers,
             text: t.text,
             age_minutes,
             likes: metrics.map(|m| m.like_count).unwrap_or(0),
             replies: metrics.map(|m| m.reply_count).unwrap_or(0),
-            opportunity_score: 0.0, // computed after collection
+            opportunity_score: 0.0,
             jev_score: None,
             why: String::new(),
+            on_topic,
+            source,
         });
     }
 
-    // Score by opportunity: freshness + size_fit + conversation openness
-    let my_followers = {
-        let api2 = crate::providers::xapi::XApi::new(ctx.clone());
-        api2.get_me().await.ok().and_then(|u| u.public_metrics.as_ref().map(|m| m.followers_count)).unwrap_or(100) as u64
-    };
+    // Score, cap per author, then share the pool fairly between searches so
+    // a busy topic can't crowd out a niche one.
     for p in &mut posts {
-        let freshness = 1.0 - (p.age_minutes as f64 / max_age_mins as f64).min(1.0);
-        let size_fit = compute_size_fit(p.author_followers, my_followers);
-        let openness = if p.likes > 0 { (p.replies as f64 / p.likes as f64).min(1.0) } else { 0.5 };
-        p.opportunity_score = (0.45 * freshness + 0.25 * size_fit + 0.20 * openness + 0.10) as f32;
+        let (score, why) = score_target(p, &facts, preferred, cap);
+        p.opportunity_score = (score * 100.0).round() / 100.0;
+        p.why = why.join("; ");
     }
-    // Primary: opportunity score, bucketed to 2 decimals so a marginally-higher
-    // score can't bury a much fresher post. Secondary: age — fresher wins, because
-    // reply momentum dies after ~30-60 min, so minutes matter on near-ties.
-    posts.sort_by(|a, b| {
-        let sa = (a.opportunity_score * 100.0).round() as i64;
-        let sb = (b.opportunity_score * 100.0).round() as i64;
-        sb.cmp(&sa).then(a.age_minutes.cmp(&b.age_minutes))
+    posts.sort_by(|a, b| b.opportunity_score.total_cmp(&a.opportunity_score).then(a.age_minutes.cmp(&b.age_minutes)));
+    let mut per_author: HashMap<String, usize> = HashMap::new();
+    posts.retain(|p| {
+        let n = per_author.entry(p.author.to_lowercase()).or_default();
+        *n += 1;
+        *n <= PER_AUTHOR
     });
-    let jev = jev_pick(&ctx, &mut posts, count.unwrap_or(5)).await;
+    let pool = if judged { jev_input_cap(keep) } else { keep * 2 };
+    let (mut posts, window) = balance(posts, pool, preferred, cap);
+
+    let jev = if judged { jev_pick(&ctx, &mut posts, keep).await } else { None };
     if jev.is_none() {
-        posts.truncate(budget);
+        posts.retain(|p| p.on_topic);
+        posts.truncate(keep);
     }
 
-    // Auto-add high-value accounts from search to watchlist (silent, never fails).
-    // The topic label is the comma-joined list of all resolved topics from this
-    // call, so downstream introspection still knows which fanout discovered them.
+    // Grow the watchlist with on-niche accounts worth checking again.
     let topic_label = topics.join(",");
     if let Ok(store) = IntelStore::open() {
-        for p in &posts {
-            if p.author_followers >= 10_000 {
-                if let Some(username) = p.watchlist_username.as_deref() {
-                    let _ = store.add_watchlist(
-                        username,
-                        p.author_user_id.as_deref(),
-                        if topic_label.is_empty() { None } else { Some(&topic_label) },
-                        p.author_followers as i64,
-                    );
-                }
+        for p in posts.iter().filter(|p| p.author_followers >= 10_000) {
+            if let Some(username) = p.watchlist_username.as_deref() {
+                let _ = store.add_watchlist(
+                    username,
+                    p.author_user_id.as_deref(),
+                    if topic_label.is_empty() { None } else { Some(&topic_label) },
+                    p.author_followers as i64,
+                );
             }
         }
     }
 
     let result = FeedResult {
-        topics: topics.clone(),
+        topics,
         posts,
         total_found,
         filtered_by_followers: filtered_count,
+        window_mins: window,
+        failed_searches,
         jev,
     };
-
     output::render(format, &result, None);
     Ok(())
+}
+
+/// Posts sent to JEV: enough to find `keep` good ones, few enough that its
+/// parallel requests finish inside their 1.5 s deadline (at ~28 in flight
+/// most timed out, live 13 Oct).
+fn jev_input_cap(keep: usize) -> usize {
+    (keep * 4).clamp(12, 20).min(judge::MAX_ITEMS)
 }
 
 /// Keep the posts JEV judges worth a reply, best first, at most `keep`.
@@ -831,7 +1102,7 @@ pub async fn feed(
 async fn jev_pick(ctx: &AppContext, posts: &mut Vec<FeedPost>, keep: usize) -> Option<FeedJev> {
     let jev = Jev::from_ctx(ctx)?;
     let owner = judge::owner(&ctx.config)?;
-    posts.truncate(judge::MAX_ITEMS);
+    posts.truncate(jev_input_cap(keep));
     let input: Vec<(&str, &str)> = posts.iter().map(|p| (p.author.as_str(), p.text.as_str())).collect();
     let picks = judge::rank_posts(&jev, &owner, &input).await?;
     let judged = picks.iter().flatten().count();
@@ -840,14 +1111,19 @@ async fn jev_pick(ctx: &AppContext, posts: &mut Vec<FeedPost>, keep: usize) -> O
         .drain(..)
         .zip(picks)
         .filter_map(|(mut post, pick)| {
+            tracing::debug!("jev pick {:?} @{}: {}", pick.as_ref().map(|p| p.score), post.author, crate::utils::safe_truncate(&post.text, 80));
             let pick = pick.filter(|p| p.score >= judge::PICK_FLOOR)?;
             post.jev_score = Some((pick.score * 100.0).round() / 100.0);
-            post.why = pick.why;
+            post.why = [pick.why, std::mem::take(&mut post.why)]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ");
             Some((pick.score, post))
         })
         .collect();
-    // Best content first; within a 0.1 band of pick score, the heuristic
-    // order (fresher, more open) breaks the tie.
+    // Best content first; within a 0.1 band of pick score, the reply-target
+    // score (fresh, early, follows you, replies back) breaks the tie.
     kept.sort_by(|a, b| {
         let band = |x: f64| (x * 10.0).round() as i64;
         band(b.0).cmp(&band(a.0)).then(b.1.opportunity_score.total_cmp(&a.1.opportunity_score))
@@ -1052,7 +1328,113 @@ mod tests {
             opportunity_score: 0.5,
             jev_score: None,
             why: String::new(),
+            on_topic: true,
+            source: 0,
         }
+    }
+
+    #[test]
+    fn topic_query_quotes_phrases_and_adds_spelling() {
+        assert_eq!(
+            topic_query("Aging biology", true),
+            "((aging biology) OR (ageing biology)) lang:en -filter:replies -filter:nativeretweets min_faves:2"
+        );
+        assert_eq!(topic_query("longevity", true), "longevity lang:en -filter:replies -filter:nativeretweets min_faves:2");
+        // API v2 spelling, no like floor.
+        assert_eq!(topic_query("gene therapy", false), "(gene therapy) lang:en -is:reply -is:retweet");
+        // Operator topics pass through.
+        assert!(topic_query("longevity OR senolytics", true).starts_with("(longevity OR senolytics) "));
+    }
+
+    #[test]
+    fn watchlist_becomes_few_from_queries() {
+        let handles: Vec<String> = (0..41).map(|i| format!("account_{i:02}")).collect();
+        let qs = watchlist_queries(&handles, true);
+        assert_eq!(qs.len(), 2);
+        assert!(qs.iter().all(|q| q.len() <= 512), "{qs:?}");
+        assert!(qs[0].starts_with("(from:account_00 OR from:account_01"));
+        let all: usize = qs.iter().map(|q| q.matches("from:").count()).sum();
+        assert_eq!(all, 41);
+        assert!(watchlist_queries(&[], true).is_empty());
+    }
+
+    #[test]
+    fn topic_match_needs_every_word() {
+        let topics = vec!["AI agents".to_string(), "aging biology".to_string()];
+        assert!(mentions_topic(&tokens("New AI agent benchmark"), &topics));
+        assert!(mentions_topic(&tokens("Ageing biology is underfunded"), &topics));
+        assert!(!mentions_topic(&tokens("AI is overhyped"), &topics));
+        assert!(!mentions_topic(&tokens("Aim higher, agents of change"), &topics), "\"ai\" must match whole words");
+    }
+
+    #[test]
+    fn spam_shapes_are_dropped() {
+        assert!(looks_spammy("https://t.co/abc"));
+        assert!(looks_spammy("gm @a @b @c, the lab results on rapamycin are in and they look strong"));
+        assert!(looks_spammy("$PONS and $FET are the AI agent plays this week, the charts look strong here"));
+        assert!(!looks_spammy("Rapamycin at 6mg weekly dropped IGF-1 by 12% in our 2024 cohort, data below"));
+    }
+
+    #[test]
+    fn window_widens_only_when_thin() {
+        let ages = [5, 12, 40, 90, 200, 300];
+        assert_eq!(select_window(&ages, 30, 360, 2), 30);
+        assert_eq!(select_window(&ages, 30, 360, 4), 120);
+        assert_eq!(select_window(&ages, 30, 360, 50), 360);
+    }
+
+    #[test]
+    fn balance_shares_the_pool_between_searches() {
+        let mk = |id: &str, source: usize, age: i64, score: f64| FeedPost {
+            source,
+            age_minutes: age,
+            opportunity_score: score,
+            ..post(id)
+        };
+        // A busy topic (source 0) with many fresh posts, a niche one (1) with
+        // one older post.
+        let mut posts: Vec<FeedPost> = (0..10).map(|i| mk(&format!("a{i}"), 0, 5 + i, 0.9)).collect();
+        posts.push(mk("n1", 1, 200, 0.4));
+        let mut off = mk("w1", 2, 3, 0.95);
+        off.on_topic = false;
+        posts.push(off);
+        let (picked, window) = balance(posts.clone(), 4, 30, 360);
+        assert_eq!(picked.len(), 4);
+        assert!(picked.iter().any(|p| p.id == "n1"), "the niche post gets a slot");
+        assert!(!picked.iter().any(|p| p.id == "w1"), "off-topic waits for spare room");
+        assert_eq!(window, 360, "the thin search widened to the cap");
+        assert_eq!(picked[0].opportunity_score, 0.9, "best first");
+        let (all, _) = balance(posts, 20, 30, 360);
+        assert!(all.iter().any(|p| p.id == "w1"), "and fills it when there is");
+    }
+
+    #[test]
+    fn freshness_peaks_early_and_shades_the_first_minutes() {
+        assert_eq!(freshness(10, 30, 360), 1.0);
+        assert!(freshness(1, 30, 360) < 1.0);
+        assert!(freshness(120, 30, 360) > freshness(300, 30, 360));
+        assert!((freshness(360, 30, 360) - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reply_back_uses_size_prior_then_own_record() {
+        assert_eq!(reply_back_rate(5_000, None), 0.45);
+        assert_eq!(reply_back_rate(30_000, None), 0.12);
+        assert_eq!(reply_back_rate(500_000, Some((1, 1))), 0.05);
+        assert_eq!(reply_back_rate(500_000, Some((4, 2))), 0.5);
+    }
+
+    #[test]
+    fn mutuals_and_reciprocators_rank_higher() {
+        let p = post("1");
+        let mut facts = LocalFacts::default();
+        let (base, _) = score_target(&p, &facts, 30, 360);
+        facts.followers.insert("someone".into());
+        facts.reply_stats.insert("someone".into(), (3, 2));
+        let (boosted, why) = score_target(&p, &facts, 30, 360);
+        assert!(boosted > base, "{boosted} vs {base}");
+        assert!(why.contains(&"follows you".to_string()));
+        assert!(why.contains(&"replied back 2/3".to_string()));
     }
 
     #[tokio::test]
@@ -1066,3 +1448,4 @@ mod tests {
         assert_eq!(ids, ["1", "2"]);
     }
 }
+

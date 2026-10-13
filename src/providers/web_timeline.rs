@@ -269,6 +269,15 @@ mod tests {
     }
 
     #[test]
+    fn reads_followers_from_relationship_counts() {
+        let mut t = tweet("4", "carol", "hi");
+        t["core"]["user_results"]["result"] = json!({
+            "rest_id": "100", "core": { "screen_name": "carol" }, "relationship_counts": { "followers": 758, "following": 785 }
+        });
+        assert_eq!(parse_tweet(&t).unwrap().author_followers, Some(758));
+    }
+
+    #[test]
     fn later_pages_replace_the_cursor() {
         let resp = json!({ "data": { "x": { "instructions": [
             { "type": "TimelineAddEntries", "entries": [ item("tweet-3", tweet("3", "bob", "hi")) ] },
