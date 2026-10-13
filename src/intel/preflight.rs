@@ -1,8 +1,10 @@
+use regex::Regex;
 use serde::Serialize;
+use std::sync::OnceLock;
 
-/// Post quality lint. Signals from xai-org/x-algorithm
-/// home-mixer/scorers/ranking_scorer.rs (May 15, 2026); magnitudes are runtime
-/// params and not public.
+/// Post quality lint. Rules cite xai-org/x-algorithm (home-mixer/params/param.rs,
+/// synced 2026-10-12; vm-ranker; grox; visibility-filtering). The ranking
+/// weights are public: score = Σ weight × the viewer's predicted probability.
 
 // ---------------------------------------------------------------------------
 // Context passed into analyze()
@@ -190,7 +192,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             severity: Severity::Critical,
             code: "over_limit".into(),
             message: format!(
-                "Post is {} characters (limit: {})",
+                "Post is {} characters as X counts them (URLs 23, emoji and CJK 2; limit: {})",
                 features.char_count, char_limit
             ),
             fix: Some(format!(
@@ -202,15 +204,72 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score -= 30;
     }
 
-    if features.has_link && features.link_position.as_deref() == Some("body") {
+    // --- Links: no ranking penalty (open_link weighs +0.2, param.rs:348, and
+    // Phoenix has no URL feature). The risks are URL reputation, link spam in
+    // replies, and the paid API's URL price.
+    let urls = find_urls(trimmed);
+    let mentions = count_body_mentions(trimmed, ctx.is_reply());
+    if let Some(host) = urls.iter().find_map(|u| shortener_host(u)) {
         issues.push(Issue {
             severity: Severity::Critical,
-            code: "link_in_body".into(),
-            message: "External link in tweet body — links in the body track with lower reach. Put the link in a reply".into(),
-            fix: Some("Move the link to a reply instead".into()),
+            code: "link_shortener".into(),
+            message: format!(
+                "{host} is a URL shortener. X scores every hop of the redirect chain: a low-quality hop labels the post SpamHighRecall (hidden from non-followers), and a pinned post with a bad link labels the whole account for 7 days"
+            ),
+            fix: Some("Use the full destination URL".into()),
             group: IssueGroup::Safety,
         });
         score -= 30;
+    }
+    if !urls.is_empty() && ctx.is_reply() {
+        issues.push(Issue {
+            severity: Severity::Critical,
+            code: "reply_has_link".into(),
+            message: "Link in a reply. To a stranger it reads as link spam: X's reply judge sees the URL, and the reply must also clear URL-reputation rules and Agatha (blocks and reports from non-followers)".into(),
+            fix: Some("Drop the link; answer in the reply and let them ask for the source".into()),
+            group: IssueGroup::Reply,
+        });
+        score -= 30;
+    } else if !urls.is_empty() && mentions > 0 {
+        issues.push(Issue {
+            severity: Severity::Warning,
+            code: "link_mention_nonfollower".into(),
+            message: "Link plus @mention: X's URL-spam rules look for links aimed at accounts; if the mentioned account doesn't follow you it reads as link spam".into(),
+            fix: Some("Post the link without the @mention, or mention them without the link".into()),
+            group: IssueGroup::Safety,
+        });
+        score -= 15;
+    }
+    if !urls.is_empty() {
+        if !ctx.is_reply() && residual_text_len(trimmed) < 40 {
+            issues.push(Issue {
+                severity: Severity::Warning,
+                code: "link_bare".into(),
+                message: "Mostly a bare link. The ranker scores the post's own text and media, so a link with no description gives it little to work with".into(),
+                fix: Some("Say what's behind the link and why it matters in 1-2 lines".into()),
+                group: IssueGroup::Substance,
+            });
+            score -= 10;
+        }
+        issues.push(Issue {
+            severity: Severity::Info,
+            code: "link_api_cost".into(),
+            message: "Links carry no ranking penalty (open_link +0.2). Cost only: through the paid API a post with a URL is $0.20 instead of $0.015; the web session posts it free".into(),
+            fix: None,
+            group: IssueGroup::Safety,
+        });
+    }
+    if mentions >= 2 {
+        issues.push(Issue {
+            severity: Severity::Warning,
+            code: "mention_burst".into(),
+            message: format!(
+                "{mentions} @mentions in the body. Posts with 2+ mentions get X's real-time spam check (PTOS) 10 s after posting"
+            ),
+            fix: Some("Keep one @mention, or none".into()),
+            group: IssueGroup::Safety,
+        });
+        score -= 10;
     }
 
     // --- Warning issues (score -= 15) ---
@@ -266,13 +325,27 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score -= 10;
     }
 
-    let bait_phrases = ["like if", "rt if", "follow for"];
-    if bait_phrases.iter().any(|b| lower.contains(b)) {
+    if let Some(hit) = engagement_bait(trimmed) {
+        issues.push(Issue {
+            severity: Severity::Critical,
+            code: "engagement_bait".into(),
+            message: format!(
+                "Engagement bait (\"{hit}\"). X's post classifier labels baiting and engagement farming SpamHighRecall (hidden from non-followers), with no exemption for big accounts"
+            ),
+            fix: Some("Ask a real question instead. A deliberate comment-to-DM lead magnet pays this cost".into()),
+            group: IssueGroup::Safety,
+        });
+        score -= 30;
+    }
+
+    if let Some(insult) = insult_target(trimmed) {
         issues.push(Issue {
             severity: Severity::Warning,
-            code: "engagement_bait".into(),
-            message: "Engagement bait detected — X algorithm penalizes this".into(),
-            fix: Some("Remove explicit engagement requests".into()),
+            code: "insult_target".into(),
+            message: format!(
+                "Insult aimed at a person (\"{insult}\"). The FOSNR_ABUSE_INSULTS label hides the post from non-followers and puts a notice in front of followers"
+            ),
+            fix: Some("Attack the claim, not the person".into()),
             group: IssueGroup::Safety,
         });
         score -= 15;
@@ -283,12 +356,12 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             severity: Severity::Warning,
             code: "excessive_hashtags".into(),
             message: format!(
-                "{} hashtags — more than 2 looks spammy and hurts reach",
+                "{} hashtags. Hashtags carry no ranking weight (Grok assigns topics from the text), and 3+ reads as spam",
                 features.hashtag_count
             ),
-            fix: Some("Keep to 1-2 relevant hashtags max".into()),
+            fix: Some("Keep to 0-1 hashtags".into()),
             group: IssueGroup::Safety,
-            });
+        });
         score -= 15;
     }
 
@@ -443,49 +516,52 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score += 5;
     }
 
-    // Posting cadence heuristics. Replies are exempt.
+    // Posting cadence. Replies are exempt. Author diversity (vm-ranker
+    // params.rs:169-186): your k-th unseen post in one feed request scores
+    // ×(0.75·0.5^k + 0.25) = ×1, ×0.625, ×0.44, ×0.34 … floor ×0.25.
     if !ctx.is_reply() {
         if let Ok(store) = crate::intel::store::IntelStore::open() {
             if let Ok(velocity) = store.get_recent_post_velocity() {
                 if velocity.standalone_24h >= 4 {
                     issues.push(Issue {
-                        severity: Severity::Critical,
+                        severity: Severity::Warning,
                         code: "daily_cap_exceeded".into(),
                         message: format!(
-                            "{} standalone posts in last 24h — diminishing returns past ~4/day",
+                            "{} originals in 24 h (the ~4/day cap is empirical). Code fact: your 2nd/3rd/4th unseen post in a viewer's 48 h window scores ×0.625/×0.44/×0.34 (author diversity)",
                             velocity.standalone_24h
                         ),
-                        fix: Some("Reply to others instead — replies don't count toward the cap".into()),
+                        fix: Some("Reply to others instead: replies don't compete with your originals".into()),
                         group: IssueGroup::Cadence,
-            });
-                    score -= 30;
+                    });
+                    score -= 15;
                 } else if velocity.posts_6h >= 3 {
                     issues.push(Issue {
                         severity: Severity::Warning,
                         code: "author_diversity_penalty".into(),
                         message: format!(
-                            "{} posts in the last 6h — author_diversity_scorer.rs decays repeated authors per feed pass",
+                            "{} posts in the last 6 h. Each extra unseen post from you in a viewer's feed is multiplied by ×0.625, ×0.44, ×0.34 (vm-ranker author diversity, floor ×0.25)",
                             velocity.posts_6h
                         ),
-                        fix: Some("Wait at least 2 hours between posts".into()),
+                        fix: Some("Space originals 2 h+ apart: posts a viewer has seen leave the pool, so the decay only hits unseen ones".into()),
                         group: IssueGroup::Cadence,
-            });
+                    });
                     score -= 15;
                 } else if velocity.posts_1h >= 1 {
                     issues.push(Issue {
                         severity: Severity::Info,
                         code: "recent_post".into(),
                         message: format!(
-                            "You posted {} time(s) in the last hour — previous post may still be gaining traction",
+                            "You posted {} time(s) in the last hour. That post is still in its 2 h cold-start window; a new original competes with it and scores ×0.625 in shared feeds",
                             velocity.posts_1h
                         ),
-                        fix: Some("Consider waiting — posting now may split attention".into()),
+                        fix: Some("Wait until the last post is 2 h old".into()),
                         group: IssueGroup::Cadence,
                     });
                     score -= 5;
                 }
             }
         }
+        issues.extend(cold_start_issue(own_follower_count()));
     }
 
     // --- Reply-quality checks (only for replies) ---
@@ -523,9 +599,9 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
             issues.push(Issue {
                 severity: Severity::Critical,
                 code: "reply_generic".into(),
-                message: "Generic agreement reply — short replies get no algorithmic push in 2026, and the original author won't engage-back with them".into(),
+                message: format!("Generic agreement reply. {REPLY_JUDGE}, and the author rarely replies to these"),
                 fix: Some("Add a specific observation, counter-point, or question tied to the post's content".into()),
-            group: IssueGroup::Reply,
+                group: IssueGroup::Reply,
             });
             score -= 25;
         }
@@ -535,13 +611,43 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
                 severity: Severity::Warning,
                 code: "reply_too_short".into(),
                 message: format!(
-                    "Reply is {} chars — short replies rarely earn a reply-back and score poorly on Grok's reply-quality classifier",
+                    "Reply is {} chars. {REPLY_JUDGE}; short replies rarely earn a reply-back",
                     features.char_count
                 ),
                 fix: Some("Expand to 1-2 sentences with a specific detail the author can respond to".into()),
                 group: IssueGroup::Reply,
             });
             score -= 15;
+        }
+
+        let tells = slop_tells(trimmed);
+        if !tells.is_empty() {
+            let critical = tells.len() >= 3;
+            issues.push(Issue {
+                severity: if critical { Severity::Critical } else { Severity::Warning },
+                code: "reply_slop".into(),
+                message: format!(
+                    "AI-writing tells: {}. X labels slop replies (llm_slop_post: down-ranked for 30 days), and an account that keeps it up gets llm_slop_user: SpamHighRecall for 30 days, hidden from every non-follower",
+                    tells.join(", ")
+                ),
+                fix: Some("Rewrite it plainly, the way you'd say it out loud; one concrete point".into()),
+                group: IssueGroup::Reply,
+            });
+            score -= if critical { 30 } else { 10 };
+        }
+
+        if let Some(overlap) = duplicate_overlap(trimmed, &own_recent_texts(30)) {
+            issues.push(Issue {
+                severity: Severity::Critical,
+                code: "reply_duplicate".into(),
+                message: format!(
+                    "{:.0}% word overlap with one of your posts from the last 30 days. X clusters replies by words and labels every reply in a cluster COPYPASTA_SPAM",
+                    overlap * 100.0
+                ),
+                fix: Some("Write this one fresh, about this post's specifics".into()),
+                group: IssueGroup::Dedup,
+            });
+            score -= 30;
         }
     }
 
@@ -668,7 +774,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         issues.push(Issue {
             severity: Severity::Warning,
             code: "negative_sentiment".into(),
-            message: "Combative or negative tone — Grok predicts P(block) and P(mute) and suppresses pre-emptively".into(),
+            message: "Combative tone. The ranker predicts each viewer's report (−234), mute (−58.8), not-interested (−47.5) and block (−31.2); when those outweigh the positives, the post sinks below every positive post for that viewer".into(),
             fix: Some("Reframe constructively — critique the idea, not the person".into()),
             group: IssueGroup::Safety,
         });
@@ -677,7 +783,7 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         issues.push(Issue {
             severity: Severity::Info,
             code: "mixed_sentiment".into(),
-            message: "Mildly negative language detected — may elevate P(mute) prediction".into(),
+            message: "Mildly negative language: raises predicted mute (−58.8) and not-interested (−47.5)".into(),
             fix: Some(
                 "Consider softening — the algorithm penalises predicted negative reactions".into(),
             ),
@@ -914,8 +1020,7 @@ fn estimate_proxies(text: &str, features: &FeatureVector, ctx: &AnalyzeContext) 
         } else if features.sentiment == "mixed" {
             s += 0.15;
         }
-        let bait = ["like if", "rt if", "follow for"];
-        if bait.iter().any(|b| lower.contains(b)) {
+        if engagement_bait(text).is_some() {
             s += 0.20;
         }
         let attacks = ["you're wrong", "shut up", "stfu", "cope", "ratio", "l + ratio"];
@@ -997,11 +1102,11 @@ fn score_goals(proxies: &ProxyScores) -> GoalScores {
 // ---------------------------------------------------------------------------
 
 fn extract_features(text: &str) -> FeatureVector {
-    let char_count = text.chars().count();
+    let char_count = crate::utils::weighted_len(text);
     let word_count = text.split_whitespace().count();
     let line_count = text.lines().count();
 
-    let has_link = text.contains("http://") || text.contains("https://");
+    let has_link = !find_urls(text).is_empty();
     let link_position = if has_link { Some("body".into()) } else { None };
 
     let hashtag_count = count_real_hashtags(text);
@@ -1212,6 +1317,261 @@ fn has_proper_nouns(text: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Code-anchored detectors (xai-org/x-algorithm: grox, botmaker, VF rules)
+// ---------------------------------------------------------------------------
+
+/// grox/flows/reply_spam: task_write.py:140-141.
+const REPLY_JUDGE: &str = "X's reply judge (an LLM) scores every reply to someone else's thread 0-3, and a 0 is labelled RISKY_HIGH_VIZ_REPLY and down-ranked under the post";
+
+/// Redirectors whose hops X's URL-reputation rules score (a LOW_QUALITY hop
+/// whose final hop isn't GOOD → SPAM_HIGH_RECALL). t.co is X's own wrapper.
+const SHORTENERS: &[&str] = &[
+    "bit.ly", "tinyurl.com", "ow.ly", "buff.ly", "lnkd.in", "rebrand.ly", "cutt.ly", "is.gd",
+    "shorturl.at", "t.ly", "dlvr.it", "goo.gl", "tiny.cc", "rb.gy", "bl.ink", "shorte.st",
+    "adf.ly", "trib.al", "s.id", "v.gd", "qr.ae", "soo.gd", "clck.ru", "bitly.com",
+];
+
+fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
+    cell.get_or_init(|| Regex::new(pattern).expect("static regex"))
+}
+
+fn trim_token(token: &str) -> &str {
+    token.trim_end_matches([')', ']', ',', '.', '!', '?', ';', ':', '"', '\''])
+}
+
+fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("").to_lowercase();
+    host.strip_prefix("www.").map(str::to_string).unwrap_or(host)
+}
+
+/// URLs X would link: anything with a scheme, plus bare shortener links.
+pub(crate) fn find_urls(text: &str) -> Vec<&str> {
+    text.split_whitespace()
+        .map(trim_token)
+        .filter(|t| {
+            t.starts_with("http://")
+                || t.starts_with("https://")
+                || (t.contains('/') && SHORTENERS.contains(&host_of(t).as_str()))
+        })
+        .collect()
+}
+
+fn shortener_host(url: &str) -> Option<String> {
+    let host = host_of(url);
+    SHORTENERS.contains(&host.as_str()).then_some(host)
+}
+
+fn is_mention(token: &str) -> bool {
+    let t = token.trim_start_matches('.');
+    t.strip_prefix('@')
+        .is_some_and(|h| h.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// @handles in the body. A reply's leading run of @handles is X's own reply
+/// prefix and doesn't count.
+fn count_body_mentions(text: &str, is_reply: bool) -> usize {
+    let mut leading = is_reply;
+    text.split_whitespace()
+        .filter(|t| {
+            let m = is_mention(t);
+            if leading && m {
+                return false;
+            }
+            leading = false;
+            m
+        })
+        .count()
+}
+
+/// Characters left once URLs, @handles and #hashtags are removed.
+fn residual_text_len(text: &str) -> usize {
+    let urls = find_urls(text);
+    text.split_whitespace()
+        .filter(|t| !is_mention(t) && !t.starts_with('#') && !urls.contains(&trim_token(t)))
+        .map(|t| t.chars().count() + 1)
+        .sum::<usize>()
+        .saturating_sub(1)
+}
+
+/// Solicitation the PTOS classifier labels SpamEngagementBaiting/Farming
+/// (→ SpamHighRecall, no PageRank exemption). Returns the matched phrase.
+fn engagement_bait(text: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = regex(
+        &RE,
+        r"(?ix)\b(?:
+            (?:like|rt|retweet|repost)\s+if
+          | (?:rt|retweet|repost)\s+(?:to|for)\s+(?:win|a\s+chance|visibility|reach|more)
+          | follow\s*(?:4|for)\s*follow | f4f | follow\s*back | follow\s+train
+          | (?:like|follow)\s+(?:and|&|\+)\s+(?:rt|retweet|repost|comment|follow)
+          | tag\s+(?:a|\d+|your|some)\s+(?:friends?|buddy|people) | tag\s+someone
+          | drop\s+your\s+(?:handle|link|@)
+          | (?:comment|reply|drop|type)\s[^.!?\n]{0,30}?\s(?:and|&)\s+(?:i'?ll|i\s+will|you'?ll\s+get|get|receive)
+          | (?:i'?ll|i\s+will)\s+(?:follow|dm|send\s+it\s+to)\s+(?:back\s+)?(?:everyone|all|anyone)
+        )\b",
+    );
+    re.find(text).map(|m| m.as_str().to_string())
+}
+
+/// Second-person insults: FOSNR_ABUSE_INSULTS (visibility-filtering
+/// tweet_rules.rs:63-161).
+fn insult_target(text: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = regex(
+        &RE,
+        r"(?ix)\b(?:
+            idiots? | morons? | clowns? | imbeciles? | dumbass(?:es)? | cretins? | halfwits?
+          | you(?:'re|\s+are)?\s+(?:so\s+|such\s+an?\s+|an?\s+)?(?:stupid|dumb|pathetic|delusional|clueless)
+        )\b",
+    );
+    re.find(text).map(|m| m.as_str().to_string())
+}
+
+fn is_emoji(c: char) -> bool {
+    matches!(c, '\u{1F300}'..='\u{1FAFF}' | '\u{2600}'..='\u{27BF}' | '\u{2B50}' | '\u{2B55}')
+}
+
+/// AI-writing tells that feed X's llm_slop labels.
+fn slop_tells(text: &str) -> Vec<&'static str> {
+    static PHRASES: OnceLock<Regex> = OnceLock::new();
+    static NOT_X: OnceLock<Regex> = OnceLock::new();
+    const LABELS: &[(&str, &str)] = &[
+        ("great point", "\"great point\""),
+        ("great question", "\"great question\""),
+        ("so important", "\"so important\""),
+        ("absolutely", "\"absolutely\""),
+        ("delv", "\"delve\""),
+        ("in a world where", "\"in a world where\""),
+        ("game", "\"game-changer\""),
+        ("testament", "\"a testament to\""),
+        ("couldn", "\"couldn't agree more\""),
+        ("spot on", "\"spot on\""),
+        ("dive", "\"let's dive in\""),
+        ("worth noting", "\"worth noting\""),
+        ("tapestry", "\"tapestry\""),
+        ("resonates", "\"resonates\""),
+        ("underscores", "\"underscores\""),
+        ("real question", "\"the real question is\""),
+    ];
+    let phrases = regex(
+        &PHRASES,
+        r"(?i)\b(?:great point|great question|this is so important|absolutely|delv(?:e|es|ing)|in a world where|game[- ]changer|a testament to|couldn'?t agree more|spot on|let'?s dive|worth noting|tapestry|resonates|underscores|the real question is)\b",
+    );
+    let not_x = regex(
+        &NOT_X,
+        r"(?i)\b(?:(?:it'?s|this is|that'?s) not|isn'?t)\s+(?:just\s+|only\s+|about\s+)?[^.!?\n]{1,60}?[,;—–]\s*(?:it'?s|this is|that'?s|but)\b",
+    );
+
+    let mut tells = Vec::new();
+    for m in phrases.find_iter(text) {
+        let found = m.as_str().to_lowercase();
+        if let Some((_, label)) = LABELS.iter().find(|(key, _)| found.contains(key)) {
+            if !tells.contains(label) {
+                tells.push(*label);
+            }
+        }
+    }
+    if text.matches('—').count() >= 2 {
+        tells.push("em-dash chain");
+    }
+    if not_x.is_match(text) {
+        tells.push("\"it's not X, it's Y\"");
+    }
+    let lower = text.trim().to_lowercase();
+    let sign_offs = [
+        "what do you think?", "thoughts?", "agree?", "wdyt?", "what's your take?",
+        "curious what you think", "curious to hear your thoughts", "would love to hear your thoughts",
+    ];
+    if sign_offs.iter().any(|s| lower.ends_with(s)) {
+        tells.push("generic sign-off question");
+    }
+    let emoji_lines = text
+        .lines()
+        .filter(|l| l.trim_start().chars().next().is_some_and(is_emoji))
+        .count();
+    if emoji_lines >= 2 {
+        tells.push("emoji bullets");
+    }
+    tells
+}
+
+/// Lowercase word set, without URLs and @handles (how X's copypasta jobs
+/// cluster replies: word unigrams).
+fn word_set(text: &str) -> std::collections::HashSet<String> {
+    text.split_whitespace()
+        .filter(|t| !is_mention(t) && !t.starts_with("http"))
+        .flat_map(|t| t.split(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Highest unigram Jaccard of `text` against `history`, when it reaches 0.5
+/// (botmaker BBQDuplicateTextRepliesProd; the threshold is a margin, X's is
+/// redacted). Drafts under 4 distinct words are left to the length checks.
+fn duplicate_overlap(text: &str, history: &[String]) -> Option<f64> {
+    let mine = word_set(text);
+    if mine.len() < 4 {
+        return None;
+    }
+    history
+        .iter()
+        .map(|old| {
+            let theirs = word_set(old);
+            let union = mine.union(&theirs).count();
+            if union == 0 { 0.0 } else { mine.intersection(&theirs).count() as f64 / union as f64 }
+        })
+        .fold(None, |best: Option<f64>, j| Some(best.map_or(j, |b| b.max(j))))
+        .filter(|j| *j >= 0.5)
+}
+
+/// Your posts and replies from the last `days` days (local DB; empty when
+/// there is none).
+fn own_recent_texts(days: i64) -> Vec<String> {
+    let since = chrono::Utc::now().timestamp() - days * 86_400;
+    let Ok(conn) = crate::intel::open_db("xmaster.db") else { return Vec::new() };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT text FROM posts WHERE CAST(posted_at AS INTEGER) >= ?1 ORDER BY CAST(posted_at AS INTEGER) DESC LIMIT 500",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map([since], |row| row.get::<_, String>(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Your follower count from the last `track` account snapshot (free; `None`
+/// before the first snapshot).
+pub(crate) fn own_follower_count() -> Option<u64> {
+    let conn = crate::intel::open_db("xmaster.db").ok()?;
+    conn.query_row(
+        "SELECT followers FROM account_snapshots ORDER BY CAST(snapshot_at AS INTEGER) DESC LIMIT 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .ok()
+    .filter(|f| *f > 0)
+    .map(|f| f as u64)
+}
+
+/// Cold start (home-mixer author_cold_start.rs; param.rs:489-562, live since
+/// 29 Sep 2026): originals by authors with ≤50k followers. Unknown follower
+/// count counts as eligible.
+fn cold_start_issue(followers: Option<u64>) -> Option<Issue> {
+    if followers.is_some_and(|f| f > 50_000) {
+        return None;
+    }
+    Some(Issue {
+        severity: Severity::Info,
+        code: "cold_start_window".into(),
+        message: "Cold start: while this original is under 2 h old and under 200 home impressions it can win one exploration slot (rank 16 of a For You request), picked by likes per impression (authors with ≤50k followers). Early likes decide it".into(),
+        fix: Some("Post when your followers are online, and don't post another original within 2 h".into()),
+        group: IssueGroup::Cadence,
+    })
+}
+
 fn suggest_improvements(
     issues: &[Issue],
     features: &FeatureVector,
@@ -1258,7 +1618,7 @@ fn suggest_improvements(
         }
         Some("shares") if proxies.share_via_dm < 0.15 => {
             suggestions.push(
-                "Add practical value (how-to, data, framework) — DM shares are a top positive signal".into(),
+                "Make it worth sending: copy-link shares (weight 20) and DM shares (5) are the top positive signals".into(),
             );
         }
         Some("follows") if proxies.profile_click < 0.20 => {
@@ -1288,7 +1648,7 @@ fn suggest_improvements(
 
     if features.content_type_guess == "data" || features.content_type_guess == "how-to" {
         suggestions.push(
-            "This looks DM-shareable — insider data and how-tos drive share_via_dm"
+            "This looks shareable: insider data and how-tos drive copy-link (20) and DM (5) shares"
                 .into(),
         );
     }
@@ -1337,10 +1697,160 @@ mod tests {
         assert_eq!(result.issues[0].code, "empty_content");
     }
 
+    fn has(result: &PreflightResult, code: &str) -> bool {
+        result.issues.iter().any(|i| i.code == code)
+    }
+
+    fn severity(result: &PreflightResult, code: &str) -> Option<Severity> {
+        result.issues.iter().find(|i| i.code == code).map(|i| i.severity.clone())
+    }
+
     #[test]
-    fn link_in_body_detected() {
+    fn plain_link_is_only_a_cost_note() {
+        // open_link weighs +0.2 (param.rs:348): no reach penalty for a link.
+        let result = analyze(
+            "Rapamycin extended median lifespan 12% in the ITP 2024 cohort, full data here https://example.com/itp",
+            &default_ctx(),
+        );
+        assert_eq!(severity(&result, "link_api_cost"), Some(Severity::Info));
+        assert!(!has(&result, "link_in_body"));
+        assert!(!has(&result, "link_bare"));
+        assert!(!result.issues.iter().any(|i| i.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn bare_link_is_a_warning() {
         let result = analyze("Check this out https://example.com", &default_ctx());
-        assert!(result.issues.iter().any(|i| i.code == "link_in_body"));
+        assert_eq!(severity(&result, "link_bare"), Some(Severity::Warning));
+    }
+
+    #[test]
+    fn shortener_is_critical_with_or_without_scheme() {
+        for text in ["New results on senolytics in mice: https://bit.ly/3xYz", "New results on senolytics in mice: bit.ly/3xYz"] {
+            let result = analyze(text, &default_ctx());
+            assert_eq!(severity(&result, "link_shortener"), Some(Severity::Critical), "{text}");
+        }
+        // X's own t.co wrapper is not a shortener hop to flag.
+        let result = analyze("Senolytics data from the 2024 cohort https://t.co/abc123", &default_ctx());
+        assert!(!has(&result, "link_shortener"));
+    }
+
+    #[test]
+    fn link_in_reply_is_critical() {
+        let result = analyze(
+            "We saw the same effect in our 2023 cohort, writeup at https://example.com/x",
+            &reply_ctx(),
+        );
+        assert_eq!(severity(&result, "reply_has_link"), Some(Severity::Critical));
+        assert!(!has(&result, "link_mention_nonfollower"));
+    }
+
+    #[test]
+    fn link_plus_mention_warns() {
+        let result = analyze(
+            "Great breakdown of the ITP data from @peterattiamd https://example.com/itp-2024-results",
+            &default_ctx(),
+        );
+        assert_eq!(severity(&result, "link_mention_nonfollower"), Some(Severity::Warning));
+    }
+
+    #[test]
+    fn two_mentions_trigger_mention_burst_but_reply_prefix_does_not() {
+        let result = analyze("Thanks @alice and @bob for the 2024 data", &default_ctx());
+        assert_eq!(severity(&result, "mention_burst"), Some(Severity::Warning));
+        let reply = analyze("@alice @bob The 2024 cohort showed the same thing at 12 months", &reply_ctx());
+        assert!(!has(&reply, "mention_burst"));
+        let reply_body = analyze("@alice agreed, and @bob and @carol saw it too in 2024", &reply_ctx());
+        assert!(has(&reply_body, "mention_burst"));
+    }
+
+    #[test]
+    fn engagement_bait_patterns_are_critical() {
+        for text in [
+            "Comment GENE and I'll DM you the protocol",
+            "Drop your handle below, building a list of longevity founders",
+            "Follow back if you're into biotech",
+            "Follow for follow, longevity people",
+            "RT to win a free copy of the book",
+            "Tag a friend who needs to see this",
+            "Like and repost if you agree",
+            "I'll follow everyone who replies",
+        ] {
+            let result = analyze(text, &default_ctx());
+            assert_eq!(severity(&result, "engagement_bait"), Some(Severity::Critical), "{text}");
+        }
+    }
+
+    #[test]
+    fn engagement_bait_respects_word_boundaries() {
+        // "start if" used to match "rt if".
+        for text in [
+            "Start if you have the 2024 data ready, then rerun the model",
+            "Follow the money: 3 biotech funds raised $2B in Q3",
+        ] {
+            let result = analyze(text, &default_ctx());
+            assert!(!has(&result, "engagement_bait"), "{text}");
+        }
+    }
+
+    #[test]
+    fn insult_target_warns() {
+        let result = analyze("You're delusional if you think Bryan Johnson's protocol scales", &default_ctx());
+        assert_eq!(severity(&result, "insult_target"), Some(Severity::Warning));
+        let calm = analyze("Bryan Johnson's protocol won't scale: it costs $2M a year", &default_ctx());
+        assert!(!has(&calm, "insult_target"));
+    }
+
+    #[test]
+    fn negative_sentiment_cites_real_weights() {
+        let result = analyze("This is stupid garbage and pathetic", &default_ctx());
+        let issue = result.issues.iter().find(|i| i.code == "negative_sentiment").unwrap();
+        assert!(issue.message.contains("−234"), "{}", issue.message);
+    }
+
+    #[test]
+    fn reply_slop_warns_then_goes_critical() {
+        let one = analyze("Absolutely, the 2024 ITP numbers back that up for rapamycin", &reply_ctx());
+        assert_eq!(severity(&one, "reply_slop"), Some(Severity::Warning));
+        let many = analyze(
+            "Great point! It's not just about lifespan — it's about healthspan — and this underscores everything. Thoughts?",
+            &reply_ctx(),
+        );
+        assert_eq!(severity(&many, "reply_slop"), Some(Severity::Critical));
+        let clean = analyze("We saw a 12% drop in IGF-1 at month 3 on the same dose", &reply_ctx());
+        assert!(!has(&clean, "reply_slop"));
+        // Standalone posts are left to the JEV slop flag.
+        assert!(!has(&analyze("Absolutely wild 2024 data on rapamycin", &default_ctx()), "reply_slop"));
+    }
+
+    #[test]
+    fn duplicate_overlap_uses_word_unigrams() {
+        let history = vec!["Rapamycin at 6mg weekly dropped my IGF-1 by 12% in 3 months".to_string()];
+        let dup = duplicate_overlap("rapamycin at 6mg weekly dropped my IGF-1 by 12% in three months", &history);
+        assert!(dup.is_some_and(|j| j >= 0.5), "{dup:?}");
+        assert!(duplicate_overlap("Metformin did nothing for my HbA1c over a year", &history).is_none());
+        // Mentions and URLs don't count; drafts under 4 words are skipped.
+        assert!(duplicate_overlap("@a @b yes indeed", &history).is_none());
+    }
+
+    #[test]
+    fn cold_start_only_for_small_authors() {
+        assert!(cold_start_issue(Some(463)).is_some_and(|i| i.severity == Severity::Info));
+        assert!(cold_start_issue(None).is_some());
+        assert!(cold_start_issue(Some(50_000)).is_some());
+        assert!(cold_start_issue(Some(50_001)).is_none());
+        // Replies are not eligible (author_cold_start.rs:188-193).
+        assert!(!has(&analyze("We saw the same 12% effect at month 3", &reply_ctx()), "cold_start_window"));
+    }
+
+    #[test]
+    fn length_is_weighted_like_x() {
+        // A URL counts 23 and an emoji 2, whatever their raw length.
+        let url = format!("https://example.com/{}", "a".repeat(200));
+        let result = analyze(&format!("Read this {url}"), &default_ctx());
+        assert_eq!(result.features.char_count, "Read this ".len() + 23);
+        let emoji = "🧬".repeat(141);
+        assert!(has(&analyze(&emoji, &default_ctx()), "over_limit"));
     }
 
     #[test]
@@ -1406,20 +1916,6 @@ mod tests {
             "grade was {}",
             result.grade
         );
-    }
-
-    #[test]
-    fn link_in_body_is_critical() {
-        let result = analyze(
-            "Great article https://example.com about Rust",
-            &default_ctx(),
-        );
-        let issue = result
-            .issues
-            .iter()
-            .find(|i| i.code == "link_in_body")
-            .unwrap();
-        assert_eq!(issue.severity, Severity::Critical);
     }
 
     #[test]
