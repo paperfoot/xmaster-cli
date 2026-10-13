@@ -120,11 +120,12 @@ pub struct Settings {
     #[serde(default)]
     pub disable_fxtwitter: bool,
     /// Which writes go through the browser session (web cookies) instead of
-    /// the paid X API: "auto" (default) = replies, quotes, likes, reposts,
-    /// bookmarks and follows, which the self-serve API blocks or removed;
-    /// "always" = every write, plain posts included (no per-post API fee);
-    /// "never" = API only. Without web cookies everything uses the API.
-    /// Set via: xmaster config set settings.web_writes always
+    /// the paid X API: "always" (default) = every write except polls, so no
+    /// per-post API fee ($0.015, $0.20 with a link), API as fallback;
+    /// "auto" = only what the self-serve API blocks or removed (replies,
+    /// quotes, likes, follows) plus reposts and bookmarks; "never" = API only.
+    /// Without web cookies everything uses the API.
+    /// Set via: xmaster config set settings.web_writes auto
     #[serde(default = "default_web_writes")]
     pub web_writes: String,
     /// Turn off JEV judgments even when a key is configured.
@@ -154,7 +155,7 @@ fn default_timeout() -> u64 {
 }
 
 fn default_web_writes() -> String {
-    "auto".into()
+    "always".into()
 }
 
 fn default_true() -> bool {

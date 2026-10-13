@@ -26,7 +26,29 @@ fn err(code: &'static str, message: String) -> XmasterError {
     XmasterError::Api { provider: "x-web", code, message }
 }
 
-/// URL of the ondemand.s chunk referenced by the x.com page.
+/// Script URLs of the newer x-web (Vite) build linked from the page.
+pub fn x_web_scripts(html: &str) -> Vec<String> {
+    let re = regex::Regex::new(r#"https://[\w.-]+/x-web/[\w./-]+\.js"#).unwrap();
+    let mut urls: Vec<String> = re.find_iter(html).map(|m| m.as_str().to_string()).collect();
+    urls.dedup();
+    urls
+}
+
+/// A reference to the signing-indices script inside page or bundle text:
+/// `ondemand.s.*.js` (legacy webpack build) or `sign.o-*.js` (x-web build,
+/// dynamically imported from a chunk). Resolved against `base` when relative.
+pub fn indices_script_ref(text: &str, base: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"(?:\.{0,2}/)?[\w./-]*?\b(?:ondemand\.s|sign\.o)[\w.-]*\.js"#).unwrap();
+    let found = re.find(text)?.as_str();
+    url::Url::parse(base).ok()?.join(found).ok().map(String::from)
+}
+
+/// The page is a Cloudflare interstitial rather than the X web app.
+pub fn is_challenge_page(html: &str) -> bool {
+    html.contains("/cdn-cgi/challenge-platform/") && !html.contains("abs.twimg.com")
+}
+
+/// URL of the ondemand.s chunk referenced by the x.com page (legacy build).
 pub fn ondemand_url(html: &str) -> Result<String, XmasterError> {
     let od_index = regex_first_capture(r#",(\d+):["']ondemand\.s["']"#, html)
         .ok_or_else(|| err("no_ondemand_index", "No ondemand.s index found in homepage".into()))?;
@@ -351,4 +373,46 @@ fn animate(frames: &[i64], target_time: f64) -> String {
 
     let joined: String = str_arr.join("");
     joined.replace(['.', '-'], "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_legacy_ondemand_chunk() {
+        let html = r#"{59862:"ondemand.LottieWeb",59924:"ondemand.s",60041:"i18n/emoji"},{1:"0f0f0f0",59924:"18fd6887aa235d97"}"#;
+        assert_eq!(
+            ondemand_url(html).unwrap(),
+            "https://abs.twimg.com/responsive-web/client-web/ondemand.s.18fd6887aa235d97a.js"
+        );
+    }
+
+    #[test]
+    fn finds_x_web_signing_script() {
+        let html = r#"<script type="module" src="https://abs.twimg.com/x-web/x-web/entry-client-DmnmR8WH.js"></script>"#;
+        assert_eq!(x_web_scripts(html), ["https://abs.twimg.com/x-web/x-web/entry-client-DmnmR8WH.js"]);
+        let chunk = r#"import("./sign.o-Bq3xYz12.js").then(m=>m.d)"#;
+        assert_eq!(
+            indices_script_ref(chunk, "https://abs.twimg.com/x-web/x-web/assets/app-1.js").as_deref(),
+            Some("https://abs.twimg.com/x-web/x-web/assets/sign.o-Bq3xYz12.js")
+        );
+        assert!(indices_script_ref(r#"import("./design.o-AB.js")"#, "https://a.b/c.js").is_none());
+    }
+
+    #[test]
+    fn derive_and_sign_round_trip() {
+        let key = base64::engine::general_purpose::STANDARD.encode((0u8..48).collect::<Vec<_>>());
+        let path = "M 10,30 C 20,40 30,50 40,60 70,80 90,100 110,120 130,140 150,160 170,180 190,200 210,220";
+        let svgs: String = (0..4)
+            .map(|i| format!(r#"<svg id="loading-x-anim-{i}"><path d="M0 0"/><path d="{path}"/></svg>"#))
+            .collect();
+        let html = format!(r#"<meta name="twitter-site-verification" content="{key}"/>{svgs}"#);
+        let od = "(a[2], 16),(a[7], 16),(a[11], 16),(a[30], 16)";
+        let keys = derive(&html, od).unwrap();
+        assert_eq!(keys.key_bytes.len(), 48);
+        let tx = sign(&keys, "POST", "/i/api/graphql/x/CreateTweet");
+        // 1 random byte + 48 key + 4 time + 16 hash + 1 constant = 70 bytes
+        assert_eq!(base64::engine::general_purpose::STANDARD_NO_PAD.decode(&tx).unwrap().len(), 70);
+    }
 }

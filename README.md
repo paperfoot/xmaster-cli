@@ -91,7 +91,7 @@ XMaster has three backends behind one CLI:
 | **Web session** | Browser cookies | Replies to any thread, quotes, likes, reposts, bookmarks, follows |
 | **FxTwitter** | None | Free single-post reads (`read`), Article bodies |
 
-> The self-serve X API blocks replies to people who haven't @mentioned you (Feb 2026) and removed likes, follows and quote posts (Apr 20, 2026). With `xmaster config web-login`, those writes go straight through your browser session, the way the x.com app sends them. Query IDs and feature flags are read from x.com itself and refreshed automatically when X rotates them. `xmaster config set settings.web_writes always` also moves plain posts off the paid API ($0.015/post, $0.20 with a link); `never` keeps everything on the API. `xmaster config check` runs a live read-only test of the web session.
+> The self-serve X API blocks replies to people who haven't @mentioned you (Feb 2026) and removed likes, follows and quote posts (Apr 20, 2026). With `xmaster config web-login`, those writes go straight through your browser session, the way the x.com app sends them. Query IDs and feature flags are read from x.com itself and refreshed automatically when X rotates them. Plain posts also go through the web session by default, so they skip the API's per-post fee ($0.015, $0.20 with a link); `xmaster config set settings.web_writes auto` keeps plain posts on the API, `never` keeps everything there. `xmaster config check` runs a live read-only test of the web session.
 
 Every command returns JSON when piped (or with `--json`); list commands also support `--csv` for spreadsheet-ready output. Exit codes are semantic: 0 success, 1 runtime error, 2 config/billing error, 3 auth missing, 4 rate limited. Your agent always knows what happened.
 
