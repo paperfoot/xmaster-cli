@@ -812,7 +812,7 @@ pub enum ConfigCommands {
     Guide,
     /// Authorize OAuth 2.0 (required for bookmarks)
     Auth,
-    /// Auto-capture X web cookies from your browser (enables reply fallback)
+    /// Auto-capture X web cookies from your browser (enables replies anywhere, likes, follows, quotes via your browser session)
     WebLogin,
 }
 
