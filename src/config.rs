@@ -1,7 +1,3 @@
-use figment::{
-    providers::{Env, Format, Serialized, Toml},
-    Figment,
-};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -177,21 +173,84 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Defaults, then `config.toml`, then `XMASTER_SECTION__KEY` env overrides
+/// (e.g. `XMASTER_SETTINGS__WEB_READS=false`).
 pub fn load_config() -> Result<AppConfig, XmasterError> {
     let path = config_path();
-    let mut figment = Figment::new()
-        .merge(Serialized::defaults(AppConfig::default()));
+    let file_err = |e: &dyn std::fmt::Display| XmasterError::Config(format!("{}: {e}", path.display()));
+    let file = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text.parse::<toml::Table>().map_err(|e| file_err(&e))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(file_err(&e)),
+    };
+    build_config(file, std::env::vars())
+}
 
-    // Only merge TOML if file exists (config is optional)
-    if path.exists() {
-        figment = figment.merge(Toml::file_exact(&path));
+fn build_config(
+    file: Option<toml::Table>,
+    env: impl IntoIterator<Item = (String, String)>,
+) -> Result<AppConfig, XmasterError> {
+    let cfg_err = |e: &dyn std::fmt::Display| XmasterError::Config(e.to_string());
+    let toml::Value::Table(mut table) = toml::Value::try_from(AppConfig::default()).map_err(|e| cfg_err(&e))? else {
+        unreachable!("a struct serializes to a table")
+    };
+    if let Some(file) = file {
+        merge(&mut table, file);
     }
+    for (var, raw) in env {
+        let Some(rest) = var.strip_prefix("XMASTER_").filter(|r| r.contains("__")) else { continue };
+        let path: Vec<String> = rest.split("__").map(str::to_lowercase).collect();
+        if path.iter().any(String::is_empty) {
+            continue;
+        }
+        set_env(&mut table, &path, &raw)
+            .map_err(|want| XmasterError::Config(format!("{var}: expected {want}, got {raw:?}")))?;
+    }
+    toml::Value::Table(table).try_into().map_err(|e: toml::de::Error| cfg_err(&e))
+}
 
-    let config: AppConfig = figment
-        .merge(Env::prefixed("XMASTER_").split("__"))
-        .extract()
-        .map_err(|e| XmasterError::Config(e.to_string()))?;
-    Ok(config)
+/// Recursive table merge; `over` wins.
+fn merge(base: &mut toml::Table, over: toml::Table) {
+    for (k, v) in over {
+        match v {
+            toml::Value::Table(o) if base.get(&k).is_some_and(toml::Value::is_table) => {
+                if let Some(toml::Value::Table(b)) = base.get_mut(&k) {
+                    merge(b, o);
+                }
+            }
+            v => {
+                base.insert(k, v);
+            }
+        }
+    }
+}
+
+/// Set `path` to `raw`, typed like the value already there (an unknown key
+/// takes a bool or integer if it parses as one). Err names the expected type.
+fn set_env(table: &mut toml::Table, path: &[String], raw: &str) -> Result<(), &'static str> {
+    use toml::Value as V;
+    let (last, parents) = path.split_last().ok_or("a key")?;
+    let mut t = table;
+    for p in parents {
+        let V::Table(next) = t.entry(p.as_str()).or_insert_with(|| V::Table(Default::default())) else {
+            return Err("a value, not a section");
+        };
+        t = next;
+    }
+    let v = raw.trim();
+    let value = match t.get(last) {
+        Some(V::String(_)) => V::String(raw.into()),
+        Some(V::Boolean(_)) => V::Boolean(v.to_ascii_lowercase().parse().map_err(|_| "true or false")?),
+        Some(V::Integer(_)) => V::Integer(v.parse().map_err(|_| "an integer")?),
+        Some(V::Float(_)) => V::Float(v.parse().map_err(|_| "a number")?),
+        _ => v
+            .parse()
+            .map(V::Boolean)
+            .or_else(|_| v.parse().map(V::Integer))
+            .unwrap_or_else(|_| V::String(raw.into())),
+    };
+    t.insert(last.clone(), value);
+    Ok(())
 }
 
 impl AppConfig {
@@ -246,5 +305,67 @@ impl AppConfig {
             let tail: String = key.chars().skip(n - 4).collect();
             format!("{head}...{tail}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn env_overrides_are_typed_by_the_field() {
+        let c = build_config(
+            None,
+            env(&[
+                ("XMASTER_SETTINGS__WEB_READS", "false"),
+                ("XMASTER_SETTINGS__TIMEOUT", "30"),
+                ("XMASTER_SETTINGS__WEB_WRITES", "never"),
+                ("XMASTER_KEYS__API_KEY", "12345"),
+                ("XMASTER_Account__Premium", "TRUE"),
+            ]),
+        )
+        .unwrap();
+        assert!(!c.settings.web_reads);
+        assert_eq!(c.settings.timeout, 30);
+        assert_eq!(c.settings.web_writes, "never");
+        assert_eq!(c.keys.api_key, "12345");
+        assert!(c.account.premium);
+    }
+
+    #[test]
+    fn unrelated_vars_are_ignored() {
+        let c = build_config(
+            None,
+            env(&[
+                ("XMASTER_CONFIG_DIR", "/tmp/x"),
+                ("XMASTER_DENY_COMMANDS", "post"),
+                ("OTHER__SETTINGS__TIMEOUT", "1"),
+                ("XMASTER___TIMEOUT", "1"),
+                ("HOME", "/Users/x"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(c.settings.timeout, 15);
+        assert!(c.settings.web_reads);
+    }
+
+    #[test]
+    fn file_merges_over_defaults_and_env_over_file() {
+        let file: toml::Table = "[settings]\nweb_writes = \"auto\"\n[keys]\nweb_ct0 = \"abc\"\n".parse().unwrap();
+        let c = build_config(Some(file), env(&[("XMASTER_KEYS__WEB_CT0", "env")])).unwrap();
+        assert_eq!(c.settings.web_writes, "auto");
+        assert_eq!(c.settings.timeout, 15);
+        assert!(c.settings.web_reads);
+        assert_eq!(c.keys.web_ct0, "env");
+    }
+
+    #[test]
+    fn bad_typed_env_value_is_a_config_error() {
+        let e = build_config(None, env(&[("XMASTER_SETTINGS__WEB_READS", "nah")])).unwrap_err();
+        assert!(e.to_string().contains("XMASTER_SETTINGS__WEB_READS"), "{e}");
     }
 }

@@ -21,9 +21,7 @@ reqwest-oauth1 = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
-figment = { version = "0.10", features = ["toml", "env"] }
 comfy-table = "7"
-directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
