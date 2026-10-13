@@ -157,7 +157,10 @@ pub fn parse_tweet(result: &Value) -> Option<TweetData> {
             impression_count: u64_at(r, "/views/count"),
             bookmark_count: u64_at(legacy, "/bookmark_count"),
         }),
-        author_followers: user.and_then(|u| u.pointer("/legacy/followers_count")).and_then(Value::as_u64),
+        // X moved the count out of `legacy` (Oct 2026); read both.
+        author_followers: user
+            .and_then(|u| u.pointer("/relationship_counts/followers").or_else(|| u.pointer("/legacy/followers_count")))
+            .and_then(Value::as_u64),
         media_urls,
     })
 }
@@ -214,6 +217,15 @@ mod tests {
         assert_eq!(t.created_at.as_deref(), Some("2018-10-10T20:19:24.000Z"));
         let m = t.public_metrics.as_ref().unwrap();
         assert_eq!((m.like_count, m.retweet_count, m.reply_count, m.impression_count, m.bookmark_count), (5, 2, 1, 1234, 3));
+    }
+
+    #[test]
+    fn reads_followers_from_relationship_counts() {
+        let mut t = tweet("4", "carol", "hi");
+        t["core"]["user_results"]["result"] = json!({
+            "rest_id": "100", "core": { "screen_name": "carol" }, "relationship_counts": { "followers": 758, "following": 785 }
+        });
+        assert_eq!(parse_tweet(&t).unwrap().author_followers, Some(758));
     }
 
     #[test]
