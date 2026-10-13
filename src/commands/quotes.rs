@@ -1,4 +1,3 @@
-use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::store::IntelStore;
@@ -52,7 +51,7 @@ pub async fn execute(
     id: &str,
     count: usize,
 ) -> Result<(), XmasterError> {
-    let source_tweet_id = parse_tweet_id(id);
+    let source_tweet_id = id.to_string();
     let api = XApi::new(ctx.clone());
     let tweets = api.get_tweet_quotes(&source_tweet_id, count).await?;
 
