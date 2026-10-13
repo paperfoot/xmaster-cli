@@ -95,12 +95,6 @@ pub struct Keys {
     pub web_ct0: String,
     #[serde(default)]
     pub web_auth_token: String,
-    /// GraphQL CreateTweet query ID (rotates every few weeks, auto-updated)
-    #[serde(default)]
-    pub graphql_create_tweet_id: String,
-    /// GraphQL CreateNoteTweet query ID for Premium long posts (rotates, auto-updated)
-    #[serde(default)]
-    pub graphql_create_note_tweet_id: String,
     /// TypeSafe JEV API key (optional decision model). Falls back to the
     /// TYPESAFE_API_KEY env var. Set via: xmaster config set keys.jev KEY
     #[serde(default)]

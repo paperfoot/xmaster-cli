@@ -250,8 +250,6 @@ pub async fn get(format: OutputFormat, key: &str) -> Result<(), XmasterError> {
         "keys.oauth2_refresh_token" => mask(&cfg.keys.oauth2_refresh_token),
         "keys.web_ct0" => mask(&cfg.keys.web_ct0),
         "keys.web_auth_token" => mask(&cfg.keys.web_auth_token),
-        "keys.graphql_create_tweet_id" => mask(&cfg.keys.graphql_create_tweet_id),
-        "keys.graphql_create_note_tweet_id" => mask(&cfg.keys.graphql_create_note_tweet_id),
         _ => return Err(XmasterError::Config(format!("Unknown config key: {key}"))),
     };
     let display = ConfigGetResult { key: key.to_string(), value };
@@ -392,7 +390,6 @@ const VALID_CONFIG_KEYS: &[&str] = &[
     "keys.oauth2_client_id", "keys.oauth2_client_secret",
     "keys.oauth2_access_token", "keys.oauth2_refresh_token",
     "keys.web_ct0", "keys.web_auth_token",
-    "keys.graphql_create_tweet_id", "keys.graphql_create_note_tweet_id",
     "settings.timeout",
     "settings.disable_fxtwitter",
     "settings.web_writes",
@@ -411,13 +408,28 @@ pub async fn check(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
     let mut handle = String::new();
     let x_auth = if x_configured {
         let api = XApi::new(ctx.clone());
+        // With a web session the profile comes free and the keys aren't
+        // spent on a paid probe; the token's embedded user ID must match.
         match api.get_me().await {
+            Ok(user) if api.token_user_id().is_some_and(|id| id != user.id) => AuthStatus {
+                configured: true,
+                healthy: false,
+                detail: format!(
+                    "API keys belong to user {}, but the web session is @{}",
+                    api.token_user_id().unwrap_or_default(),
+                    user.username
+                ),
+            },
             Ok(user) => {
                 handle = user.username;
                 AuthStatus {
                     configured: true,
                     healthy: true,
-                    detail: format!("Authenticated as @{handle}"),
+                    detail: if ctx.config.web_reads() {
+                        format!("Keys set for @{handle} (not live-checked, to skip a paid call)")
+                    } else {
+                        format!("Authenticated as @{handle}")
+                    },
                 }
             }
             Err(e) => AuthStatus {

@@ -43,6 +43,20 @@ pub fn indices_script_ref(text: &str, base: &str) -> Option<String> {
     url::Url::parse(base).ok()?.join(found).ok().map(String::from)
 }
 
+/// Scripts a bundle imports by relative path (`"./assets/x-1a2b.js"`),
+/// resolved against the bundle's own URL.
+pub fn relative_imports(text: &str, base: &str) -> Vec<String> {
+    let Ok(base) = url::Url::parse(base) else { return Vec::new() };
+    let re = regex::Regex::new(r#"["'`](\.{1,2}/[\w./-]+\.js)["'`]"#).unwrap();
+    let mut urls: Vec<String> = re
+        .captures_iter(text)
+        .filter_map(|c| base.join(&c[1]).ok().map(String::from))
+        .collect();
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
 /// The page is a Cloudflare interstitial rather than the X web app.
 pub fn is_challenge_page(html: &str) -> bool {
     html.contains("/cdn-cgi/challenge-platform/") && !html.contains("abs.twimg.com")
@@ -398,6 +412,15 @@ mod tests {
             Some("https://abs.twimg.com/x-web/x-web/assets/sign.o-Bq3xYz12.js")
         );
         assert!(indices_script_ref(r#"import("./design.o-AB.js")"#, "https://a.b/c.js").is_none());
+        let entry = r#"import"./assets/client-transaction-id-plugin-l8.js";const a=()=>import(`./assets/app-1.js`),b="../x.js";"#;
+        assert_eq!(
+            relative_imports(entry, "https://abs.twimg.com/x-web/x-web/entry-client-D1.js"),
+            [
+                "https://abs.twimg.com/x-web/x-web/assets/app-1.js",
+                "https://abs.twimg.com/x-web/x-web/assets/client-transaction-id-plugin-l8.js",
+                "https://abs.twimg.com/x-web/x.js",
+            ]
+        );
     }
 
     #[test]
