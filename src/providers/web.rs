@@ -777,7 +777,7 @@ impl<'a> Web<'a> {
         let product = if top { "Top" } else { "Latest" };
         let referer = format!(
             "https://x.com/search?q={}&src=typed_query{}",
-            urlencoding::encode(query),
+            percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC),
             if top { "" } else { "&f=live" }
         );
         let variables = json!({

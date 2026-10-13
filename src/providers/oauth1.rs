@@ -3,10 +3,6 @@
 //! Replaces the `reqwest-oauth1` crate (about 22 extra crates). The shim
 //! (`client.oauth1(secrets).post(url).form(..).send()`) keeps its call shape.
 
-// Not called yet on this branch: xapi.rs and rate_limits.rs switch their
-// `reqwest_oauth1` import to this module when wired. Delete this line then.
-#![allow(dead_code)]
-
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -120,7 +116,7 @@ pub struct Signer<'a> {
 }
 
 impl<'a> Signer<'a> {
-    fn request(self, method: Method, url: impl IntoUrl) -> SignedRequest<'a> {
+    pub fn request(self, method: Method, url: impl IntoUrl) -> SignedRequest<'a> {
         SignedRequest { inner: self.client.request(method, url), client: self.client, secrets: self.secrets }
     }
     pub fn get(self, url: impl IntoUrl) -> SignedRequest<'a> {
@@ -128,12 +124,6 @@ impl<'a> Signer<'a> {
     }
     pub fn post(self, url: impl IntoUrl) -> SignedRequest<'a> {
         self.request(Method::POST, url)
-    }
-    pub fn put(self, url: impl IntoUrl) -> SignedRequest<'a> {
-        self.request(Method::PUT, url)
-    }
-    pub fn delete(self, url: impl IntoUrl) -> SignedRequest<'a> {
-        self.request(Method::DELETE, url)
     }
 }
 
@@ -156,10 +146,15 @@ impl SignedRequest<'_> {
     pub fn multipart(self, form: reqwest::multipart::Form) -> Self {
         Self { inner: self.inner.multipart(form), ..self }
     }
+    /// Every OAuth1 call is a billed X API call: logged at debug so a run
+    /// can be audited with RUST_LOG=xmaster=debug.
     pub async fn send(self) -> Result<reqwest::Response, reqwest::Error> {
         let mut req = self.inner.build()?;
         sign(&mut req, &self.secrets);
-        self.client.execute(req).await
+        let (method, path) = (req.method().clone(), req.url().path().to_string());
+        let resp = self.client.execute(req).await?;
+        tracing::debug!(%method, path, status = %resp.status(), "paid X API call");
+        Ok(resp)
     }
 }
 

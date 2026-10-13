@@ -2,14 +2,14 @@ use crate::context::AppContext;
 use crate::errors::XmasterError;
 use base64::Engine as _;
 use reqwest::Method;
-use reqwest_oauth1::OAuthClientProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::warn;
 
+use super::oauth1::{self, OAuthClientProvider};
 use super::web::{Moderation, Web};
 
 /// Max retry attempts for transient errors (429, 5xx).
@@ -275,9 +275,9 @@ impl XApi {
 
     // -- OAuth helpers ------------------------------------------------------
 
-    fn secrets(&self) -> reqwest_oauth1::Secrets<'_> {
+    fn secrets(&self) -> oauth1::Secrets<'_> {
         let k = &self.ctx.config.keys;
-        reqwest_oauth1::Secrets::new(&k.api_key, &k.api_secret)
+        oauth1::Secrets::new(&k.api_key, &k.api_secret)
             .token(&k.access_token, &k.access_token_secret)
     }
 
@@ -371,44 +371,12 @@ impl XApi {
     ) -> Result<Value, XmasterError> {
         self.require_auth()?;
 
-        let resp = match method {
-            Method::GET => {
-                self.ctx.client.clone().oauth1(self.secrets())
-                    .get(url)
-                    .send().await?
-            }
-            Method::POST => {
-                let mut b = self.ctx.client.clone().oauth1(self.secrets()).post(url);
-                if let Some(ref json) = body {
-                    b = b.header("Content-Type", "application/json")
-                        .body(serde_json::to_string(json)?);
-                }
-                b.send().await?
-            }
-            Method::DELETE => {
-                self.ctx.client.clone().oauth1(self.secrets())
-                    .delete(url)
-                    .send().await?
-            }
-            Method::PUT => {
-                let mut b = self.ctx.client.clone().oauth1(self.secrets()).put(url);
-                if let Some(ref json) = body {
-                    b = b.header("Content-Type", "application/json")
-                        .body(serde_json::to_string(json)?);
-                }
-                b.send().await?
-            }
-            _ => {
-                return Err(XmasterError::Api {
-                    provider: "x",
-                    code: "unsupported_method",
-                    message: format!("Unsupported HTTP method: {method}"),
-                });
-            }
-        };
-
+        let mut req = self.ctx.client.clone().oauth1(self.secrets()).request(method, url);
+        if let Some(json) = &body {
+            req = req.header("Content-Type", "application/json").body(serde_json::to_string(json)?);
+        }
+        let resp = req.send().await?;
         let status = resp.status();
-        debug!(%method, url = url.split('?').next().unwrap_or(url), %status, "paid X API call");
 
         // Capture x-transaction-id for error diagnostics (X returns this on
         // every response; it's the only way to correlate with X support).
