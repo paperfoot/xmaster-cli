@@ -42,6 +42,18 @@ struct AgentInfo {
     /// User's writing style for X posts (only present when configured).
     #[serde(skip_serializing_if = "Option::is_none")]
     writing_style: Option<String>,
+    /// JEV decision layer: xmaster judges which items matter so agents read less.
+    jev: JevInfo,
+}
+
+#[derive(Serialize)]
+struct JevInfo {
+    active: bool,
+    model: &'static str,
+    enable: &'static str,
+    disable: &'static str,
+    profile: &'static str,
+    judges: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -124,15 +136,9 @@ impl Tableable for AgentInfo {
 }
 
 pub fn execute(format: OutputFormat) {
-    let style = config::load_config()
-        .ok()
-        .and_then(|c| {
-            if c.style.voice.is_empty() {
-                None
-            } else {
-                Some(c.style.voice)
-            }
-        });
+    let cfg = config::load_config().ok();
+    let jev_active = cfg.as_ref().and_then(|c| c.jev_key()).is_some();
+    let style = cfg.and_then(|c| (!c.style.voice.is_empty()).then_some(c.style.voice));
 
     let info = AgentInfo {
         name: "xmaster".into(),
@@ -277,7 +283,7 @@ pub fn execute(format: OutputFormat) {
             "Reply to larger accounts in your niche, and reply back when people reply to you — author reply-back is a strong reciprocity loop".into(),
             "Create content people want to DM to friends — share_via_dm is a top scoring signal".into(),
             "Never put external links in the main tweet body — links reduce reach, and since 2026-04-20 a URL-bearing post costs $0.20 via API vs $0.015 plain. Put links in the first reply".into(),
-            "API RESTRICTIONS (2026): 'like'/'unlike'/'follow'/'unfollow' hit endpoints X removed from ALL self-serve API tiers on 2026-04-20 — expect 403 on non-Enterprise keys; like/follow manually in the app. Replies to non-mentioners and quote posts auto-fall back to the web session (requires 'xmaster config web-login')".into(),
+            "WEB SESSION: likes, follows, quotes and replies to any thread go through your browser session ('xmaster config web-login'). The self-serve API removed like/follow and blocks replies to non-mentioners, so without the session those return 403".into(),
             "SEARCH OPERATORS (since the May 2026 index migration): min_likes:, min_replies:, min_reposts: work inside 'xmaster search' queries (e.g. 'xmaster search \"longevity min_likes:100\"'). Keyword search no longer returns retweets".into(),
             "Space posts 2+ hours apart — author_diversity_scorer.rs decays repeated authors per feed pass".into(),
             "DAILY CAP: ≤4 standalone posts per 24h. Replies don't count — heavy replying beats heavy posting for small accounts".into(),
@@ -293,8 +299,8 @@ pub fn execute(format: OutputFormat) {
             "LONG-FORM TIMING: post in the in-network peak (Tue–Thu, 9–11 AM author-local for desk audiences; 7–9 PM for general). Be ready to engage replies in the first 30 min. Avoid Mon mornings (timeline rebuild) and Fri afternoon (drop-off)".into(),
             "QUOTE TWEETS: quotes enter the in-network candidate pool of YOUR followers (thunder_source.rs serves from following_user_ids). Replies travel through the OP's audience pool. Use 'xmaster post \"your take\" --quote <id>' when extending an idea".into(),
             "PREMIUM: ~2-3x organic reach in practice. The mechanism is not in the open source but the effect is real".into(),
-            "SMALL-ACCOUNT GROWTH (<1k followers): replies-heavy. Grox's spam classifier (grox/tasks/task_spam_detection.py) buckets reply chains by BOTH parent and root author follower count (≤100/≤500/≤1000/>1000) — replies under small-account chains carry higher spam risk. Prefer replying to LARGER accounts in your niche; quality-gate every reply".into(),
-            "REPLY QUALITY: short generic replies ('great post', '100%', 'this') score poorly on Grok's reply-ranking classifier and rarely earn a reply-back. xmaster analyze flags these in reply mode".into(),
+            "SMALL-ACCOUNT GROWTH (<1k followers): replies-heavy, to accounts in your niche, early in a post's life. Grox's follower buckets only label metrics; they are not extra-scrutiny tiers. Quality-gate every reply".into(),
+            "REPLY QUALITY: an AI judge scores every reply; generic or AI-slop replies get buried, and an account-level slop label hides all your posts from non-followers for 30 days. Name a specific detail from the post or ask the author something they can answer. 'xmaster analyze \"draft\" --reply-to <id>' flags generic, slop, off_topic and bait (JEV) before you send".into(),
             "FIRST 30-60 MINUTES: initial traction window matters — Phoenix age enters as learned post-age buckets. Time posts when your audience is online".into(),
             "Use 'xmaster timeline --sort impressions' to find your best-performing posts".into(),
             "Use 'xmaster timeline --since 24h' to check recent post performance".into(),
@@ -405,6 +411,20 @@ pub fn execute(format: OutputFormat) {
             },
         ],
         writing_style: style,
+        jev: JevInfo {
+            active: jev_active,
+            model: crate::providers::jev::MODEL,
+            enable: "xmaster config set keys.jev <key> (or env TYPESAFE_API_KEY)",
+            disable: "xmaster config set settings.disable_jev true",
+            profile: "Judges fit against account.bio + niche.topics (else your recent posts); set both for sharper picks",
+            judges: vec![
+                "engage feed: returns its best 5 reply targets with a 'why'; jev.dropped counts the rest",
+                "engage inbox: triage reply/like/ignore/spam; recommendations = what needs a reply, triage.like_ids = what to like",
+                "replies: leaves out replies not worth reading (trimmed count); --all shows every reply",
+                "analyze / post / reply: advisory jev flags generic, slop, off_topic, bait with a fix; never blocks",
+                "analyze: jev.reach (0-1) beside the rule score; weak signal, blind to promoted posts",
+            ],
+        },
     };
     output::render(format, &info, None);
 }

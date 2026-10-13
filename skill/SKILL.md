@@ -55,6 +55,19 @@ xmaster search-ai "from:username longevity"           # Their posts on a topic
 xmaster search-ai "from:user1 from:user2 senolytics"  # Multiple authors
 ```
 
+### JEV decides what you need to read
+
+With a TypeSafe JEV key (`xmaster config set keys.jev KEY` or env `TYPESAFE_API_KEY`), xmaster judges items itself and returns only what matters. Trust its cut; don't pull the full lists back into context.
+
+- `engage feed` → its best 5 reply targets, each with `jev_score` and `why`; `jev.dropped` counts the rest.
+- `engage inbox <id>` → `recommendations` holds only what needs a reply; like the ids in `triage.like_ids`; ignored and spam items are hidden.
+- `replies <id>` → only replies worth reading (`trimmed` = how many were left out); `--all` shows everything.
+- `analyze "draft" --reply-to <id>` → `jev.flags`: generic, slop, off_topic, bait, each with a fix. Rewrite once if flagged. Slop is the costly one: an account-level AI-slop label hides all your posts from non-followers for 30 days. `post`/`reply` report the same flags after sending; they never block.
+- `analyze` also gives `jev.reach` (0-1), a weak extra signal beside `score`.
+- JEV judges fit against `account.bio` and `niche.topics` (else your recent posts), so set both.
+
+No key, `settings.disable_jev true`, or a slow or failed call → the normal heuristic output.
+
 ### Checking Performance
 
 ```
@@ -81,8 +94,7 @@ The CLI embeds knowledge from `xai-org/x-algorithm` (May 2026 re-release). Key f
 
 ## API Restrictions & Pricing (2026)
 
-- **Likes, Follows, Quote-posts REMOVED from all self-serve API tiers (Apr 20, 2026).** `xmaster like/follow` will 403 on non-Enterprise keys — like/follow manually in the app. Quote posts auto-fall back to the web session (needs `xmaster config web-login`)
-- **Replies to non-mentioners are API-blocked (Feb 2026)** — xmaster auto-falls back to the web session
+- **Likes, follows, quotes and replies to any thread go through your browser session** (`xmaster config web-login`). The self-serve API removed like/follow (Apr 20, 2026) and blocks replies to non-mentioners (Feb 2026), so without the session those return 403
 - **Pay-per-use pricing**: $0.015/post, $0.20/post if it contains a URL (one more reason links go in the first reply), $0.001/owned read. HTTP 402 / exit code 2 = credits exhausted → top up at console.x.com
 - **Search (since May 2026)**: `min_likes:`, `min_replies:`, `min_reposts:` operators work in queries; keyword search no longer returns retweets
 
