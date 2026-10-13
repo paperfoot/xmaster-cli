@@ -1,4 +1,8 @@
-//! FxTwitter client for Article enrichment.
+//! FxTwitter client: free single-post reads and Article bodies.
+//!
+//! `xmaster read` tries FxTwitter first: one free, unauthenticated call
+//! returns the post, its metrics and any Article body, where the paid X API
+//! would bill a read. Any failure falls back to the API.
 //!
 //! Articles (long-form posts on X) are NOT readable via the public v2 API —
 //! the tweet's `text` is just a t.co URL, and the only first-party path to
@@ -14,6 +18,7 @@
 //!
 //! Reference: https://github.com/FixTweet/FxTwitter
 
+use crate::providers::xapi::{ReferencedTweet, TweetData, TweetMetrics};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -46,7 +51,53 @@ struct FxResponse {
 
 #[derive(Deserialize)]
 struct FxTweet {
+    id: String,
+    #[serde(default)]
+    text: String,
+    author: Option<FxAuthor>,
+    #[serde(default)]
+    replies: u64,
+    #[serde(default)]
+    retweets: u64,
+    #[serde(default)]
+    likes: u64,
+    #[serde(default)]
+    bookmarks: u64,
+    #[serde(default)]
+    views: Option<u64>,
+    #[serde(default)]
+    created_timestamp: Option<i64>,
+    #[serde(default)]
+    replying_to_status: Option<String>,
+    #[serde(default)]
+    quote: Option<FxQuote>,
+    #[serde(default)]
+    media: Option<FxMedia>,
     article: Option<FxArticle>,
+}
+
+#[derive(Deserialize)]
+struct FxAuthor {
+    id: String,
+    screen_name: String,
+    #[serde(default)]
+    followers: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct FxQuote {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct FxMedia {
+    #[serde(default)]
+    all: Vec<FxMediaItem>,
+}
+
+#[derive(Deserialize)]
+struct FxMediaItem {
+    url: String,
 }
 
 #[derive(Deserialize)]
@@ -88,36 +139,66 @@ struct FxMediaInfo {
 
 // --- Public API ---
 
+async fn fetch_status(tweet_id: &str) -> Option<FxTweet> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(FX_TIMEOUT_MS))
+                .user_agent(concat!("xmaster-cli/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .ok()
+        })
+        .as_ref()?;
+    let resp = client.get(format!("{FX_BASE}/i/status/{tweet_id}")).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<FxResponse>().await.ok()?.tweet
+}
+
 /// Fetch an Article for a tweet ID via FxTwitter. Returns `Ok(None)` when the
 /// tweet doesn't have an Article (or when FxTwitter is unreachable / slow —
 /// we degrade gracefully rather than fail). Returns `Ok(Some(_))` when an
 /// Article body was retrieved.
 pub async fn fetch_article(tweet_id: &str) -> Result<Option<Article>, ()> {
-    let url = format!("{FX_BASE}/i/status/{tweet_id}");
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(FX_TIMEOUT_MS))
-        .user_agent("xmaster-cli/1.7.1 (Article enrichment via FxTwitter)")
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(_) => return Ok(None),
-    };
-    if !resp.status().is_success() {
-        return Ok(None);
+    Ok(fetch_status(tweet_id).await.and_then(|t| t.article).map(flatten_article))
+}
+
+/// Read one post for free: the post (in the API's shape) plus its Article
+/// body, if any. `None` on any failure — the caller falls back to the API.
+pub async fn fetch_post(tweet_id: &str) -> Option<(TweetData, Option<Article>)> {
+    let t = fetch_status(tweet_id).await?;
+    let author = t.author?;
+    let mut refs = Vec::new();
+    if let Some(id) = t.replying_to_status {
+        refs.push(ReferencedTweet { ref_type: "replied_to".into(), id });
     }
-    let body: FxResponse = match resp.json().await {
-        Ok(b) => b,
-        Err(_) => return Ok(None),
+    if let Some(q) = t.quote {
+        refs.push(ReferencedTweet { ref_type: "quoted".into(), id: q.id });
+    }
+    let tweet = TweetData {
+        id: t.id,
+        text: t.text,
+        author_id: Some(author.id),
+        author_username: Some(author.screen_name),
+        created_at: t
+            .created_timestamp
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        conversation_id: None,
+        referenced_tweets: (!refs.is_empty()).then_some(refs),
+        public_metrics: Some(TweetMetrics {
+            like_count: t.likes,
+            retweet_count: t.retweets,
+            reply_count: t.replies,
+            impression_count: t.views.unwrap_or(0),
+            bookmark_count: t.bookmarks,
+        }),
+        author_followers: author.followers,
+        media_urls: t.media.map(|m| m.all.into_iter().map(|i| i.url).collect()).unwrap_or_default(),
     };
-    let article = body
-        .tweet
-        .and_then(|t| t.article)
-        .map(flatten_article);
-    Ok(article)
+    Some((tweet, t.article.map(flatten_article)))
 }
 
 fn flatten_article(a: FxArticle) -> Article {
