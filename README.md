@@ -75,7 +75,7 @@ xmaster post "Hello from xmaster"
 Optional extras:
 ```bash
 xmaster config set keys.xai YOUR_XAI_KEY          # AI-powered search via xAI/Grok
-xmaster config web-login                           # Enable reply bypass (auto-captures browser cookies)
+xmaster config web-login                           # Reply anywhere, like, follow, quote (auto-captures browser cookies)
 xmaster config set style.voice "your style here"   # Agents write in your voice
 xmaster config set account.premium true            # 25k char limit instead of 280
 ```
@@ -86,11 +86,12 @@ XMaster has three backends behind one CLI:
 
 | Backend | Auth | Used for |
 |---------|------|----------|
-| **X API v2** | OAuth 1.0a | Posting, retweets, DMs, search, timelines, Articles |
+| **X API v2** | OAuth 1.0a | Posting, DMs, search, timelines, Articles |
 | **xAI / Grok** | Bearer token | AI-powered semantic search, trending topics |
-| **Web GraphQL** | Browser cookies | Fallback for replies and quote posts the API restricts |
+| **Web session** | Browser cookies | Replies to any thread, quotes, likes, reposts, bookmarks, follows |
+| **FxTwitter** | None | Free single-post reads (`read`), Article bodies |
 
-> X removed Likes, Follows, and Quote-post writes from all self-serve API tiers on April 20, 2026. `like`/`follow` return a clear error on non-Enterprise keys; quote posts fall back to the web session automatically.
+> The self-serve X API blocks replies to people who haven't @mentioned you (Feb 2026) and removed likes, follows and quote posts (Apr 20, 2026). With `xmaster config web-login`, those writes go straight through your browser session, the way the x.com app sends them. Query IDs and feature flags are read from x.com itself and refreshed automatically when X rotates them. `xmaster config set settings.web_writes always` also moves plain posts off the paid API ($0.015/post, $0.20 with a link); `never` keeps everything on the API. `xmaster config check` runs a live read-only test of the web session.
 
 Every command returns JSON when piped (or with `--json`); list commands also support `--csv` for spreadsheet-ready output. Exit codes are semantic: 0 success, 1 runtime error, 2 config/billing error, 3 auth missing, 4 rate limited. Your agent always knows what happened.
 
@@ -104,10 +105,10 @@ Every command returns JSON when piped (or with `--json`); list commands also sup
 ├──────────┬──────────────┬───────────────────┤
 │ X API v2 │  xAI / Grok  │  Web GraphQL      │
 │(OAuth1.0a│(Bearer token)│  (Cookie auth +   │
-│ Post,Like│ AI search,   │   transaction ID) │
-│ RT, DM,  │ Trending,    │  Reply fallback   │
-│ Search,  │ Semantic     │  when API blocks  │
-│ Timeline)│ search       │  replies          │
+│ Post, DM,│ AI search,   │   transaction ID) │
+│ Search,  │ Trending,    │  Replies, quotes, │
+│ Timeline,│ Semantic     │  likes, reposts,  │
+│ Articles)│ search       │  follows          │
 ├──────────┴──────────────┴───────────────────┤
 │  Rate Limiter │ Intel Store │ Scheduler     │
 │  (header-based)│  (SQLite)  │  (launchd)    │
@@ -130,8 +131,8 @@ Every command returns JSON when piped (or with `--json`); list commands also sup
 | `article draft` | Save a native X Article draft without publishing | `xmaster article draft draft.md --header-image cover.png` |
 | `article publish` | Publish a draft Article via the official API (makes it public) | `xmaster article publish 1234567890` |
 | `delete` | Delete a post | `xmaster delete 1234567890` |
-| `like` | Like a tweet (ID or URL) — removed from self-serve API tiers Apr 2026 | `xmaster like 1234567890` |
-| `unlike` | Unlike a tweet — removed from self-serve API tiers Apr 2026 | `xmaster unlike 1234567890` |
+| `like` | Like a post (ID or URL) — via the web session | `xmaster like 1234567890` |
+| `unlike` | Unlike a post — via the web session | `xmaster unlike 1234567890` |
 | `retweet` | Retweet a tweet | `xmaster retweet 1234567890` |
 | `unretweet` | Undo a retweet | `xmaster unretweet 1234567890` |
 | `bookmark` | Bookmark a tweet | `xmaster bookmark 1234567890` |
@@ -172,8 +173,8 @@ xmaster like https://x.com/user/status/1234567890       # URLs work too
 
 | Command | What it does | Example |
 |---------|-------------|---------|
-| `follow` | Follow a user — removed from self-serve API tiers Apr 2026 | `xmaster follow elonmusk` |
-| `unfollow` | Unfollow a user — removed from self-serve API tiers Apr 2026 | `xmaster unfollow elonmusk` |
+| `follow` | Follow a user — via the web session | `xmaster follow elonmusk` |
+| `unfollow` | Unfollow a user — via the web session | `xmaster unfollow elonmusk` |
 | `followers` | List followers | `xmaster followers elonmusk -c 50` |
 | `following` | List who a user follows | `xmaster following elonmusk -c 50` |
 
@@ -264,7 +265,7 @@ The opportunity scorer ranks targets by reciprocity, reply ROI, size fit (adapti
 |---------|-------------|---------|
 | `config show` | View config (keys masked) | `xmaster config show` |
 | `config check` | Validate credentials | `xmaster config check` |
-| `config web-login` | Capture browser cookies for reply bypass | `xmaster config web-login` |
+| `config web-login` | Capture browser cookies for the web session | `xmaster config web-login` |
 | `agent-info` | Machine-readable capabilities for AI agents | `xmaster agent-info --json` |
 | `rate-limits` | Check API quota status | `xmaster rate-limits` |
 | `update` | Self-update from GitHub releases | `xmaster update` |

@@ -119,8 +119,8 @@ fn maybe_add_hint(err: XmasterError) -> XmasterError {
 
 pub async fn follow(ctx: Arc<AppContext>, format: OutputFormat, username: &str) -> Result<(), XmasterError> {
     let api = XApi::new(ctx.clone());
-    let user = api.get_user_by_username(username).await?;
-    api.follow_user(&user.id).await.map_err(maybe_add_hint)?;
+    let username = username.trim_start_matches('@');
+    api.follow_username(username).await.map_err(maybe_add_hint)?;
     let display = FollowResult {
         action: "follow".into(),
         username: username.to_string(),
@@ -133,8 +133,8 @@ pub async fn follow(ctx: Arc<AppContext>, format: OutputFormat, username: &str) 
 
 pub async fn unfollow(ctx: Arc<AppContext>, format: OutputFormat, username: &str) -> Result<(), XmasterError> {
     let api = XApi::new(ctx.clone());
-    let user = api.get_user_by_username(username).await?;
-    api.unfollow_user(&user.id).await.map_err(maybe_add_hint)?;
+    let username = username.trim_start_matches('@');
+    api.unfollow_username(username).await.map_err(maybe_add_hint)?;
     let display = FollowResult {
         action: "unfollow".into(),
         username: username.to_string(),

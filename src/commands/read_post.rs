@@ -63,23 +63,32 @@ pub async fn execute(
     format: OutputFormat,
     id: &str,
 ) -> Result<(), XmasterError> {
-    let api = XApi::new(ctx.clone());
     let tweet_id = parse_tweet_id(id);
-    let tweet = api.get_tweet(&tweet_id).await?;
+    // FxTwitter first: free, and one call also carries any Article body.
+    // The paid API read is the fallback.
+    let free = if ctx.config.settings.disable_fxtwitter {
+        None
+    } else {
+        fxtwitter::fetch_post(&tweet_id).await
+    };
+    let (tweet, article) = match free {
+        Some(hit) => hit,
+        None => {
+            let tweet = XApi::new(ctx.clone()).get_tweet(&tweet_id).await?;
+            // Article wrapper: the API text is just a t.co link
+            let article = if !ctx.config.settings.disable_fxtwitter
+                && fxtwitter::text_looks_like_article_wrapper(&tweet.text)
+            {
+                fxtwitter::fetch_article(&tweet.id).await.ok().flatten()
+            } else {
+                None
+            };
+            (tweet, article)
+        }
+    };
     if let Ok(store) = IntelStore::open() {
         let _ = store.record_discovered_post("read", &tweet);
     }
-
-    // Article enrichment: if the tweet text looks like a t.co Article wrapper,
-    // try FxTwitter (no auth, ~2.5s timeout, graceful degradation). Skip when
-    // disabled in config.
-    let article = if !ctx.config.settings.disable_fxtwitter
-        && fxtwitter::text_looks_like_article_wrapper(&tweet.text)
-    {
-        fxtwitter::fetch_article(&tweet.id).await.ok().flatten()
-    } else {
-        None
-    };
 
     let metrics = tweet.public_metrics.as_ref();
     let display = PostDisplay {

@@ -130,6 +130,11 @@ pub struct Settings {
     /// Turn off JEV judgments even when a key is configured.
     #[serde(default)]
     pub disable_jev: bool,
+    /// Read search, threads and timelines through the browser session
+    /// (free) when web cookies exist, instead of billed API reads.
+    /// Set via: xmaster config set settings.web_reads false
+    #[serde(default = "default_true")]
+    pub web_reads: bool,
 }
 
 impl Default for Settings {
@@ -139,6 +144,7 @@ impl Default for Settings {
             disable_fxtwitter: false,
             web_writes: default_web_writes(),
             disable_jev: false,
+            web_reads: true,
         }
     }
 }
@@ -149,6 +155,10 @@ fn default_timeout() -> u64 {
 
 fn default_web_writes() -> String {
     "auto".into()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn config_dir() -> PathBuf {
@@ -209,6 +219,11 @@ impl AppConfig {
                 "always" => true,
                 _ => blocked_on_api,
             }
+    }
+
+    /// Serve reads from the browser session (free) instead of the paid API?
+    pub fn web_reads(&self) -> bool {
+        self.settings.web_reads && self.has_web_cookies()
     }
 
     /// JEV API key from config or TYPESAFE_API_KEY, unless JEV is disabled.
