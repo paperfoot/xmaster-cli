@@ -16,9 +16,20 @@
 //! trip a 24 h cooldown, limit codes park that action type, and a new post
 //! that doesn't read back is flagged as a possible silent fail.
 //!
-//! Wiring: wrap each XApi write body in [`guard`], e.g.
-//! `rails::guard(&self.ctx, WriteIntent::new(WriteKind::Like).target(tweet_id), async { .. }).await`.
-//! Kill switch: `XMASTER_RAILS=off`.
+//! Wiring (XApi, both web and API paths): wrap each public write's existing
+//! body in [`guard`], which gates, runs the body, then records the outcome:
+//! - `create_tweet`: kind Reply if `reply_to`, else Quote if `quote_tweet_id`,
+//!   else Post; `.text(text)` and `.target(reply_to.or(quote_tweet_id))`.
+//!   Thread parts are detected from the ledger (no extra kind needed).
+//! - `like_tweet` / `unlike_tweet` / `retweet` / `unretweet` / `bookmark_tweet`
+//!   / `unbookmark_tweet` / `delete_tweet`: `.target(id)` with Like, Unlike,
+//!   Repost, Unrepost, Bookmark, Unbookmark, Delete.
+//! - `follow_username` / `unfollow_username`: `.handle(username)`.
+//! - `send_dm`: `WriteKind::Dm` with `.handle(participant_id)` (no text kept).
+//!
+//! e.g. `rails::guard(&self.ctx, WriteIntent::new(WriteKind::Like).target(tweet_id), async { ..body.. }).await`
+//! Commands may report [`last_wait_secs`] and [`possible_silent_fail`].
+//! Kill switch: `XMASTER_RAILS=off` (set it in integration tests).
 
 use crate::context::AppContext;
 use crate::errors::XmasterError;
@@ -447,7 +458,7 @@ impl Snapshot {
             let ours = matches!(r.act, Act::Post | Act::Quote | Act::Thread | Act::OwnReply);
             if r.new_id.as_deref() == Some(id) {
                 let root = r.conversation.clone().unwrap_or_else(|| id.to_string());
-                return Some((root, ours || r.act == Act::Post));
+                return Some((root, ours));
             }
             if r.target_id.as_deref() == Some(id) && matches!(r.act, Act::Reply | Act::OwnReply) {
                 if let Some(c) = &r.conversation {

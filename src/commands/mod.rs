@@ -31,6 +31,7 @@ pub mod quotes;
 pub mod amplifiers;
 pub mod volume;
 pub mod article;
+pub mod rails_cmd;
 
 use crate::cli::{ArticleCommands, Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
 use crate::context::AppContext;
