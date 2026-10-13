@@ -11,27 +11,13 @@ use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell};
 use tracing::warn;
 
+use super::web::Web;
+
 /// Max retry attempts for transient errors (429, 5xx).
 const MAX_RETRIES: u32 = 3;
 
 const BASE: &str = "https://api.x.com/2";
 const UPLOAD_URL: &str = "https://upload.twitter.com/1.1/media/upload.json";
-
-/// Public bearer token used by the X web app (same for all users, not secret).
-const WEB_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
-
-/// Default GraphQL CreateTweet query ID (hash rotates every few weeks on X deploys).
-/// Can be overridden via config: keys.graphql_create_tweet_id
-const DEFAULT_GRAPHQL_CREATE_TWEET_ID: &str = "oB-5XsHNAbjvARJEc8CZFw";
-
-/// Default GraphQL CreateNoteTweet query ID for Premium long-form posts (>280 chars).
-/// Can be overridden via config: keys.graphql_create_note_tweet_id
-const DEFAULT_GRAPHQL_CREATE_NOTE_TWEET_ID: &str = "iCUB42lIfXf9qPKctjE5rQ";
-
-/// Current X web Article entity GraphQL operation IDs (rotated by X deploys).
-/// These are private web endpoints, not public X API v2 endpoints.
-const ARTICLE_ENTITY_DRAFT_CREATE_ID: &str = "g1l5N8BxGewYuCy5USe_bQ";
-const ARTICLE_ENTITY_UPDATE_COVER_MEDIA_ID: &str = "Es8InPh7mEkK9PxclxFAVQ";
 
 // ---------------------------------------------------------------------------
 // Rate limit info
@@ -746,46 +732,43 @@ impl XApi {
             }
         }
 
-        let result = self
-            .request_data(Method::POST, &format!("{BASE}/tweets"), Some(body))
-            .await;
-
-        // Auto-fallback to the GraphQL web endpoint, which handles all three
-        // API-side rejections:
-        // - replies to non-mentioners 403 since Feb 2026
-        // - quote-posting removed from self-serve tiers on 2026-04-20
-        // - >280-char Premium posts, which /2/tweets rejects but the web
-        //   path routes through CreateNoteTweet
-        if let Err(ref err) = result {
-            let long_premium =
-                text.chars().count() > 280 && self.ctx.config.account.premium;
-            let restricted =
-                (reply_to.is_some() || quote_tweet_id.is_some()) && Self::is_write_restricted(err);
-            // For long premium posts any client-side rejection (not billing,
-            // rate limit, or 5xx) is worth one web retry — the API path has
-            // no note-tweet support at all.
-            let length_rejected = long_premium
-                && matches!(err, XmasterError::Api { .. } | XmasterError::AuthMissing { .. });
-
-            if restricted || length_rejected {
-                if self.ctx.config.has_web_cookies() {
-                    warn!("API write blocked (X restriction). Falling back to web session...");
-                    return self
-                        .create_tweet_via_web(text, reply_to, quote_tweet_id, media_ids)
-                        .await;
-                } else {
-                    return Err(XmasterError::ReplyRestricted(
-                        "X blocks programmatic replies to users who haven't @mentioned you, \
-                        removed API quote-posting for self-serve tiers (2026-04-20), and \
-                        rejects >280-char posts on /2/tweets. \
-                        Configure web cookies for automatic fallback."
-                            .into(),
-                    ));
+        // Writes the API blocks or can't do go through the browser session
+        // first (settings.web_writes): replies to people who never @mentioned
+        // you (403 since Feb 2026), quotes (removed 2026-04-20) and >280-char
+        // Premium posts (CreateNoteTweet). Polls stay on the API.
+        let long_premium = text.chars().count() > 280 && self.ctx.config.account.premium;
+        let api_only = poll_options.is_some_and(|o| !o.is_empty());
+        let wants_web = reply_to.is_some() || quote_tweet_id.is_some() || long_premium;
+        let mut web_err = None;
+        if !api_only && self.ctx.config.web_first(wants_web) {
+            match Web::new(&self.ctx)?
+                .create_tweet(text, reply_to, quote_tweet_id, media_ids, long_premium)
+                .await
+            {
+                Ok((id, text)) => return Ok(TweetResponse { id, text }),
+                // Quotes and long posts have no API path to fall back to
+                Err(e) if quote_tweet_id.is_some() || long_premium => return Err(e),
+                Err(e) => {
+                    warn!("Web post failed ({e}); trying the API");
+                    web_err = Some(e);
                 }
             }
         }
 
-        result
+        let result = self
+            .request_data(Method::POST, &format!("{BASE}/tweets"), Some(body))
+            .await;
+        match result {
+            Err(ref err) if wants_web && Self::is_write_restricted(err) => Err(web_err.unwrap_or_else(|| {
+                XmasterError::ReplyRestricted(
+                    "X blocks API replies to people who haven't @mentioned you, removed API \
+                    quote-posting (2026-04-20), and rejects >280-char posts on /2/tweets. \
+                    Run `xmaster config web-login` so these go through your browser session."
+                        .into(),
+                )
+            })),
+            other => other,
+        }
     }
 
     /// Detect whether an error is an X write restriction: the Feb 2026 reply
@@ -804,213 +787,10 @@ impl XApi {
                     || message.contains("reply")
                     || message.contains("not allowed")
                     || message.contains("not permitted")
+                    || message.contains("280")
             }
             _ => false,
         }
-    }
-
-    /// Post a tweet via X's internal GraphQL web endpoint using browser cookies.
-    /// This bypasses the API reply restriction since it behaves like a browser session.
-    /// For Premium accounts posting >280 chars, uses CreateNoteTweet mutation instead
-    /// of CreateTweet (which hard-caps at 280 regardless of Premium status).
-    async fn create_tweet_via_web(
-        &self,
-        text: &str,
-        reply_to: Option<&str>,
-        quote_tweet_id: Option<&str>,
-        media_ids: Option<&[String]>,
-    ) -> Result<TweetResponse, XmasterError> {
-        let keys = &self.ctx.config.keys;
-
-        // Select mutation: CreateNoteTweet for Premium long posts, CreateTweet otherwise
-        let is_note_tweet = text.chars().count() > 280 && self.ctx.config.account.premium;
-        let (query_id, operation_name) = if is_note_tweet {
-            let id = if keys.graphql_create_note_tweet_id.is_empty() {
-                DEFAULT_GRAPHQL_CREATE_NOTE_TWEET_ID.to_string()
-            } else {
-                keys.graphql_create_note_tweet_id.clone()
-            };
-            (id, "CreateNoteTweet")
-        } else {
-            let id = if keys.graphql_create_tweet_id.is_empty() {
-                DEFAULT_GRAPHQL_CREATE_TWEET_ID.to_string()
-            } else {
-                keys.graphql_create_tweet_id.clone()
-            };
-            (id, "CreateTweet")
-        };
-
-        let ct0 = &keys.web_ct0;
-        let auth_token = &keys.web_auth_token;
-
-        // Generate x-client-transaction-id natively (no Python dependency)
-        let gql_path = format!("/i/api/graphql/{query_id}/{operation_name}");
-        let transaction_id = crate::transaction_id::generate(
-            &self.ctx.client, "POST", &gql_path, ct0, auth_token,
-        )
-        .await
-        .map_err(|e| {
-            warn!("Native transaction ID failed: {e}");
-            e
-        })?;
-
-        // Build the GraphQL variables
-        let mut variables = json!({
-            "tweet_text": text,
-            "dark_request": false,
-            "media": {
-                "media_entities": [],
-                "possibly_sensitive": false,
-            },
-            "semantic_annotation_ids": [],
-        });
-
-        if let Some(reply_id) = reply_to {
-            variables["reply"] = json!({
-                "in_reply_to_tweet_id": reply_id,
-                "exclude_reply_user_ids": [],
-            });
-        }
-
-        if let Some(qid) = quote_tweet_id {
-            variables["quote_tweet_id"] = qid.into();
-        }
-
-        if let Some(ids) = media_ids {
-            let entities: Vec<Value> = ids
-                .iter()
-                .map(|id| json!({ "media_id": id, "tagged_users": [] }))
-                .collect();
-            variables["media"]["media_entities"] = json!(entities);
-        }
-
-        // CreateNoteTweet requires richtext_options for long-form posts
-        if is_note_tweet {
-            variables["richtext_options"] = json!({ "richtext_tags": [] });
-        }
-
-        let gql_body = json!({
-            "variables": variables,
-            "features": {
-                "communities_web_enable_tweet_community_results_fetch": true,
-                "c9s_tweet_anatomy_moderator_badge_enabled": true,
-                "responsive_web_edit_tweet_api_enabled": true,
-                "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
-                "view_counts_everywhere_api_enabled": true,
-                "longform_notetweets_consumption_enabled": true,
-                "responsive_web_twitter_article_tweet_consumption_enabled": true,
-                "tweet_awards_web_tipping_enabled": false,
-                "creator_subscriptions_quote_tweet_preview_enabled": false,
-                "longform_notetweets_rich_text_read_enabled": true,
-                "longform_notetweets_inline_media_enabled": true,
-                "articles_preview_enabled": true,
-                "rweb_video_timestamps_enabled": true,
-                "rweb_tipjar_consumption_enabled": true,
-                "responsive_web_graphql_exclude_directive_enabled": true,
-                "verified_phone_label_enabled": false,
-                "freedom_of_speech_not_reach_fetch_enabled": true,
-                "standardized_nudges_misinfo": true,
-                "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
-                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
-                "responsive_web_graphql_timeline_navigation_enabled": true,
-                "responsive_web_enhance_cards_enabled": false,
-            },
-            "queryId": &query_id,
-        });
-
-        let cookie_header = format!("ct0={ct0}; auth_token={auth_token}");
-        let bearer = format!("Bearer {WEB_BEARER}");
-        let gql_url = format!("https://x.com{gql_path}");
-
-        let resp = self
-            .ctx
-            .client
-            .post(&gql_url)
-            .header("authorization", &bearer)
-            .header("x-csrf-token", ct0)
-            .header("cookie", &cookie_header)
-            .header("content-type", "application/json")
-            .header("x-twitter-active-user", "yes")
-            .header("x-twitter-auth-type", "OAuth2Session")
-            .header("x-client-transaction-id", &transaction_id)
-            .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-            .header("origin", "https://x.com")
-            .header("referer", "https://x.com/compose/post")
-            .header("x-twitter-client-language", "en")
-            .header("accept", "*/*")
-            .header("accept-language", "en-US,en;q=0.9")
-            .header("sec-ch-ua", "\"Google Chrome\";v=\"146\", \"Chromium\";v=\"146\", \"Not_A Brand\";v=\"24\"")
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", "\"macOS\"")
-            .header("sec-fetch-dest", "empty")
-            .header("sec-fetch-mode", "cors")
-            .header("sec-fetch-site", "same-origin")
-            .body(serde_json::to_string(&gql_body)?)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            // Specific error for Premium long posts that get rejected
-            if is_note_tweet && (body_text.contains("186") || body_text.contains("shorter")) {
-                return Err(XmasterError::Api {
-                    provider: "x-web",
-                    code: "note_tweet_rejected",
-                    message: "Long post rejected by X. Verify your X Premium subscription is active.".into(),
-                });
-            }
-            return Err(XmasterError::Api {
-                provider: "x-web",
-                code: "graphql_error",
-                message: format!(
-                    "Web fallback failed (HTTP {status}): {}",
-                    crate::utils::safe_truncate(&body_text, 300)
-                ),
-            });
-        }
-
-        // Parse the GraphQL response to extract tweet ID and text
-        let val: Value = serde_json::from_str(&body_text).map_err(|_| XmasterError::Api {
-            provider: "x-web",
-            code: "json_parse",
-            message: format!("Failed to parse GraphQL response: {}", crate::utils::safe_truncate(&body_text, 200)),
-        })?;
-
-        // Navigate response: CreateNoteTweet uses data.notetweet_create, CreateTweet uses data.create_tweet
-        let result_path = if is_note_tweet {
-            "/data/notetweet_create/tweet_results/result"
-        } else {
-            "/data/create_tweet/tweet_results/result"
-        };
-        let tweet_result = val
-            .pointer(result_path)
-            .ok_or_else(|| XmasterError::Api {
-                provider: "x-web",
-                code: "no_tweet_result",
-                message: format!("Unexpected GraphQL response shape: {}", crate::utils::safe_truncate(&body_text, 300)),
-            })?;
-
-        let tweet_id = tweet_result
-            .get("rest_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| XmasterError::Api {
-                provider: "x-web",
-                code: "no_rest_id",
-                message: "No rest_id in tweet result".into(),
-            })?;
-
-        // Try to get the full text from the nested legacy object
-        let tweet_text = tweet_result
-            .pointer("/legacy/full_text")
-            .and_then(|v| v.as_str())
-            .unwrap_or(text);
-
-        Ok(TweetResponse {
-            id: tweet_id.to_string(),
-            text: tweet_text.to_string(),
-        })
     }
 
     /// Create an Article draft via the official X API v2 endpoint
@@ -1081,11 +861,8 @@ impl XApi {
         title: &str,
         content_state: Value,
     ) -> Result<ArticleEntityResponse, XmasterError> {
-        self.require_web_cookies("Article drafts")?;
-
         let val = self
-            .article_web_graphql(
-                ARTICLE_ENTITY_DRAFT_CREATE_ID,
+            .article_graphql(
                 "ArticleEntityDraftCreate",
                 json!({
                     "content_state": content_state,
@@ -1114,8 +891,6 @@ impl XApi {
         media_id: Option<&str>,
         media_category: Option<&str>,
     ) -> Result<ArticleEntityResponse, XmasterError> {
-        self.require_web_cookies("Article cover updates")?;
-
         let cover_media = match (media_id, media_category) {
             (Some(media_id), Some(media_category)) => {
                 json!({ "media_id": media_id, "media_category": media_category })
@@ -1124,8 +899,7 @@ impl XApi {
         };
 
         let val = self
-            .article_web_graphql(
-                ARTICLE_ENTITY_UPDATE_COVER_MEDIA_ID,
+            .article_graphql(
                 "ArticleEntityUpdateCoverMedia",
                 json!({
                     "articleEntityId": article_entity_id,
@@ -1148,120 +922,20 @@ impl XApi {
         parse_article_entity(result, "articleentity_update_cover_media")
     }
 
-    fn require_web_cookies(&self, feature: &str) -> Result<(), XmasterError> {
-        if self.ctx.config.has_web_cookies() {
-            return Ok(());
-        }
-
-        Err(XmasterError::AuthMissing {
-            provider: "x-web",
-            message: format!(
-                "{feature} require X web-session cookies. Run: xmaster config web-login"
-            ),
-        })
-    }
-
-    async fn article_web_graphql(
-        &self,
-        query_id: &str,
-        operation_name: &str,
-        variables: Value,
-    ) -> Result<Value, XmasterError> {
-        let keys = &self.ctx.config.keys;
-        let ct0 = &keys.web_ct0;
-        let auth_token = &keys.web_auth_token;
-        let gql_path = format!("/i/api/graphql/{query_id}/{operation_name}");
-        let transaction_id =
-            crate::transaction_id::generate(&self.ctx.client, "POST", &gql_path, ct0, auth_token)
-                .await
-                .map_err(|e| {
-                    warn!("Native transaction ID failed for Article GraphQL: {e}");
-                    e
-                })?;
-
-        let gql_body = json!({
-            "variables": variables,
-            "features": {
-                "profile_label_improvements_pcf_label_in_post_enabled": true,
-                "responsive_web_profile_redirect_enabled": false,
-                "rweb_tipjar_consumption_enabled": true,
-                "verified_phone_label_enabled": false,
-                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
-                "responsive_web_graphql_timeline_navigation_enabled": true,
-            },
-            "fieldToggles": {
-                "withPayments": true,
-                "withAuxiliaryUserLabels": true,
-            },
-            "queryId": query_id,
+    /// Article entity mutations exist only on the web (private GraphQL).
+    async fn article_graphql(&self, op: &str, variables: Value) -> Result<Value, XmasterError> {
+        let features = json!({
+            "profile_label_improvements_pcf_label_in_post_enabled": true,
+            "responsive_web_profile_redirect_enabled": false,
+            "rweb_tipjar_consumption_enabled": true,
+            "verified_phone_label_enabled": false,
+            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+            "responsive_web_graphql_timeline_navigation_enabled": true,
         });
-
-        let cookie_header = format!("ct0={ct0}; auth_token={auth_token}");
-        let bearer = format!("Bearer {WEB_BEARER}");
-        let gql_url = format!("https://x.com{gql_path}");
-
-        let resp = self
-            .ctx
-            .client
-            .post(&gql_url)
-            .header("authorization", &bearer)
-            .header("x-csrf-token", ct0)
-            .header("cookie", &cookie_header)
-            .header("content-type", "application/json")
-            .header("x-twitter-active-user", "yes")
-            .header("x-twitter-auth-type", "OAuth2Session")
-            .header("x-client-transaction-id", &transaction_id)
-            .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-            .header("origin", "https://x.com")
-            .header("referer", "https://x.com/compose/articles")
-            .header("x-twitter-client-language", "en")
-            .header("accept", "*/*")
-            .header("accept-language", "en-US,en;q=0.9")
-            .header("sec-ch-ua", "\"Google Chrome\";v=\"146\", \"Chromium\";v=\"146\", \"Not_A Brand\";v=\"24\"")
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", "\"macOS\"")
-            .header("sec-fetch-dest", "empty")
-            .header("sec-fetch-mode", "cors")
-            .header("sec-fetch-site", "same-origin")
-            .body(serde_json::to_string(&gql_body)?)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(XmasterError::Api {
-                provider: "x-web",
-                code: "article_graphql_error",
-                message: format!(
-                    "Article GraphQL {operation_name} failed (HTTP {status}): {}",
-                    crate::utils::safe_truncate(&body_text, 300)
-                ),
-            });
-        }
-
-        let val: Value = serde_json::from_str(&body_text).map_err(|_| XmasterError::Api {
-            provider: "x-web",
-            code: "json_parse",
-            message: format!(
-                "Failed to parse Article GraphQL response: {}",
-                crate::utils::safe_truncate(&body_text, 200)
-            ),
-        })?;
-
-        if let Some(errors) = val.get("errors") {
-            return Err(XmasterError::Api {
-                provider: "x-web",
-                code: "article_graphql_error",
-                message: format!(
-                    "Article GraphQL {operation_name} returned errors: {}",
-                    crate::utils::safe_truncate(&errors.to_string(), 300)
-                ),
-            });
-        }
-
-        Ok(val)
+        let toggles = json!({ "withPayments": true, "withAuxiliaryUserLabels": true });
+        Web::new(&self.ctx)?
+            .graphql(op, variables, Some(features), Some(toggles), "https://x.com/compose/articles")
+            .await
     }
 
     /// Batch fetch public + non_public metrics for up to 100 tweet IDs per HTTP call.
@@ -1482,42 +1156,85 @@ impl XApi {
         }
     }
 
+    // Likes and follows left the self-serve API on 2026-04-20; reposts and
+    // bookmarks are free on the web. All go through the browser session first
+    // (settings.web_writes); reposts and bookmarks fall back to the API.
+
     pub async fn like_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            return Web::new(&self.ctx)?.like(tweet_id).await;
+        }
         self.add_to_collection("likes", json!({ "tweet_id": tweet_id }))
             .await
     }
 
     pub async fn unlike_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            return Web::new(&self.ctx)?.unlike(tweet_id).await;
+        }
         self.remove_from_collection("likes", tweet_id).await
     }
 
     pub async fn retweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            match Web::new(&self.ctx)?.retweet(tweet_id).await {
+                Ok(()) => return Ok(()),
+                Err(e) => warn!("Web repost failed ({e}); trying the API"),
+            }
+        }
         self.add_to_collection("retweets", json!({ "tweet_id": tweet_id }))
             .await
     }
 
     pub async fn unretweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            match Web::new(&self.ctx)?.unretweet(tweet_id).await {
+                Ok(()) => return Ok(()),
+                Err(e) => warn!("Web undo-repost failed ({e}); trying the API"),
+            }
+        }
         self.remove_from_collection("retweets", tweet_id).await
     }
 
     pub async fn bookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            match Web::new(&self.ctx)?.bookmark(tweet_id).await {
+                Ok(()) => return Ok(()),
+                Err(e) => warn!("Web bookmark failed ({e}); trying the API"),
+            }
+        }
         self.add_to_collection("bookmarks", json!({ "tweet_id": tweet_id }))
             .await
     }
 
     pub async fn unbookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            match Web::new(&self.ctx)?.unbookmark(tweet_id).await {
+                Ok(()) => return Ok(()),
+                Err(e) => warn!("Web unbookmark failed ({e}); trying the API"),
+            }
+        }
         self.remove_from_collection("bookmarks", tweet_id).await
     }
 
     // -- Follow/unfollow ----------------------------------------------------
 
-    pub async fn follow_user(&self, target_user_id: &str) -> Result<(), XmasterError> {
-        self.add_to_collection("following", json!({ "target_user_id": target_user_id }))
+    /// Follow by handle. The web path needs no paid user-ID lookup.
+    pub async fn follow_username(&self, username: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            return Web::new(&self.ctx)?.follow(username).await;
+        }
+        let user = self.get_user_by_username(username).await?;
+        self.add_to_collection("following", json!({ "target_user_id": user.id }))
             .await
     }
 
-    pub async fn unfollow_user(&self, target_user_id: &str) -> Result<(), XmasterError> {
-        self.remove_from_collection("following", target_user_id).await
+    pub async fn unfollow_username(&self, username: &str) -> Result<(), XmasterError> {
+        if self.ctx.config.web_first(true) {
+            return Web::new(&self.ctx)?.unfollow(username).await;
+        }
+        let user = self.get_user_by_username(username).await?;
+        self.remove_from_collection("following", &user.id).await
     }
 
     // -- User lookup --------------------------------------------------------

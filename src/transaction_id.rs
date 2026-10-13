@@ -1,10 +1,13 @@
-//! Generate X-Client-Transaction-Id for X GraphQL API requests.
+//! X-Client-Transaction-Id for X web requests.
 //!
 //! Ported from: https://github.com/iSarabjitDhiman/XClientTransaction (MIT)
-//! This avoids the Python dependency by implementing the algorithm in pure Rust.
+//! The signing keys come from the logged-in x.com page and its ondemand.s
+//! chunk. They are derived once (`derive`) and cached by `providers::web`;
+//! each request is then signed locally (`sign`) with no network round trip.
 
 use crate::errors::XmasterError;
 use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::f64::consts::PI;
 
@@ -12,117 +15,60 @@ const ADDITIONAL_RANDOM_NUMBER: u8 = 3;
 const DEFAULT_KEYWORD: &str = "obfiowerehiring";
 const EPOCH_OFFSET: u64 = 1682924400;
 
-/// Generate a transaction ID for an X GraphQL request.
-/// Fetches the X homepage and ondemand.s file to extract the required keys.
-pub async fn generate(
-    client: &reqwest::Client,
-    method: &str,
-    path: &str,
-    ct0: &str,
-    auth_token: &str,
-) -> Result<String, XmasterError> {
-    let cookie = format!("ct0={ct0}; auth_token={auth_token}");
-    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+/// Per-page signing material: the site-verification key and the animation key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TxKeys {
+    pub key_bytes: Vec<u8>,
+    pub animation_key: String,
+}
 
-    // 1. Fetch homepage
-    let html = client
-        .get("https://x.com")
-        .header("user-agent", ua)
-        .header("cookie", &cookie)
-        .header("accept", "text/html,application/xhtml+xml")
-        .header("accept-language", "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|e| XmasterError::Api {
-            provider: "x-web",
-            code: "homepage_fetch",
-            message: format!("Failed to fetch X homepage: {e}"),
-        })?
-        .text()
-        .await
-        .unwrap_or_default();
+fn err(code: &'static str, message: String) -> XmasterError {
+    XmasterError::Api { provider: "x-web", code, message }
+}
 
-    // 2. Extract verification key from <meta name="twitter-site-verification" content="...">
-    let key_b64 = extract_meta_content(&html, "twitter-site-verification").ok_or_else(|| {
-        XmasterError::Api {
-            provider: "x-web",
-            code: "no_verification_key",
-            message: "No twitter-site-verification meta tag found on homepage".into(),
-        }
+/// URL of the ondemand.s chunk referenced by the x.com page.
+pub fn ondemand_url(html: &str) -> Result<String, XmasterError> {
+    let od_index = regex_first_capture(r#",(\d+):["']ondemand\.s["']"#, html)
+        .ok_or_else(|| err("no_ondemand_index", "No ondemand.s index found in homepage".into()))?;
+    let od_hash = regex_first_capture(&format!(r#",{od_index}:\"([0-9a-f]+)\""#), html)
+        .ok_or_else(|| err("no_ondemand_hash", "No ondemand.s hash found in homepage".into()))?;
+    Ok(format!("https://abs.twimg.com/responsive-web/client-web/ondemand.s.{od_hash}a.js"))
+}
+
+/// Derive the signing keys from the x.com page and its ondemand.s chunk.
+pub fn derive(html: &str, ondemand_js: &str) -> Result<TxKeys, XmasterError> {
+    let key_b64 = extract_meta_content(html, "twitter-site-verification").ok_or_else(|| {
+        err("no_verification_key", "No twitter-site-verification meta tag found on homepage".into())
     })?;
     let key_bytes: Vec<u8> = base64::engine::general_purpose::STANDARD
         .decode(&key_b64)
-        .map_err(|e| XmasterError::Api {
-            provider: "x-web",
-            code: "key_decode",
-            message: format!("Failed to decode verification key: {e}"),
-        })?;
+        .map_err(|e| err("key_decode", format!("Failed to decode verification key: {e}")))?;
+    if key_bytes.len() < 6 {
+        return Err(err("key_decode", "Verification key too short".into()));
+    }
 
-    // 3. Find ondemand.s file URL from homepage
-    let od_index = regex_first_capture(r#",(\d+):["']ondemand\.s["']"#, &html).ok_or_else(|| {
-        XmasterError::Api {
-            provider: "x-web",
-            code: "no_ondemand_index",
-            message: "No ondemand.s index found in homepage".into(),
-        }
-    })?;
-    let hash_pattern = format!(r#",{}:\"([0-9a-f]+)\""#, od_index);
-    let od_hash = regex_first_capture(&hash_pattern, &html).ok_or_else(|| {
-        XmasterError::Api {
-            provider: "x-web",
-            code: "no_ondemand_hash",
-            message: "No ondemand.s hash found in homepage".into(),
-        }
-    })?;
-    let od_url = format!(
-        "https://abs.twimg.com/responsive-web/client-web/ondemand.s.{od_hash}a.js"
-    );
-
-    // 4. Fetch ondemand.s file
-    let od_text = client
-        .get(&od_url)
-        .header("user-agent", ua)
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .map_err(|e| XmasterError::Api {
-            provider: "x-web",
-            code: "ondemand_fetch",
-            message: format!("Failed to fetch ondemand.s: {e}"),
-        })?
-        .text()
-        .await
-        .unwrap_or_default();
-
-    // 5. Extract indices from ondemand file
-    let indices = extract_indices(&od_text);
+    let indices = extract_indices(ondemand_js);
     if indices.is_empty() {
-        return Err(XmasterError::Api {
-            provider: "x-web",
-            code: "no_indices",
-            message: "No KEY_BYTE indices found in ondemand.s".into(),
-        });
+        return Err(err("no_indices", "No KEY_BYTE indices found in ondemand.s".into()));
     }
     let row_index_idx = indices[0];
     let key_bytes_indices = &indices[1..];
-
-    // 6. Extract SVG animation data from homepage
-    let frame_idx = (key_bytes[5] as usize) % 4;
-    let svg_paths = extract_anim_svg_paths(&html);
-    if frame_idx >= svg_paths.len() {
-        return Err(XmasterError::Api {
-            provider: "x-web",
-            code: "no_svg_frames",
-            message: format!(
-                "SVG frame index {frame_idx} out of range ({} frames found)",
-                svg_paths.len()
-            ),
-        });
+    if indices.iter().any(|&i| i >= key_bytes.len()) {
+        return Err(err("no_indices", "ondemand.s indices out of range for verification key".into()));
     }
 
-    // Parse the SVG path data — skip first 9 chars ("M0 0 C..." prefix), split on "C"
-    let d_attr = &svg_paths[frame_idx];
-    let d_trimmed = if d_attr.len() > 9 { &d_attr[9..] } else { d_attr };
+    // SVG animation frame selected by the key
+    let frame_idx = (key_bytes[5] as usize) % 4;
+    let svg_paths = extract_anim_svg_paths(html);
+    let d_attr = svg_paths.get(frame_idx).ok_or_else(|| {
+        err(
+            "no_svg_frames",
+            format!("SVG frame index {frame_idx} out of range ({} frames found)", svg_paths.len()),
+        )
+    })?;
+
+    // Parse the SVG path data — skip the 9-char "M0 0 C..." prefix, split on "C"
+    let d_trimmed = d_attr.get(9..).unwrap_or(d_attr);
     let arr: Vec<Vec<i64>> = d_trimmed
         .split('C')
         .filter(|s| !s.trim().is_empty())
@@ -133,46 +79,45 @@ pub async fn generate(
                 .collect()
         })
         .collect();
+    if arr.is_empty() {
+        return Err(err("no_svg_frames", "Empty SVG animation frame".into()));
+    }
 
-    // 7. Calculate animation key
     let ri = (key_bytes[row_index_idx] as usize) % 16;
     let frame_time: i64 = key_bytes_indices
         .iter()
         .map(|&i| (key_bytes[i] as i64) % 16)
         .product();
     let frame_time = js_round(frame_time as f64 / 10.0) * 10;
+    let frame_row = &arr[ri % arr.len()];
+    let animation_key = animate(frame_row, frame_time as f64 / 4096.0);
 
-    let row_idx = ri % arr.len().max(1);
-    let frame_row = &arr[row_idx];
-    let target_time = frame_time as f64 / 4096.0;
-    let animation_key = animate(frame_row, target_time);
+    Ok(TxKeys { key_bytes, animation_key })
+}
 
-    // 8. Generate transaction ID
+/// Sign one request: `method` and `path` (e.g. "/i/api/graphql/ID/CreateTweet").
+pub fn sign(keys: &TxKeys, method: &str, path: &str) -> String {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     let time_now = ((now_ms - EPOCH_OFFSET * 1000) / 1000) as u32;
-    let time_bytes: Vec<u8> = (0..4).map(|i| ((time_now >> (i * 8)) & 0xFF) as u8).collect();
 
-    let hash_input = format!("{method}!{path}!{time_now}{DEFAULT_KEYWORD}{animation_key}");
+    let hash_input = format!("{method}!{path}!{time_now}{DEFAULT_KEYWORD}{}", keys.animation_key);
     let hash_val = Sha256::digest(hash_input.as_bytes());
-    let hash_bytes: Vec<u8> = hash_val[..16].to_vec();
 
-    let rand_byte: u8 = rand::random();
-    let mut payload: Vec<u8> = Vec::new();
-    payload.extend_from_slice(&key_bytes);
-    payload.extend_from_slice(&time_bytes);
-    payload.extend_from_slice(&hash_bytes);
+    let mut payload: Vec<u8> = keys.key_bytes.clone();
+    payload.extend_from_slice(&time_now.to_le_bytes());
+    payload.extend_from_slice(&hash_val[..16]);
     payload.push(ADDITIONAL_RANDOM_NUMBER);
 
-    let mut out = vec![rand_byte];
-    for b in &payload {
-        out.push(b ^ rand_byte);
-    }
+    let rand_byte: u8 = rand::random();
+    let out: Vec<u8> = std::iter::once(rand_byte)
+        .chain(payload.iter().map(|b| b ^ rand_byte))
+        .collect();
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&out);
-    Ok(encoded.trim_end_matches('=').to_string())
+    encoded.trim_end_matches('=').to_string()
 }
 
 // --- Helpers ---

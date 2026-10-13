@@ -69,7 +69,7 @@ struct ConfigCheckResult {
     x_auth: SubsystemStatus,
     xai_auth: SubsystemStatus,
     oauth2_bookmarks: SubsystemStatus,
-    web_reply_fallback: SubsystemStatus,
+    web_session: SubsystemStatus,
     database: SubsystemStatus,
     scheduler: SubsystemStatus,
     bio_audit: BioAudit,
@@ -174,7 +174,7 @@ impl Tableable for ConfigCheckResult {
             ("X API (OAuth1)", &self.x_auth),
             ("xAI", &self.xai_auth),
             ("OAuth2 Bookmarks", &self.oauth2_bookmarks),
-            ("Web Reply Fallback", &self.web_reply_fallback),
+            ("Web session (replies/likes/follows)", &self.web_session),
             ("Database", &self.database),
             ("Scheduler", &self.scheduler),
         ];
@@ -276,7 +276,7 @@ impl Tableable for ConfigGetResult {
 /// Write a config key without emitting any output. Used internally by commands
 /// like `web-login` that produce their own output envelope.
 /// Returns the previous value if one existed (so callers can warn about overwrites).
-fn set_silent(key: &str, value: &str) -> Result<Option<String>, XmasterError> {
+pub(crate) fn set_silent(key: &str, value: &str) -> Result<Option<String>, XmasterError> {
     let path = config::config_path();
 
     // Read existing TOML or start fresh
@@ -406,14 +406,18 @@ pub async fn check(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
     let x_configured = ctx.config.has_x_auth();
     let xai_configured = ctx.config.has_xai_auth();
 
+    let mut handle = String::new();
     let x_auth = if x_configured {
         let api = XApi::new(ctx.clone());
         match api.get_me().await {
-            Ok(user) => AuthStatus {
-                configured: true,
-                healthy: true,
-                detail: format!("Authenticated as @{}", user.username),
-            },
+            Ok(user) => {
+                handle = user.username;
+                AuthStatus {
+                    configured: true,
+                    healthy: true,
+                    detail: format!("Authenticated as @{handle}"),
+                }
+            }
             Err(e) => AuthStatus {
                 configured: true,
                 healthy: false,
@@ -454,16 +458,27 @@ pub async fn check(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
         },
     };
 
-    // Web reply fallback
+    // Web session: a live, read-only request through the full web stack
     let web_configured = ctx.config.has_web_cookies();
-    let web_reply_fallback = AuthStatus {
-        configured: web_configured,
-        healthy: web_configured,
-        detail: if web_configured {
-            "Web cookies present — reply fallback active".into()
-        } else {
-            "Not configured — run: xmaster config web-login".into()
-        },
+    let web_session = if !web_configured {
+        AuthStatus {
+            configured: false,
+            healthy: false,
+            detail: "Not configured — run: xmaster config web-login".into(),
+        }
+    } else {
+        let probe = match crate::providers::web::Web::new(&ctx) {
+            Ok(web) => web.probe(if handle.is_empty() { "X" } else { &handle }).await,
+            Err(e) => Err(e),
+        };
+        AuthStatus {
+            configured: true,
+            healthy: probe.is_ok(),
+            detail: match probe {
+                Ok(_) => format!("Working (web_writes = {})", ctx.config.settings.web_writes),
+                Err(e) => format!("Failed: {e}"),
+            },
+        }
     };
 
     // Database health
@@ -513,7 +528,7 @@ pub async fn check(ctx: Arc<AppContext>, format: OutputFormat) -> Result<(), Xma
         x_auth,
         xai_auth,
         oauth2_bookmarks,
-        web_reply_fallback,
+        web_session,
         database: db_status,
         scheduler: scheduler_status,
         bio_audit,
@@ -711,7 +726,7 @@ pub async fn web_login(format: OutputFormat) -> Result<(), XmasterError> {
     let result = WebLoginResult {
         status: "success".into(),
         browser: "auto-detected".into(),
-        message: "Web cookies saved. Replies will now auto-fallback to web session if API blocks them.".into(),
+        message: "Web cookies saved. Replies, quotes, likes, reposts, bookmarks and follows now go through your browser session.".into(),
         ct0_preview: AppConfig::masked_key(&cookies.ct0),
         auth_token_preview: AppConfig::masked_key(&cookies.auth_token),
     };
