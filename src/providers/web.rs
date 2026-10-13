@@ -148,6 +148,10 @@ fn web_err(code: &'static str, message: String) -> XmasterError {
     XmasterError::Api { provider: "x-web", code, message }
 }
 
+/// Page switches xmaster itself acts on, cached beside the operations' ones.
+pub const CASTLE_CLIENT_EVENTS: &str = "responsive_web_castle_client_event_enabled";
+const KEPT_SWITCHES: &[&str] = &[CASTLE_CLIENT_EVENTS];
+
 /// Every GraphQL operation (ID + feature switches) declared in an x.com bundle.
 pub fn parse_ops(js: &str) -> HashMap<String, OpMeta> {
     let re = regex::Regex::new(
@@ -453,7 +457,10 @@ impl<'a> Web<'a> {
         let signing = signing?;
         // Keep only the switches some operation declares (the page has ~1k)
         let used: std::collections::HashSet<&String> = ops.values().flat_map(|m| &m.features).collect();
-        let switches = parse_switches(&html).into_iter().filter(|(k, _)| used.contains(k)).collect();
+        let switches = parse_switches(&html)
+            .into_iter()
+            .filter(|(k, _)| used.contains(k) || KEPT_SWITCHES.contains(&k.as_str()))
+            .collect();
         let state = State {
             fetched_at: now(),
             main_js: if main_js.is_empty() { prev.main_js } else { main_js },
@@ -1144,5 +1151,13 @@ impl Web<'_> {
         let tx = state.tx.as_ref().map(|k| transaction_id::sign(k, "POST", path)).unwrap_or_default();
         let req = self.ctx.client.post(format!("https://x.com{path}")).form(form);
         Ok(self.headers(req, &tx, referer).send().await?.status().as_u16())
+    }
+}
+
+impl Web<'_> {
+    /// A logged-in page switch from the cached session state (`None` when the
+    /// state can't be loaded or the switch isn't cached).
+    pub(crate) async fn switch(&self, name: &str) -> Option<bool> {
+        self.state(false).await.ok()?.switches.get(name).copied()
     }
 }

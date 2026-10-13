@@ -9,6 +9,7 @@ use tracing::warn;
 
 use super::oauth1::{self, OAuthClientProvider};
 use super::web::{Moderation, Web};
+use crate::intel::rails::{self, WriteIntent, WriteKind};
 
 /// Max retry attempts for transient errors (429, 5xx).
 const MAX_RETRIES: u32 = 3;
@@ -694,7 +695,30 @@ impl XApi {
 
     // -- Tweets -------------------------------------------------------------
 
+    /// Every write goes through the pacing rails (`intel::rails`).
     pub async fn create_tweet(
+        &self,
+        text: &str,
+        reply_to: Option<&str>,
+        quote_tweet_id: Option<&str>,
+        media_ids: Option<&[String]>,
+        poll_options: Option<&[String]>,
+        poll_duration: Option<u64>,
+    ) -> Result<TweetResponse, XmasterError> {
+        let kind = match (reply_to, quote_tweet_id) {
+            (Some(_), _) => WriteKind::Reply,
+            (None, Some(_)) => WriteKind::Quote,
+            _ => WriteKind::Post,
+        };
+        let mut intent = WriteIntent::new(kind).text(text);
+        if let Some(target) = reply_to.or(quote_tweet_id) {
+            intent = intent.target(target);
+        }
+        let write = self.create_tweet_unpaced(text, reply_to, quote_tweet_id, media_ids, poll_options, poll_duration);
+        rails::guard(&self.ctx, intent, write).await
+    }
+
+    async fn create_tweet_unpaced(
         &self,
         text: &str,
         reply_to: Option<&str>,
@@ -1160,6 +1184,10 @@ impl XApi {
     }
 
     pub async fn delete_tweet(&self, id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Delete).target(id), self.delete_tweet_unpaced(id)).await
+    }
+
+    async fn delete_tweet_unpaced(&self, id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(false) {
             match Web::new(&self.ctx)?.delete_tweet(id).await {
                 Ok(()) => return Ok(()),
@@ -1271,6 +1299,10 @@ impl XApi {
     // (settings.web_writes); reposts and bookmarks fall back to the API.
 
     pub async fn like_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Like).target(tweet_id), self.like_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn like_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.like(tweet_id).await;
         }
@@ -1280,6 +1312,10 @@ impl XApi {
     }
 
     pub async fn unlike_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unlike).target(tweet_id), self.unlike_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn unlike_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.unlike(tweet_id).await;
         }
@@ -1288,6 +1324,10 @@ impl XApi {
     }
 
     pub async fn retweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Repost).target(tweet_id), self.retweet_unpaced(tweet_id)).await
+    }
+
+    async fn retweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.retweet(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1299,6 +1339,10 @@ impl XApi {
     }
 
     pub async fn unretweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unrepost).target(tweet_id), self.unretweet_unpaced(tweet_id)).await
+    }
+
+    async fn unretweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.unretweet(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1309,6 +1353,10 @@ impl XApi {
     }
 
     pub async fn bookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Bookmark).target(tweet_id), self.bookmark_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn bookmark_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.bookmark(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1320,6 +1368,10 @@ impl XApi {
     }
 
     pub async fn unbookmark_tweet(&self, tweet_id: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unbookmark).target(tweet_id), self.unbookmark_tweet_unpaced(tweet_id)).await
+    }
+
+    async fn unbookmark_tweet_unpaced(&self, tweet_id: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             match Web::new(&self.ctx)?.unbookmark(tweet_id).await {
                 Ok(()) => return Ok(()),
@@ -1333,6 +1385,10 @@ impl XApi {
 
     /// Follow by handle. The web path needs no paid user-ID lookup.
     pub async fn follow_username(&self, username: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Follow).handle(username), self.follow_username_unpaced(username)).await
+    }
+
+    async fn follow_username_unpaced(&self, username: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.follow(username).await;
         }
@@ -1343,6 +1399,10 @@ impl XApi {
     }
 
     pub async fn unfollow_username(&self, username: &str) -> Result<(), XmasterError> {
+        rails::guard(&self.ctx, WriteIntent::new(WriteKind::Unfollow).handle(username), self.unfollow_username_unpaced(username)).await
+    }
+
+    async fn unfollow_username_unpaced(&self, username: &str) -> Result<(), XmasterError> {
         if self.ctx.config.web_first(true) {
             return Web::new(&self.ctx)?.unfollow(username).await;
         }
@@ -1761,6 +1821,15 @@ impl XApi {
     // -- Direct Messages ----------------------------------------------------
 
     pub async fn send_dm(
+        &self,
+        participant_id: &str,
+        text: &str,
+    ) -> Result<(), XmasterError> {
+        let intent = WriteIntent::new(WriteKind::Dm).handle(participant_id);
+        rails::guard(&self.ctx, intent, self.send_dm_unpaced(participant_id, text)).await
+    }
+
+    async fn send_dm_unpaced(
         &self,
         participant_id: &str,
         text: &str,

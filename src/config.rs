@@ -15,6 +15,9 @@ pub struct AppConfig {
     pub account: AccountConfig,
     #[serde(default)]
     pub niche: Niche,
+    /// Pacing rails for writes (`[rails]`): gaps, daily caps, view events.
+    #[serde(default)]
+    pub rails: crate::intel::rails::Budget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

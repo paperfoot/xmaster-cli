@@ -102,6 +102,12 @@ fn now_ms() -> i64 {
 /// Post one batch. Fire-and-forget: errors and timeouts are logged and dropped.
 async fn send(ctx: &AppContext, events: Vec<Value>, tweet_id: &str, handle: Option<&str>) {
     let Ok(web) = Web::new(ctx) else { return };
+    // The real client attaches a Castle token when this switch is on; we can't
+    // mint one, and token-less events would then stand out. Send nothing.
+    if web.switch(crate::providers::web::CASTLE_CLIENT_EVENTS).await != Some(false) {
+        tracing::debug!("view events skipped: Castle client-event token required or unknown");
+        return;
+    }
     let referer = match handle {
         Some(h) => format!("https://x.com/{h}/status/{tweet_id}"),
         None => format!("https://x.com/i/status/{tweet_id}"),

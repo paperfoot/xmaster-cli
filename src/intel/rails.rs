@@ -151,8 +151,8 @@ impl Default for Budget {
 
 /// The active budget. Lead: return `ctx.config.rails.clone()` once `[rails]`
 /// is in AppConfig.
-pub fn budget(_ctx: &AppContext) -> Budget {
-    Budget::default()
+pub fn budget(ctx: &AppContext) -> Budget {
+    ctx.config.rails.clone()
 }
 
 // ---------------------------------------------------------------------------
