@@ -1145,10 +1145,10 @@ impl XApi {
                 XmasterError::AuthMissing {
                     provider,
                     message: format!(
-                        "{message}. Note: X removed Likes and Follows write access from all \
-                        self-serve API tiers on 2026-04-20 — this 403 is expected on \
-                        non-Enterprise keys and no credential change will fix it. \
-                        Like/follow manually in the app instead."
+                        "{message}. Note: X removed Likes and Follows from all self-serve \
+                        API tiers on 2026-04-20, so no credential change will fix this 403. \
+                        Run `xmaster config web-login` (and keep settings.web_writes at \
+                        auto) so likes and follows go through your browser session."
                     ),
                 }
             }
