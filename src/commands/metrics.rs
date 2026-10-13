@@ -333,7 +333,7 @@ pub async fn execute_batch(
     ids: &[String],
 ) -> Result<(), XmasterError> {
     if ids.is_empty() {
-        return Err(XmasterError::Config("No tweet IDs provided".into()));
+        return Err(XmasterError::InvalidInput("give at least one post ID or URL".into()));
     }
 
     if !ctx.config.has_x_auth() {

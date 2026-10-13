@@ -503,10 +503,10 @@ fn resolve_header_image(
 fn validate_native_article_title(title: &str) -> Result<(), XmasterError> {
     let len = title.chars().count();
     if title.trim().is_empty() {
-        return Err(XmasterError::Config("Article title cannot be empty".into()));
+        return Err(XmasterError::InvalidInput("Article title cannot be empty".into()));
     }
     if len > 100 {
-        return Err(XmasterError::Config(format!(
+        return Err(XmasterError::InvalidInput(format!(
             "X Article titles are currently limited to 100 characters; got {len}"
         )));
     }
@@ -579,8 +579,8 @@ async fn build_native_content_state(
                 builder.push_media_block(caption, &media_id, &media_category);
             }
             ArticleBlock::EmbedPost(url) => {
-                let tweet_id = parse_x_post_id(url).ok_or_else(|| {
-                    XmasterError::Config(format!("Could not extract post id from {url}"))
+                let tweet_id = crate::utils::tweet_id(url).ok_or_else(|| {
+                    XmasterError::InvalidInput(format!("Could not extract post id from {url}"))
                 })?;
                 builder.push_tweet_block(&tweet_id);
             }
@@ -869,22 +869,6 @@ fn to_base36(mut n: usize) -> String {
         n /= 36;
     }
     out.iter().rev().collect()
-}
-
-fn parse_x_post_id(url: &str) -> Option<String> {
-    let marker = if url.contains("/status/") {
-        "/status/"
-    } else if url.contains("/statuses/") {
-        "/statuses/"
-    } else {
-        return None;
-    };
-    let id = url.split(marker).nth(1)?.split(['?', '/', '#']).next()?;
-    if id.chars().all(|c| c.is_ascii_digit()) {
-        Some(id.to_string())
-    } else {
-        None
-    }
 }
 
 fn parse_blocks(source: &str) -> Vec<ArticleBlock> {

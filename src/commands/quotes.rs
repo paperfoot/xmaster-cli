@@ -66,12 +66,6 @@ pub async fn execute(
         false
     };
 
-    if tweets.is_empty() {
-        return Err(XmasterError::NotFound(format!(
-            "No quote tweets found for {source_tweet_id}"
-        )));
-    }
-
     let rows: Vec<QuoteRow> = tweets
         .into_iter()
         .map(|t| {
@@ -95,6 +89,10 @@ pub async fn execute(
         cached_into_library: cached,
         quotes: rows,
     };
-    output::render(format, &result, None);
+    if result.quotes.is_empty() {
+        output::render_hint(format, &result, "No quote posts found (recent search covers the last 7 days)");
+    } else {
+        output::render(format, &result, None);
+    }
     Ok(())
 }
