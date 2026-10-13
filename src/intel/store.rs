@@ -1,9 +1,9 @@
 use chrono::{Datelike, Timelike, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
-use crate::config::config_dir;
+use super::schema;
+use crate::errors::XmasterError;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -209,240 +209,64 @@ pub fn classify_reply(text: &str) -> ReplyStyle {
 }
 
 // ---------------------------------------------------------------------------
+// Shared metric definitions
+// ---------------------------------------------------------------------------
+
+/// A reply with no reply-back after this many hours is closed as `false`.
+pub const REPLY_BACK_HOURS: i64 = 72;
+
+/// The one engagement-rate formula: (likes + reposts + replies + quotes) /
+/// impressions, zero without impressions. Bookmarks are left out; they are
+/// not a 2026 ranking signal.
+pub fn engagement_rate(likes: i64, retweets: i64, replies: i64, quotes: i64, impressions: i64) -> f64 {
+    if impressions <= 0 {
+        return 0.0;
+    }
+    (likes + retweets + replies + quotes) as f64 / impressions as f64
+}
+
+/// [`engagement_rate`] in SQL, over a `metric_snapshots` row aliased `ms`
+/// (zero when `ms` is a NULL left-join row).
+pub(crate) const ER_SQL: &str = "CASE WHEN ms.impressions > 0
+    THEN (ms.likes + ms.retweets + ms.replies + ms.quotes) * 1.0 / ms.impressions
+    ELSE 0 END";
+
+/// Joins each `posts p` row to its latest snapshot as `ms`. "Latest" is the
+/// highest id everywhere in xmaster.
+pub(crate) const LATEST_SNAPSHOT_JOIN: &str = "LEFT JOIN metric_snapshots ms
+    ON ms.id = (SELECT MAX(id) FROM metric_snapshots WHERE tweet_id = p.tweet_id)";
+
+// ---------------------------------------------------------------------------
 // IntelStore
 // ---------------------------------------------------------------------------
 
+/// The one handle on `xmaster.db`. Post and reply logging, snapshots and the
+/// discovered library live here; tracker.rs and scheduler.rs add their
+/// methods on the same connection, so a command opens the file once.
 pub struct IntelStore {
-    conn: Connection,
+    pub(super) conn: Connection,
 }
 
 impl IntelStore {
-    /// Open (or create) the learning database at `~/.config/xmaster/xmaster.db`.
-    pub fn open() -> Result<Self, rusqlite::Error> {
-        let dir = config_dir();
-        std::fs::create_dir_all(&dir).ok();
-        let db_path: PathBuf = dir.join("xmaster.db");
-        Self::open_at(&db_path)
+    /// Open `~/.config/xmaster/xmaster.db` at the current schema.
+    pub fn open() -> Result<Self, XmasterError> {
+        Ok(Self { conn: schema::open(&schema::XMASTER)? })
     }
 
-    /// Open the database at an explicit path. Used by tests to avoid the
-    /// process-wide `XMASTER_CONFIG_DIR` env var that causes race conditions
-    /// when `cargo test` runs in parallel.
-    pub fn open_at(path: &std::path::Path) -> Result<Self, rusqlite::Error> {
+    /// Open an explicit path, migrating strictly (errors surface). Tests use
+    /// this to stay clear of the process-wide `XMASTER_CONFIG_DIR`.
+    #[cfg(test)]
+    pub(crate) fn open_at(path: &std::path::Path) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "wal")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let store = Self { conn };
-        store.init_tables()?;
-        Ok(store)
+        schema::migrate(&conn, &schema::XMASTER)?;
+        Ok(Self { conn })
     }
 
-    // -- schema --------------------------------------------------------------
-
-    fn init_tables(&self) -> Result<(), rusqlite::Error> {
-        self.conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS posts (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                tweet_id        TEXT UNIQUE NOT NULL,
-                text            TEXT NOT NULL,
-                content_type    TEXT NOT NULL DEFAULT 'text',
-                char_count      INTEGER NOT NULL,
-                has_link        BOOLEAN NOT NULL DEFAULT 0,
-                has_media       BOOLEAN NOT NULL DEFAULT 0,
-                has_poll        BOOLEAN NOT NULL DEFAULT 0,
-                hashtag_count   INTEGER NOT NULL DEFAULT 0,
-                hook_text       TEXT,
-                posted_at       INTEGER NOT NULL,
-                day_of_week     INTEGER NOT NULL,
-                hour_of_day     INTEGER NOT NULL,
-                reply_to_id     TEXT,
-                quote_of_id     TEXT,
-                preflight_score REAL,
-                analysis_json   TEXT,
-                analysis_version INTEGER DEFAULT 1,
-                scheduled_post_id TEXT,
-                local_day_of_week INTEGER,
-                local_hour_of_day INTEGER,
-                tz_offset_minutes INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS metric_snapshots (
-                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                tweet_id           TEXT NOT NULL REFERENCES posts(tweet_id),
-                snapshot_at        INTEGER NOT NULL,
-                minutes_since_post INTEGER NOT NULL,
-                likes              INTEGER NOT NULL DEFAULT 0,
-                retweets           INTEGER NOT NULL DEFAULT 0,
-                replies            INTEGER NOT NULL DEFAULT 0,
-                impressions        INTEGER NOT NULL DEFAULT 0,
-                bookmarks          INTEGER NOT NULL DEFAULT 0,
-                quotes             INTEGER NOT NULL DEFAULT 0,
-                profile_clicks     INTEGER NOT NULL DEFAULT 0,
-                url_clicks         INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS engagement_actions (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                action_type      TEXT NOT NULL,
-                target_tweet_id  TEXT,
-                target_user_id   TEXT,
-                target_username  TEXT,
-                performed_at     INTEGER NOT NULL,
-                got_reply_back   BOOLEAN DEFAULT NULL,
-                target_followers INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS watchlist_accounts (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                username    TEXT UNIQUE NOT NULL,
-                user_id     TEXT,
-                topic       TEXT,
-                followers   INTEGER NOT NULL DEFAULT 0,
-                added_at    INTEGER NOT NULL
-            );
-
-            -- Add reply_tweet_id if not exists (safe for existing DBs)
-            -- SQLite doesn't support IF NOT EXISTS for ALTER, so we use a pragma check
-            CREATE TABLE IF NOT EXISTS timing_stats (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                day_of_week         INTEGER NOT NULL,
-                hour_of_day         INTEGER NOT NULL,
-                content_type        TEXT NOT NULL DEFAULT 'all',
-                avg_impressions     REAL,
-                avg_engagement_rate REAL,
-                sample_count        INTEGER NOT NULL DEFAULT 0,
-                last_updated        INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS discovered_posts (
-                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
-                tweet_id               TEXT UNIQUE NOT NULL,
-                text                   TEXT NOT NULL,
-                author_id              TEXT,
-                author_username        TEXT,
-                created_at             TEXT,
-                conversation_id        TEXT,
-                referenced_tweets_json TEXT NOT NULL DEFAULT '[]',
-                like_count             INTEGER,
-                retweet_count          INTEGER,
-                reply_count            INTEGER,
-                impression_count       INTEGER,
-                bookmark_count         INTEGER,
-                author_followers       INTEGER,
-                media_urls_json        TEXT NOT NULL DEFAULT '[]',
-                first_source           TEXT NOT NULL,
-                last_source            TEXT NOT NULL,
-                first_discovered_at    INTEGER NOT NULL,
-                last_seen_at           INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_discovered_author
-                ON discovered_posts(author_username);
-            CREATE INDEX IF NOT EXISTS idx_discovered_last_seen
-                ON discovered_posts(last_seen_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_discovered_impressions
-                ON discovered_posts(impression_count DESC);
-            ",
-        )?;
-
-        // Safe migrations: add columns if not present (transaction for atomicity)
-        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
-        let migrate_result = (|| -> Result<(), rusqlite::Error> {
-            let cols: Vec<String> = self.conn
-                .prepare("PRAGMA table_info(engagement_actions)")?
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<Result<Vec<_>, _>>()?;
-            if !cols.iter().any(|c| c == "reply_tweet_id") {
-                self.conn.execute_batch("ALTER TABLE engagement_actions ADD COLUMN reply_tweet_id TEXT;")?;
-            }
-            if !cols.iter().any(|c| c == "reply_style") {
-                self.conn.execute_batch("ALTER TABLE engagement_actions ADD COLUMN reply_style TEXT;")?;
-            }
-
-            let post_cols: Vec<String> = self.conn
-                .prepare("PRAGMA table_info(posts)")?
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<Result<Vec<_>, _>>()?;
-            if !post_cols.iter().any(|c| c == "analysis_json") {
-                self.conn.execute_batch("ALTER TABLE posts ADD COLUMN analysis_json TEXT;")?;
-            }
-            if !post_cols.iter().any(|c| c == "analysis_version") {
-                self.conn.execute_batch("ALTER TABLE posts ADD COLUMN analysis_version INTEGER DEFAULT 1;")?;
-            }
-            if !post_cols.iter().any(|c| c == "scheduled_post_id") {
-                self.conn.execute_batch("ALTER TABLE posts ADD COLUMN scheduled_post_id TEXT;")?;
-            }
-
-            // Add url_clicks to metric_snapshots if missing (legacy DBs predating the field)
-            let ms_cols: Vec<String> = self.conn
-                .prepare("PRAGMA table_info(metric_snapshots)")?
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<Result<Vec<_>, _>>()?;
-            if !ms_cols.iter().any(|c| c == "url_clicks") {
-                self.conn.execute_batch("ALTER TABLE metric_snapshots ADD COLUMN url_clicks INTEGER;")?;
-            }
-
-            // NOTE: engagement_actions.performed_at has TEXT column affinity
-            // (declared TEXT in tracker.rs original CREATE TABLE). SQLite's
-            // UPDATE ... SET col = CAST(col AS INTEGER) does NOT change the
-            // stored type when the declared column affinity is TEXT. The only
-            // real fix is DROP + CREATE TABLE with INTEGER affinity + INSERT
-            // from old. That's tracked in issue #3 and too risky for an
-            // additive migration. Queries on performed_at MUST use CAST
-            // guards until the table rebuild lands.
-            //
-            // metric_snapshots.snapshot_at was declared INTEGER in store.rs
-            // (correct affinity) so the IntelStore path stores INTEGER values.
-            // However the tracker.rs CREATE TABLE declared it differently in
-            // older versions, so existing rows may be text. The CAST in
-            // latest_snapshot_full handles this case.
-
-            Ok(())
-        })();
-        match migrate_result {
-            Ok(()) => self.conn.execute_batch("COMMIT;")?,
-            Err(e) => { self.conn.execute_batch("ROLLBACK;").ok(); return Err(e); }
-        }
-
-        // reply_outcomes view v2: extended with profile_clicks, quotes,
-        // url_clicks, snapshot_at, minutes_since_post, and target_user_id.
-        // DROP + CREATE because views hold no data. Safe on every open.
-        self.conn.execute_batch("DROP VIEW IF EXISTS reply_outcomes;")?;
-        self.conn.execute_batch(
-            "CREATE VIEW reply_outcomes AS
-             SELECT ea.id AS action_id,
-                    ea.target_tweet_id,
-                    ea.target_user_id,
-                    ea.target_username,
-                    ea.target_followers,
-                    ea.reply_tweet_id,
-                    ea.reply_style,
-                    ea.performed_at,
-                    ea.got_reply_back,
-                    ms.likes,
-                    ms.retweets,
-                    ms.replies,
-                    ms.impressions,
-                    ms.bookmarks,
-                    ms.quotes,
-                    ms.profile_clicks,
-                    ms.url_clicks,
-                    CAST(ms.snapshot_at AS INTEGER) AS snapshot_at,
-                    ms.minutes_since_post
-             FROM engagement_actions ea
-             LEFT JOIN metric_snapshots ms
-               ON ms.tweet_id = ea.reply_tweet_id
-               AND ms.id = (
-                   SELECT MAX(ms2.id) FROM metric_snapshots ms2
-                   WHERE ms2.tweet_id = ea.reply_tweet_id
-               )
-             WHERE ea.action_type = 'reply'
-               AND ea.reply_tweet_id IS NOT NULL;"
-        )?;
-
-        Ok(())
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::migrate(&conn, &schema::XMASTER).unwrap();
+        Self { conn }
     }
 
     /// Static helper: classify a reply's rhetorical style.
@@ -515,24 +339,26 @@ impl IntelStore {
         Ok(())
     }
 
-    /// Get pending replies that haven't been checked for reply-back yet.
+    /// Replies still waiting for a reply-back verdict whose next check is
+    /// due, from the last `max_age_hours`. Checks back off with age: the next
+    /// one is due once the time since the last check reaches half the reply's
+    /// age, so a reply is read about 7 times in its first 72h instead of on
+    /// every `track run`. Past [`REPLY_BACK_HOURS`] a reply is always due, for
+    /// its final check.
     pub fn get_pending_replies(&self, max_age_hours: i64) -> Result<Vec<PendingReply>, rusqlite::Error> {
-        let cutoff = Utc::now().timestamp() - (max_age_hours * 3600);
-        // CAST guards required: on DBs created by the original tracker.rs
-        // schema, performed_at has TEXT affinity, so epoch ints are STORED as
-        // text. Without the casts the cutoff comparison is always true (TEXT
-        // sorts after INTEGER in SQLite) and row.get::<i64> then fails — which
-        // silently disabled reply-back checking on legacy DBs.
+        let now = Utc::now().timestamp();
         let mut stmt = self.conn.prepare(
-            "SELECT id, reply_tweet_id, target_username,
-                    CAST(performed_at AS INTEGER) AS performed_at
+            "SELECT id, reply_tweet_id, target_username, performed_at
              FROM engagement_actions
              WHERE action_type = 'reply' AND got_reply_back IS NULL
                AND reply_tweet_id IS NOT NULL
-               AND CAST(performed_at AS INTEGER) > ?1
+               AND performed_at > ?1 - ?2 * 3600
+               AND (reply_checked_at IS NULL
+                    OR (?1 - reply_checked_at) * 2 >= ?1 - performed_at
+                    OR performed_at <= ?1 - ?3 * 3600)
              ORDER BY performed_at DESC"
         )?;
-        let rows = stmt.query_map(params![cutoff], |row| {
+        let rows = stmt.query_map(params![now, max_age_hours, REPLY_BACK_HOURS], |row| {
             Ok(PendingReply {
                 id: row.get(0)?,
                 reply_tweet_id: row.get(1)?,
@@ -543,11 +369,14 @@ impl IntelStore {
         rows.collect()
     }
 
-    /// Mark a reply as having received (or not) a reply-back.
-    pub fn set_reply_back(&self, action_id: i64, got_reply: bool) -> Result<(), rusqlite::Error> {
+    /// Record a reply-back check. `Some(verdict)` closes the reply; `None`
+    /// leaves it pending and only moves its check clock.
+    pub fn record_reply_check(&self, action_id: i64, got_reply_back: Option<bool>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE engagement_actions SET got_reply_back = ?1 WHERE id = ?2",
-            params![got_reply as i32, action_id],
+            "UPDATE engagement_actions
+             SET reply_checked_at = ?1, got_reply_back = COALESCE(?2, got_reply_back)
+             WHERE id = ?3",
+            params![Utc::now().timestamp(), got_reply_back, action_id],
         )?;
         Ok(())
     }
@@ -831,24 +660,20 @@ impl IntelStore {
         Ok(())
     }
 
-    /// Fetch the most recent metric snapshot for a tweet with all counters + timestamps.
-    /// Returns None if no snapshot exists yet for this tweet_id.
+    /// The latest snapshot (highest id, the same rule as [`LATEST_SNAPSHOT_JOIN`])
+    /// for a tweet with all counters. None before the first snapshot.
     pub fn latest_snapshot_full(
         &self,
         tweet_id: &str,
     ) -> Result<Option<FullSnapshot>, rusqlite::Error> {
-        // CAST guards: legacy DBs declare snapshot_at TEXT (see the migration
-        // note above), so epochs are stored as text — without the casts the
-        // ordering is lexicographic and row.get::<i64> fails, which silently
-        // dropped delta/velocity from every metrics call on legacy DBs.
         self.conn
             .query_row(
-                "SELECT CAST(snapshot_at AS INTEGER), minutes_since_post,
+                "SELECT snapshot_at, minutes_since_post,
                         likes, retweets, replies,
                         impressions, bookmarks, quotes, profile_clicks
                  FROM metric_snapshots
                  WHERE tweet_id = ?1
-                 ORDER BY CAST(snapshot_at AS INTEGER) DESC
+                 ORDER BY id DESC
                  LIMIT 1",
                 params![tweet_id],
                 |row| {
@@ -899,61 +724,38 @@ impl IntelStore {
 
     /// Recent posts with their latest metric snapshot.
     pub fn get_post_history(&self, limit: i64) -> Result<Vec<PostRecord>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT tweet_id, text, content_type, posted_at, preflight_score
-             FROM posts ORDER BY posted_at DESC LIMIT ?1",
-        )?;
-
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT p.tweet_id, p.text, p.content_type, p.posted_at, p.preflight_score,
+                    ms.likes, ms.retweets, ms.replies, ms.quotes, ms.impressions, ms.bookmarks
+             FROM posts p {LATEST_SNAPSHOT_JOIN}
+             ORDER BY p.posted_at DESC LIMIT ?1"
+        ))?;
         let rows = stmt.query_map(params![limit], |row| {
+            let latest_metrics = match row.get::<_, Option<i64>>(9)? {
+                None => None,
+                Some(impressions) => {
+                    let (likes, retweets, replies, quotes) =
+                        (row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?);
+                    Some(SnapshotRecord {
+                        likes,
+                        retweets,
+                        replies,
+                        impressions,
+                        bookmarks: row.get(10)?,
+                        engagement_rate: engagement_rate(likes, retweets, replies, quotes, impressions),
+                    })
+                }
+            };
             Ok(PostRecord {
                 tweet_id: row.get(0)?,
                 text: row.get(1)?,
                 content_type: row.get(2)?,
                 posted_at: row.get(3)?,
                 preflight_score: row.get(4)?,
-                latest_metrics: None, // filled below
+                latest_metrics,
             })
         })?;
-
-        let mut posts: Vec<PostRecord> = rows.collect::<Result<Vec<_>, _>>()?;
-
-        for post in &mut posts {
-            post.latest_metrics = self.latest_snapshot(&post.tweet_id)?;
-        }
-
-        Ok(posts)
-    }
-
-    fn latest_snapshot(&self, tweet_id: &str) -> Result<Option<SnapshotRecord>, rusqlite::Error> {
-        self.conn
-            .query_row(
-                "SELECT likes, retweets, replies, impressions, bookmarks
-                 FROM metric_snapshots
-                 WHERE tweet_id = ?1
-                 ORDER BY snapshot_at DESC LIMIT 1",
-                params![tweet_id],
-                |row| {
-                    let likes: i64 = row.get(0)?;
-                    let retweets: i64 = row.get(1)?;
-                    let replies: i64 = row.get(2)?;
-                    let impressions: i64 = row.get(3)?;
-                    let bookmarks: i64 = row.get(4)?;
-                    let engagement_rate = if impressions > 0 {
-                        (likes + retweets + replies) as f64 / impressions as f64
-                    } else {
-                        0.0
-                    };
-                    Ok(SnapshotRecord {
-                        likes,
-                        retweets,
-                        replies,
-                        impressions,
-                        bookmarks,
-                        engagement_rate,
-                    })
-                },
-            )
-            .optional()
+        rows.collect()
     }
 
     /// Posts in the last 1h, 6h, 24h and whether any recent post is accelerating.
@@ -1063,10 +865,6 @@ impl IntelStore {
     /// Freshness: only considers replies in the last `max_age_hours`.
     /// Excludes targets already on the watchlist.
     ///
-    /// Find reply targets that deserve promotion to watchlist based on recent reply outcomes.
-    ///
-    /// Same TEXT-affinity caveat as `rank_hot_reply_targets` — CAST guards
-    /// on `performed_at` remain until a full table rebuild migration.
     pub fn find_hot_reply_targets(
         &self,
         min_impressions: i64,
@@ -1091,7 +889,7 @@ impl IntelStore {
              WHERE ea.action_type = 'reply'
                AND ea.target_username IS NOT NULL
                AND ea.reply_tweet_id IS NOT NULL
-               AND CAST(ea.performed_at AS INTEGER) >= ?1
+               AND ea.performed_at >= ?1
                AND COALESCE(ea.target_followers, 0) >= ?2
                AND wa.username IS NULL
                AND (COALESCE(ms.impressions, 0) >= ?3
@@ -1181,13 +979,6 @@ impl IntelStore {
     /// Filters by min_samples, min_avg_impressions, min_avg_profile_clicks (HAVING).
     /// Returns rows sorted by composite score descending. Caller can re-sort.
     ///
-    /// Aggregate reply-outcome stats per target username over the last `days`.
-    ///
-    /// NOTE: `performed_at` still has TEXT affinity in production DBs (the column
-    /// was declared TEXT in the original tracker.rs CREATE TABLE and SQLite's
-    /// CAST-in-UPDATE trick doesn't fix cell types when the declared affinity
-    /// disagrees). We must keep CAST in comparisons and MAX() until a full table
-    /// rebuild migration lands.
     pub fn rank_hot_reply_targets(
         &self,
         days: i64,
@@ -1202,7 +993,7 @@ impl IntelStore {
                     AVG(COALESCE(ms.impressions, 0)) AS avg_imps,
                     AVG(COALESCE(ms.profile_clicks, 0)) AS avg_clicks,
                     AVG(CASE WHEN ea.got_reply_back = 1 THEN 1.0 ELSE 0.0 END) AS reply_back_rate,
-                    CAST(MAX(CAST(ea.performed_at AS INTEGER)) AS INTEGER) AS last_reply_at
+                    MAX(ea.performed_at) AS last_reply_at
              FROM engagement_actions ea
              LEFT JOIN metric_snapshots ms
                ON ms.tweet_id = ea.reply_tweet_id
@@ -1213,7 +1004,7 @@ impl IntelStore {
              WHERE ea.action_type = 'reply'
                AND ea.target_username IS NOT NULL
                AND ea.reply_tweet_id IS NOT NULL
-               AND CAST(ea.performed_at AS INTEGER) >= ?1
+               AND ea.performed_at >= ?1
              GROUP BY LOWER(ea.target_username)
              HAVING sample_count >= ?2
                 AND avg_imps >= ?3
@@ -1541,93 +1332,121 @@ mod tests {
         assert_eq!(pending[0].reply_tweet_id, "reply_001");
     }
 
-    /// Regression: DBs created by tracker.rs's ORIGINAL schema declare
-    /// engagement_actions.performed_at as TEXT, so epoch ints are stored as
-    /// text. get_pending_replies must CAST or it (a) never filters by cutoff
-    /// and (b) errors on row.get::<i64>, silently killing reply-back checks.
+    /// Regression for the legacy-TEXT bug family: files from early releases
+    /// declare the epoch columns TEXT and hold digit strings and ISO-8601
+    /// strings, which broke `inspire` (get_post_history), reply-back checks,
+    /// metrics deltas and `report`. Opening migrates them; every reader works.
     #[test]
-    fn pending_replies_survive_legacy_text_affinity() {
+    fn legacy_text_db_is_migrated_and_readable() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("legacy.db");
-
-        // Recreate the legacy tables BEFORE IntelStore sees the file, so
-        // CREATE IF NOT EXISTS keeps the TEXT affinity (and, for
-        // metric_snapshots, the missing url_clicks column the migration adds).
+        let now = Utc::now().timestamp();
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
-                "CREATE TABLE engagement_actions (
-                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                    action_type      TEXT NOT NULL,
-                    target_tweet_id  TEXT,
-                    target_user_id   TEXT,
-                    target_username  TEXT,
-                    performed_at     TEXT NOT NULL,
-                    got_reply_back   BOOLEAN DEFAULT NULL,
-                    target_followers INTEGER
-                );
+                "CREATE TABLE posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tweet_id TEXT UNIQUE NOT NULL, text TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'text', char_count INTEGER NOT NULL,
+                    has_link BOOLEAN NOT NULL DEFAULT 0, has_media BOOLEAN NOT NULL DEFAULT 0,
+                    has_poll BOOLEAN NOT NULL DEFAULT 0, hashtag_count INTEGER NOT NULL DEFAULT 0,
+                    hook_text TEXT, posted_at TEXT NOT NULL,
+                    day_of_week INTEGER NOT NULL, hour_of_day INTEGER NOT NULL,
+                    reply_to_id TEXT, quote_of_id TEXT, preflight_score REAL);
                 CREATE TABLE metric_snapshots (
-                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tweet_id           TEXT NOT NULL,
-                    snapshot_at        TEXT NOT NULL,
-                    minutes_since_post INTEGER NOT NULL,
-                    likes              INTEGER NOT NULL DEFAULT 0,
-                    retweets           INTEGER NOT NULL DEFAULT 0,
-                    replies            INTEGER NOT NULL DEFAULT 0,
-                    impressions        INTEGER NOT NULL DEFAULT 0,
-                    bookmarks          INTEGER NOT NULL DEFAULT 0,
-                    quotes             INTEGER NOT NULL DEFAULT 0,
-                    profile_clicks     INTEGER NOT NULL DEFAULT 0
-                );",
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tweet_id TEXT NOT NULL REFERENCES posts(tweet_id), snapshot_at TEXT NOT NULL,
+                    minutes_since_post INTEGER NOT NULL, likes INTEGER NOT NULL DEFAULT 0,
+                    retweets INTEGER NOT NULL DEFAULT 0, replies INTEGER NOT NULL DEFAULT 0,
+                    impressions INTEGER NOT NULL DEFAULT 0, bookmarks INTEGER NOT NULL DEFAULT 0,
+                    quotes INTEGER NOT NULL DEFAULT 0, profile_clicks INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE engagement_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, action_type TEXT NOT NULL,
+                    target_tweet_id TEXT, target_user_id TEXT, target_username TEXT,
+                    performed_at TEXT NOT NULL, got_reply_back BOOLEAN DEFAULT NULL,
+                    target_followers INTEGER);
+                CREATE TABLE timing_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, day_of_week INTEGER NOT NULL,
+                    hour_of_day INTEGER NOT NULL, content_type TEXT NOT NULL DEFAULT 'all',
+                    avg_impressions REAL, avg_engagement_rate REAL,
+                    sample_count INTEGER NOT NULL DEFAULT 0, last_updated TEXT NOT NULL);",
+            )
+            .unwrap();
+            let iso = chrono::DateTime::from_timestamp(now - 7200, 0).unwrap().to_rfc3339();
+            conn.execute(
+                "INSERT INTO posts (tweet_id, text, content_type, char_count, posted_at, day_of_week, hour_of_day)
+                 VALUES ('iso_post', 'standalone post body', 'text', 20, ?1, 0, 0),
+                        ('reply_post', 'reply body', 'reply', 10, ?2, 0, 0)",
+                params![iso, (now - 3600).to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO metric_snapshots (tweet_id, snapshot_at, minutes_since_post, likes, impressions)
+                 VALUES ('iso_post', ?1, 60, 3, 6000), ('iso_post', ?2, 110, 9, 9000),
+                        ('reply_post', ?2, 50, 1, 400)",
+                params![(now - 3600).to_string(), (now - 600).to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO engagement_actions (action_type, target_username, performed_at, target_followers)
+                 VALUES ('reply', 'someone', ?1, 5000)",
+                params![(now - 3600).to_string()],
             )
             .unwrap();
         }
 
         let store = IntelStore::open_at(&db_path).unwrap();
-        let style = classify_reply("Interesting — what's the mechanism?");
+        for (table, col) in [
+            ("posts", "posted_at"),
+            ("metric_snapshots", "snapshot_at"),
+            ("engagement_actions", "performed_at"),
+        ] {
+            let text_rows: i64 = store
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE typeof({col}) <> 'integer'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(text_rows, 0, "{table}.{col} still holds text");
+        }
+
+        // inspire's reader: ISO epoch parsed, latest snapshot (highest id) joined.
+        let history = store.get_post_history(10).unwrap();
+        assert_eq!(history.len(), 2);
+        let iso_post = history.iter().find(|p| p.tweet_id == "iso_post").unwrap();
+        assert_eq!(iso_post.posted_at, now - 7200);
+        let m = iso_post.latest_metrics.as_ref().unwrap();
+        assert_eq!(m.impressions, 9000);
+        assert!((m.engagement_rate - 9.0 / 9000.0).abs() < 1e-12);
+
+        // metrics deltas and the reply-back loop.
+        let snap = store.latest_snapshot_full("iso_post").unwrap().unwrap();
+        assert_eq!(snap.snapshot_at, now - 600);
         store
-            .log_reply("target_001", None, Some("testuser"), Some(5000), "reply_legacy", Some(&style))
-            .unwrap();
-
-        // Storage class really is TEXT (the legacy condition holds)...
-        let stored: String = store
             .conn
-            .query_row(
-                "SELECT typeof(performed_at) FROM engagement_actions LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .execute_batch("UPDATE engagement_actions SET reply_tweet_id = 'reply_post'")
             .unwrap();
-        assert_eq!(stored, "text");
-
-        // ...and the reply is still found and readable.
-        let pending = store.get_pending_replies(24).unwrap();
+        let pending = store.get_pending_replies(96).unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].reply_tweet_id, "reply_legacy");
+        assert_eq!(pending[0].performed_at, now - 3600);
 
-        // The cutoff actually filters: nothing is pending with a 0-hour window.
-        let none = store.get_pending_replies(0).unwrap();
-        assert!(none.is_empty());
+        // report and track readers.
+        assert_eq!(store.rank_hot_reply_targets(1, 1, 0.0, 0.0).unwrap().len(), 1);
+        assert_eq!(store.find_cross_post_candidates(5_000, 14, 5).unwrap().len(), 1);
+        let report = store.generate_report("daily").unwrap();
+        assert_eq!(report.total_posts, 2);
+        assert_eq!(report.total_impressions, 9400);
+        let status = store.tracking_status().unwrap();
+        assert_eq!(status.total, 2);
+        assert!(status.tracked_posts.iter().all(|p| p.posted_at.starts_with("20")));
 
-        // Same legacy hazard for metric_snapshots.snapshot_at (TEXT affinity):
-        // latest_snapshot_full must CAST or delta/velocity silently vanish.
+        // Writes after the migration store integers.
         store
-            .log_metric_snapshot("tweet_legacy", 5, 1, 2, 1000, 3, 0, 4, 30, None)
+            .log_metric_snapshot("reply_post", 2, 0, 0, 800, 0, 0, 1, 120, None)
             .unwrap();
-        let stored: String = store
-            .conn
-            .query_row(
-                "SELECT typeof(snapshot_at) FROM metric_snapshots LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored, "text");
-        let snap = store.latest_snapshot_full("tweet_legacy").unwrap().unwrap();
-        assert_eq!(snap.impressions, 1000);
-        assert!(snap.snapshot_at > 0);
-
-        std::mem::forget(dir);
+        assert_eq!(store.latest_snapshot_full("reply_post").unwrap().unwrap().impressions, 800);
     }
 
     #[test]
@@ -1795,7 +1614,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        store.set_reply_back(action_id, true).unwrap();
+        store.record_reply_check(action_id, Some(true)).unwrap();
 
         let promoted = store
             .find_hot_reply_targets(100, 1, 1_000, 24 * 14)
@@ -1878,7 +1697,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        store.set_reply_back(id1, true).unwrap();
+        store.record_reply_check(id1, Some(true)).unwrap();
 
         log_outgoing_reply(&store, "t2", None, "target_a", 3000, "r2");
         store
@@ -1892,7 +1711,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        store.set_reply_back(id2, false).unwrap();
+        store.record_reply_check(id2, Some(false)).unwrap();
 
         let ranked = store.rank_hot_reply_targets(7, 1, 0.0, 0.0).unwrap();
         assert_eq!(ranked.len(), 1);

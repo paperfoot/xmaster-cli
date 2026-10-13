@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
+use super::store::{IntelStore, ER_SQL, LATEST_SNAPSHOT_JOIN};
 use crate::errors::XmasterError;
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,8 @@ pub struct ContentTypeStats {
 pub struct SnapshotSummary {
     pub tweets_snapshotted: u32,
     pub errors: u32,
+    /// Posts in the window skipped because their last snapshot is still fresh.
+    pub not_due: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,126 +95,23 @@ pub struct NextPostSuggestion {
 }
 
 // ---------------------------------------------------------------------------
-// Metric snapshot data fetched from X API (used internally)
+// Tracker methods on the one xmaster.db handle
 // ---------------------------------------------------------------------------
 
-/// Full tweet metrics with a canonical engagement_rate() method.
-/// Kept public because downstream callers may build one of these up from
-/// arbitrary sources to compare / combine metrics consistently.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct TweetMetricsFull {
-    pub likes: i64,
-    pub retweets: i64,
-    pub replies: i64,
-    pub quotes: i64,
-    pub impressions: i64,
-    pub bookmarks: i64,
-    pub profile_clicks: Option<i64>,
-    pub url_clicks: Option<i64>,
-}
+/// The tracker's name for [`IntelStore`]: snapshots, timing and follower
+/// tracking are methods on the same connection.
+pub type PostTracker = IntelStore;
 
-impl TweetMetricsFull {
-    /// Canonical engagement rate: (likes + retweets + replies + quotes) / impressions.
-    /// Bookmarks excluded — not a 2026 algorithm signal.
-    pub fn engagement_rate(&self) -> f64 {
-        if self.impressions <= 0 { return 0.0; }
-        (self.likes + self.retweets + self.replies + self.quotes) as f64 / self.impressions as f64
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PostTracker — uses its own Connection to avoid needing store.rs edits
-// ---------------------------------------------------------------------------
-
-pub struct PostTracker {
-    conn: Connection,
-}
-
-impl PostTracker {
-    pub fn open() -> Result<Self, XmasterError> {
-        let conn = super::open_db("xmaster.db")?;
-
-        // Ensure required tables exist (safe on fresh install)
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS posts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tweet_id TEXT UNIQUE NOT NULL,
-                text TEXT NOT NULL,
-                content_type TEXT NOT NULL DEFAULT 'text',
-                char_count INTEGER NOT NULL DEFAULT 0,
-                has_link INTEGER NOT NULL DEFAULT 0,
-                has_media INTEGER NOT NULL DEFAULT 0,
-                has_poll INTEGER NOT NULL DEFAULT 0,
-                hashtag_count INTEGER NOT NULL DEFAULT 0,
-                hook_text TEXT,
-                posted_at INTEGER NOT NULL,
-                day_of_week INTEGER NOT NULL DEFAULT 0,
-                hour_of_day INTEGER NOT NULL DEFAULT 0,
-                reply_to_id TEXT,
-                quote_of_id TEXT,
-                preflight_score REAL
-            );
-            CREATE TABLE IF NOT EXISTS metric_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tweet_id TEXT NOT NULL,
-                snapshot_at INTEGER NOT NULL,
-                minutes_since_post INTEGER NOT NULL DEFAULT 0,
-                likes INTEGER NOT NULL DEFAULT 0,
-                retweets INTEGER NOT NULL DEFAULT 0,
-                replies INTEGER NOT NULL DEFAULT 0,
-                impressions INTEGER NOT NULL DEFAULT 0,
-                bookmarks INTEGER NOT NULL DEFAULT 0,
-                quotes INTEGER NOT NULL DEFAULT 0,
-                profile_clicks INTEGER NOT NULL DEFAULT 0,
-                url_clicks INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS account_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_at INTEGER NOT NULL,
-                followers INTEGER NOT NULL DEFAULT 0,
-                following INTEGER NOT NULL DEFAULT 0,
-                tweets INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS follower_list (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_at INTEGER NOT NULL,
-                user_id TEXT NOT NULL,
-                username TEXT NOT NULL,
-                followers INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS timing_stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                day_of_week INTEGER NOT NULL,
-                hour_of_day INTEGER NOT NULL,
-                content_type TEXT NOT NULL DEFAULT 'all',
-                avg_impressions REAL,
-                avg_engagement_rate REAL,
-                sample_count INTEGER NOT NULL DEFAULT 0,
-                last_updated INTEGER NOT NULL
-            );",
-        )
-        .map_err(|e| XmasterError::Config(format!("DB init error: {e}")))?;
-
-        // Safe migrations: add local-time columns if not present
-        super::add_column_if_missing(&conn, "posts", "local_day_of_week", "INTEGER");
-        super::add_column_if_missing(&conn, "posts", "local_hour_of_day", "INTEGER");
-        super::add_column_if_missing(&conn, "posts", "tz_offset_minutes", "INTEGER");
-        // Add url_clicks to metric_snapshots if not present
-        super::add_column_if_missing(&conn, "metric_snapshots", "url_clicks", "INTEGER");
-
-        Ok(Self { conn })
-    }
-
+impl IntelStore {
     // -- snapshot all recent posts --------------------------------------------
 
-    /// Fetch current metrics for every post within the last `hours` window in
-    /// a single batched HTTP pass via `XApi::get_posts_by_ids`, then insert a
-    /// snapshot row for each matched tweet.
+    /// Snapshot every post from the last `hours` whose snapshot is due, in
+    /// one batched read (`XApi::get_posts_by_ids`, 100 ids per call).
     ///
-    /// Previously this looped `snapshot_tweet` per post = O(n) HTTP calls. The
-    /// batch path uses one call per 100 tweets. Results are joined back to
-    /// posts by tweet_id (HashMap lookup) — never by index — because X may
-    /// omit deleted tweets or reorder the response.
+    /// Snapshots decay with age: a post is due once the time since its last
+    /// snapshot reaches a quarter of its age (always, before the first one).
+    /// A 2h-old post is re-read after 30 min, a 40h-old one after 10h, which
+    /// cuts the reads of an hourly `track run` by about 70%.
     pub async fn snapshot_all_recent(
         &self,
         ctx: &std::sync::Arc<crate::context::AppContext>,
@@ -221,49 +121,36 @@ impl PostTracker {
         let now_ts = now.timestamp();
         let cutoff = now_ts - (hours as i64 * 3600);
 
-        let mut stmt = self
+        let rows: Vec<(String, i64, Option<i64>)> = self
             .conn
             .prepare(
-                "SELECT tweet_id, posted_at FROM posts
-                 WHERE posted_at > ?1
-                 ORDER BY posted_at DESC",
-            )?;
+                "SELECT p.tweet_id, p.posted_at,
+                        (SELECT MAX(snapshot_at) FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id)
+                 FROM posts p
+                 WHERE p.posted_at > ?1
+                 ORDER BY p.posted_at DESC",
+            )?
+            .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        let in_window = rows.len() as u32;
+        let due: Vec<(String, i64)> = rows
+            .into_iter()
+            .filter(|(_, posted, last)| last.is_none_or(|last| (now_ts - last) * 4 >= now_ts - posted))
+            .map(|(id, posted, _)| (id, posted))
+            .collect();
+        let not_due = in_window - due.len() as u32;
 
-        let rows: Vec<(String, i64)> = stmt
-            .query_map(params![cutoff], |row| {
-                let tweet_id: String = row.get(0)?;
-                // Handle both INTEGER (current) and TEXT (old DB) for posted_at
-                let posted_at = row.get::<_, i64>(1).unwrap_or_else(|_| {
-                    row.get::<_, String>(1)
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0)
-                });
-                Ok((tweet_id, posted_at))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if rows.is_empty() {
-            self.update_timing_stats()?;
-            return Ok(SnapshotSummary {
-                tweets_snapshotted: 0,
-                errors: 0,
-            });
+        if due.is_empty() {
+            return Ok(SnapshotSummary { tweets_snapshotted: 0, errors: 0, not_due });
         }
 
-        let tweet_ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
-
-        // Single batched fetch via the shared XApi helper. XApi chunks into
-        // groups of 100 internally and handles the 403 public-only fallback.
+        let tweet_ids: Vec<String> = due.iter().map(|(id, _)| id.clone()).collect();
         let api = crate::providers::xapi::XApi::new(ctx.clone());
         let lookups = match api.get_posts_by_ids(&tweet_ids).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(error = %e, "batch metrics fetch failed in snapshot_all_recent");
-                return Ok(SnapshotSummary {
-                    tweets_snapshotted: 0,
-                    errors: rows.len() as u32,
-                });
+                return Ok(SnapshotSummary { tweets_snapshotted: 0, errors: due.len() as u32, not_due });
             }
         };
 
@@ -275,9 +162,9 @@ impl PostTracker {
 
         let mut snapshotted = 0u32;
         let mut errors = 0u32;
-        let snapshot_at = now_ts;
-
-        for (tweet_id, posted_at) in &rows {
+        // One transaction: the inserts and the timing_stats refresh land together.
+        let tx = self.conn.unchecked_transaction()?;
+        for (tweet_id, posted_at) in &due {
             let Some(lookup) = by_id.get(tweet_id) else {
                 tracing::warn!(
                     tweet_id = %tweet_id,
@@ -288,50 +175,43 @@ impl PostTracker {
             };
 
             let public = lookup.public_metrics.clone().unwrap_or_default();
-            // Store Some(0) when non_public_metrics was present (real zero),
-            // None only when absent (403 fallback). Distinguishing "no data"
-            // from "0 clicks" is the whole point of making this Optional.
+            // Some(0) when non_public_metrics was present (a real zero), None
+            // only when absent (the 403 public-only fallback).
             let url_clicks = lookup
                 .non_public_metrics
                 .as_ref()
                 .map(|np| np.url_link_clicks as i64);
             let non_public = lookup.non_public_metrics.clone().unwrap_or_default();
             let posted = DateTime::from_timestamp(*posted_at, 0).unwrap_or(now);
-            let minutes = (now - posted).num_minutes();
 
-            match self.conn.execute(
-                "INSERT INTO metric_snapshots
-                    (tweet_id, snapshot_at, minutes_since_post, likes, retweets, replies,
-                     impressions, bookmarks, quotes, profile_clicks, url_clicks)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![
-                    tweet_id,
-                    snapshot_at,
-                    minutes,
-                    public.like_count as i64,
-                    public.retweet_count as i64,
-                    public.reply_count as i64,
-                    public.impression_count as i64,
-                    public.bookmark_count as i64,
-                    public.quote_count as i64,
-                    non_public.user_profile_clicks as i64,
-                    url_clicks,
-                ],
+            match self.log_metric_snapshot(
+                tweet_id,
+                public.like_count as i64,
+                public.retweet_count as i64,
+                public.reply_count as i64,
+                public.impression_count as i64,
+                public.bookmark_count as i64,
+                public.quote_count as i64,
+                non_public.user_profile_clicks as i64,
+                (now - posted).num_minutes(),
+                url_clicks,
             ) {
-                Ok(_) => snapshotted += 1,
+                Ok(()) => snapshotted += 1,
                 Err(e) => {
                     tracing::warn!(tweet_id = %tweet_id, error = %e, "insert failed");
                     errors += 1;
                 }
             }
         }
-
-        // Refresh timing_stats after batch snapshot
-        self.update_timing_stats()?;
+        if snapshotted > 0 {
+            self.update_timing_stats()?;
+        }
+        tx.commit()?;
 
         Ok(SnapshotSummary {
             tweets_snapshotted: snapshotted,
             errors,
+            not_due,
         })
     }
 
@@ -341,7 +221,7 @@ impl PostTracker {
         let sql = format!(
             "SELECT {SLOT_KEY_SQL},
                     AVG(ms.impressions),
-                    {AVG_ER_SQL},
+                    AVG({ER_SQL}),
                     COUNT(DISTINCT p.tweet_id)
              FROM posts p
              JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
@@ -376,7 +256,7 @@ impl PostTracker {
         let sql = format!(
             "SELECT {SLOT_KEY_SQL},
                     AVG(ms.impressions),
-                    {AVG_ER_SQL},
+                    AVG({ER_SQL}),
                     COUNT(DISTINCT p.tweet_id)
              FROM posts p
              JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
@@ -485,18 +365,13 @@ impl PostTracker {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT p.tweet_id, p.text, p.content_type,
-                        COALESCE(ms.impressions, 0),
-                        CASE WHEN COALESCE(ms.impressions, 0) > 0
-                             THEN (COALESCE(ms.likes,0) + COALESCE(ms.retweets,0)
-                                   + COALESCE(ms.replies,0) + COALESCE(ms.quotes,0)) * 1.0
-                                  / ms.impressions
-                             ELSE 0 END AS er
-                 FROM posts p
-                 LEFT JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                   AND ms.id = (SELECT MAX(id) FROM metric_snapshots WHERE tweet_id = p.tweet_id)
-                 WHERE p.posted_at > ?1
-                 ORDER BY er DESC",
+                &format!(
+                    "SELECT p.tweet_id, p.text, p.content_type,
+                            COALESCE(ms.impressions, 0), {ER_SQL} AS er
+                     FROM posts p {LATEST_SNAPSHOT_JOIN}
+                     WHERE p.posted_at > ?1
+                     ORDER BY er DESC"
+                ),
             )?;
 
         struct PostRow {
@@ -573,18 +448,11 @@ impl PostTracker {
         let prev_avg_er: f64 = self
             .conn
             .query_row(
-                "SELECT AVG(
-                    CASE WHEN COALESCE(ms.impressions, 0) > 0
-                         THEN (COALESCE(ms.likes,0)+COALESCE(ms.retweets,0)
-                               +COALESCE(ms.replies,0)+COALESCE(ms.quotes,0))*1.0
-                              / ms.impressions
-                         ELSE 0 END
-                 )
-                 FROM posts p
-                 LEFT JOIN metric_snapshots ms ON ms.tweet_id = p.tweet_id
-                   AND ms.id = (SELECT MAX(id) FROM metric_snapshots WHERE tweet_id = p.tweet_id)
-                 WHERE p.posted_at > ?1
-                   AND p.posted_at <= ?2",
+                &format!(
+                    "SELECT AVG({ER_SQL})
+                     FROM posts p {LATEST_SNAPSHOT_JOIN}
+                     WHERE p.posted_at > ?1 AND p.posted_at <= ?2"
+                ),
                 params![prev_cutoff, cutoff],
                 |row| row.get::<_, Option<f64>>(0),
             )?
@@ -623,44 +491,28 @@ impl PostTracker {
     pub fn tracking_status(&self) -> Result<TrackStatus, XmasterError> {
         let now_ts = Utc::now().timestamp();
 
-        // CAST snapshot_at to INTEGER: older DBs (created by tracker.rs's
-        // original CREATE TABLE) may store snapshot_at as TEXT despite the
-        // current schema declaring INTEGER. See note in store.rs:405-409.
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT p.tweet_id,
-                        SUBSTR(p.text, 1, 60) AS preview,
-                        p.posted_at,
-                        (SELECT COUNT(*) FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id) AS snap_count,
-                        (SELECT CAST(MAX(ms.snapshot_at) AS INTEGER) FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id) AS last_snap,
-                        (SELECT ms.impressions FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id ORDER BY ms.id DESC LIMIT 1),
-                        (SELECT CASE WHEN ms.impressions > 0
-                                     THEN (ms.likes+ms.retweets+ms.replies+ms.quotes)*1.0 / ms.impressions
-                                     ELSE 0 END
-                         FROM metric_snapshots ms WHERE ms.tweet_id = p.tweet_id ORDER BY ms.id DESC LIMIT 1)
-                 FROM posts p
-                 ORDER BY p.posted_at DESC
-                 LIMIT 50",
-            )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT p.tweet_id, SUBSTR(p.text, 1, 60), p.posted_at,
+                    (SELECT COUNT(*) FROM metric_snapshots WHERE tweet_id = p.tweet_id),
+                    ms.snapshot_at, ms.impressions,
+                    CASE WHEN ms.id IS NULL THEN NULL ELSE {ER_SQL} END
+             FROM posts p {LATEST_SNAPSHOT_JOIN}
+             ORDER BY p.posted_at DESC
+             LIMIT 50"
+        ))?;
 
         let posts: Vec<TrackedPost> = stmt
             .query_map([], |row| {
+                let posted_at: i64 = row.get(2)?;
                 let last_snap: Option<i64> = row.get(4)?;
-                let age_mins = last_snap.map(|ts| (now_ts - ts) / 60);
-                // Handle both INTEGER (current schema) and TEXT (old DBs) for posted_at
-                let posted_str = match row.get::<_, i64>(2) {
-                    Ok(ts) => DateTime::from_timestamp(ts, 0)
-                        .map(|dt| dt.to_rfc3339())
-                        .unwrap_or_else(|| ts.to_string()),
-                    Err(_) => row.get::<_, String>(2).unwrap_or_default(),
-                };
                 Ok(TrackedPost {
                     tweet_id: row.get(0)?,
                     text_preview: row.get(1)?,
-                    posted_at: posted_str,
+                    posted_at: DateTime::from_timestamp(posted_at, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| posted_at.to_string()),
                     snapshots: row.get::<_, i64>(3)? as u32,
-                    last_snapshot_age_mins: age_mins,
+                    last_snapshot_age_mins: last_snap.map(|ts| (now_ts - ts) / 60),
                     latest_impressions: row.get(5)?,
                     latest_engagement_rate: row.get(6)?,
                 })
@@ -686,7 +538,7 @@ impl PostTracker {
                  avg_impressions, avg_engagement_rate, sample_count, last_updated)
              SELECT {SLOT_KEY_SQL}, 'all',
                     AVG(ms.impressions),
-                    {AVG_ER_SQL},
+                    AVG({ER_SQL}),
                     COUNT(DISTINCT p.tweet_id),
                     ?1
              FROM posts p
@@ -730,7 +582,7 @@ pub struct FollowerInfo {
     pub followers: i64,
 }
 
-impl PostTracker {
+impl IntelStore {
     /// Snapshot the current account stats (followers, following, tweets).
     pub fn snapshot_account(&self, followers: i64, following: i64, tweets: i64) -> Result<AccountSnapshot, XmasterError> {
         let now = Utc::now();
@@ -866,11 +718,6 @@ impl PostTracker {
 const SLOT_KEY_SQL: &str =
     "COALESCE(p.local_day_of_week, p.day_of_week), COALESCE(p.local_hour_of_day, p.hour_of_day)";
 
-/// Average engagement rate per snapshot: (likes+retweets+replies+quotes)/impressions,
-/// zero when a post has no impressions. Bookmarks excluded — not a 2026 signal.
-const AVG_ER_SQL: &str = "AVG(CASE WHEN ms.impressions > 0
-         THEN (ms.likes + ms.retweets + ms.replies + ms.quotes) * 1.0
-              / ms.impressions ELSE 0 END)";
 
 /// Row mapper for queries selecting: slot key (2 cols), avg impressions,
 /// avg engagement rate, distinct post count — in that order.
@@ -916,6 +763,7 @@ impl Tableable for SnapshotSummary {
             &self.tweets_snapshotted.to_string(),
         ]);
         table.add_row(vec!["Errors", &self.errors.to_string()]);
+        table.add_row(vec!["Not Due (fresh snapshot)", &self.not_due.to_string()]);
         table
     }
 }
