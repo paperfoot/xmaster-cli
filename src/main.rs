@@ -58,11 +58,14 @@ async fn main() {
     };
 
     let format = OutputFormat::detect_full(cli.json, cli.csv);
+    if cli.pretty {
+        output::set_pretty(true);
+    }
 
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
-            output::render_error(format, e.error_code(), &e.to_string(), &e.suggestion());
+            output::render_failure(format, &e);
             std::process::exit(e.exit_code());
         }
     };
@@ -70,7 +73,7 @@ async fn main() {
     let ctx = match AppContext::new(config) {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            output::render_error(format, e.error_code(), &e.to_string(), &e.suggestion());
+            output::render_failure(format, &e);
             std::process::exit(e.exit_code());
         }
     };
@@ -78,7 +81,7 @@ async fn main() {
     let result = commands::dispatch(ctx.clone(), &cli, format).await;
 
     if let Err(e) = result {
-        output::render_error(format, e.error_code(), &e.to_string(), &e.suggestion());
+        output::render_failure(format, &e);
         std::process::exit(e.exit_code());
     }
 

@@ -85,7 +85,6 @@ pub fn render_error(format: OutputFormat, code: &str, message: &str, suggestion:
 
 /// Render an `XmasterError` with its code, suggestion, `retryable` and
 /// `retry_after_secs`. Pair with `std::process::exit(err.exit_code())`.
-#[allow(dead_code)]
 pub fn render_failure(format: OutputFormat, err: &XmasterError) {
     let message = err.to_string();
     let suggestion = err.suggestion();

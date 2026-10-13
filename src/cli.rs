@@ -18,6 +18,10 @@ pub struct Cli {
     /// Output as CSV (list commands: timeline, search, replies, metrics, ...)
     #[arg(long, global = true)]
     pub csv: bool,
+
+    /// Pretty-print JSON (compact by default when piped, to save agent tokens)
+    #[arg(long, global = true)]
+    pub pretty: bool,
 }
 
 #[derive(Subcommand)]

@@ -8,7 +8,6 @@ static PRETTY: AtomicU8 = AtomicU8::new(0);
 
 /// Force pretty (`true`) or compact (`false`) JSON, e.g. from a `--pretty` flag.
 /// Without it, `XMASTER_PRETTY=1|0` decides, then whether the stream is a terminal.
-#[allow(dead_code)]
 pub fn set_pretty(on: bool) {
     PRETTY.store(if on { 1 } else { 2 }, Ordering::Relaxed);
 }
