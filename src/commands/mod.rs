@@ -31,6 +31,7 @@ pub mod quotes;
 pub mod amplifiers;
 pub mod volume;
 pub mod article;
+pub mod conversation;
 
 use crate::cli::{ArticleCommands, Cli, Commands, ConfigCommands, DmCommands, EngageCommands, WatchlistCommands, ListCommands, TrackCommands, ReportCommands, SuggestCommands, ScheduleCommands, BookmarkCommands, SkillCommands};
 use crate::context::AppContext;
@@ -75,6 +76,8 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::HideReply { .. } => "hide-reply",
         Commands::UnhideReply { .. } => "unhide-reply",
         Commands::Read { .. } => "read",
+        Commands::Conversation { .. } => "conversation",
+        Commands::Quote { .. } => "quote",
         Commands::Replies { .. } => "replies",
         Commands::Likers { .. } => "likers",
         Commands::Retweeters { .. } => "retweeters",
@@ -187,8 +190,16 @@ pub async fn dispatch(
     check_command_access(cmd_name)?;
 
     match &cli.command {
-        Commands::Post { text, reply_to, quote, media, poll, poll_duration } => {
-            post::execute(ctx, format, text, reply_to.as_deref(), quote.as_deref(), media, poll.as_deref(), *poll_duration).await
+        Commands::Post { text, reply_to, quote, media, poll, poll_duration, dry_run } => {
+            let draft = post::Draft {
+                text,
+                reply_to: reply_to.as_deref(),
+                quote: quote.as_deref(),
+                media,
+                poll: poll.as_deref(),
+                poll_duration: *poll_duration,
+            };
+            post::execute(ctx, format, draft, *dry_run).await
         }
         Commands::Delete { id } => engage::delete(ctx, format, id).await,
         Commands::Like { id } => engage::like(ctx, format, id).await,
@@ -268,7 +279,7 @@ pub async fn dispatch(
                 engage_recommend::swarm(ctx, format, id, *min_followers, *max_followers, *count).await
             }
         },
-        Commands::Update { check } => update::execute(*check).await,
+        Commands::Update { check } => update::execute(format, *check).await,
         Commands::Star => {
             crate::star_nudge::open_star_page();
             Ok(())
@@ -322,8 +333,13 @@ pub async fn dispatch(
                 article::publish(ctx, format, article_id).await
             }
         },
-        Commands::Reply { id, text, media } => {
-            post::execute(ctx, format, text, Some(id.as_str()), None, media, None, 1440).await
+        Commands::Reply { id, text, media, dry_run } => {
+            let draft = post::Draft { text, reply_to: Some(id), quote: None, media, poll: None, poll_duration: 1440 };
+            post::execute(ctx, format, draft, *dry_run).await
+        }
+        Commands::Quote { id, text, media, dry_run } => {
+            let draft = post::Draft { text, reply_to: None, quote: Some(id), media, poll: None, poll_duration: 1440 };
+            post::execute(ctx, format, draft, *dry_run).await
         }
         Commands::Metrics { ids } => metrics::execute_batch(ctx, format, ids).await,
         Commands::Lists { action } => match action {
@@ -348,6 +364,7 @@ pub async fn dispatch(
         Commands::HideReply { id } => moderation::hide_reply(ctx, format, id).await,
         Commands::UnhideReply { id } => moderation::unhide_reply(ctx, format, id).await,
         Commands::Read { id } => read_post::execute(ctx, format, id).await,
+        Commands::Conversation { id, count } => conversation::execute(ctx, format, id, *count).await,
         Commands::Replies { id, count, all } => replies::execute(ctx, format, id, *count, *all).await,
         Commands::Likers { id, count } => tweet_engagement::likers(ctx, format, id, *count).await,
         Commands::Retweeters { id, count } => tweet_engagement::retweeters(ctx, format, id, *count).await,

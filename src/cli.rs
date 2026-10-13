@@ -45,6 +45,9 @@ pub enum Commands {
         /// Poll duration in minutes (default 1440 = 24h)
         #[arg(long, default_value = "1440")]
         poll_duration: u64,
+        /// Check the draft and show the route and cost; post nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Delete a post
@@ -59,6 +62,17 @@ pub enum Commands {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
         id: String,
+    },
+
+    /// A post in context: its parent chain, the post, and its top replies (one call)
+    #[command(visible_alias = "convo")]
+    Conversation {
+        /// Post ID or URL
+        #[arg(value_parser = post_id)]
+        id: String,
+        /// Max replies to include (0 for none)
+        #[arg(long, short, alias = "limit", default_value = "10")]
+        count: usize,
     },
 
     /// Like a post
@@ -76,6 +90,7 @@ pub enum Commands {
     },
 
     /// Repost a post
+    #[command(visible_alias = "repost")]
     Retweet {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
@@ -83,6 +98,7 @@ pub enum Commands {
     },
 
     /// Undo a repost
+    #[command(visible_alias = "unrepost")]
     Unretweet {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
@@ -270,6 +286,24 @@ pub enum Commands {
         /// Media file paths
         #[arg(long, num_args = 1..=4)]
         media: Vec<String>,
+        /// Check the draft and show the route and cost; post nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Quote a post (shorthand for post --quote)
+    Quote {
+        /// Post ID or URL to quote
+        #[arg(value_parser = post_id)]
+        id: String,
+        /// Your text above the quoted post
+        text: String,
+        /// Media file paths
+        #[arg(long, num_args = 1..=4)]
+        media: Vec<String>,
+        /// Check the draft and show the route and cost; post nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Get post engagement metrics
@@ -324,6 +358,7 @@ pub enum Commands {
     },
 
     /// List users who reposted a post
+    #[command(visible_alias = "reposters")]
     Retweeters {
         /// Post ID or URL
         #[arg(value_parser = post_id)]
@@ -982,6 +1017,14 @@ mod tests {
         let cli = parse(&["user", "https://x.com/sama"]).unwrap();
         assert!(matches!(cli.command, Commands::User { ref username } if username == "sama"));
         assert!(parse(&["follow", "not a handle"]).is_err());
+    }
+
+    #[test]
+    fn x_terms_are_aliases() {
+        assert!(matches!(parse(&["repost", "1"]).unwrap().command, Commands::Retweet { .. }));
+        assert!(matches!(parse(&["unrepost", "1"]).unwrap().command, Commands::Unretweet { .. }));
+        assert!(matches!(parse(&["reposters", "1"]).unwrap().command, Commands::Retweeters { .. }));
+        assert!(matches!(parse(&["convo", "1"]).unwrap().command, Commands::Conversation { count: 10, .. }));
     }
 
     #[test]

@@ -430,3 +430,117 @@ fn analyze_with_jev_disabled_skips_it() {
         .success()
         .stdout(predicate::str::contains("\"jev\"").not());
 }
+
+// ─── Agent conveniences (v1.9) ──────────────────────────────────
+
+/// An empty config dir, JEV off: no keys, no cookies, no network.
+fn offline(dir: &tempfile::TempDir) -> Command {
+    let mut cmd = xmaster();
+    cmd.env("XMASTER_CONFIG_DIR", dir.path())
+        .env("XMASTER_SETTINGS__DISABLE_JEV", "true")
+        .env_remove("TYPESAFE_API_KEY");
+    cmd
+}
+
+fn json_of(out: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(out).expect("stdout is one JSON envelope")
+}
+
+#[test]
+fn malformed_ids_and_handles_exit_3_before_any_call() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["read", "notanid"][..],
+        &["like", "https://example.com/a/status/1"],
+        &["reply", "abc", "hi"],
+        &["conversation", "notanid"],
+        &["metrics", "123", "nope"],
+        &["follow", "not a handle"],
+        &["timeline", "--sort", "vibes"],
+    ] {
+        let out = offline(&dir).arg("--json").args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}");
+        let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["code"], "bad_input", "{args:?}");
+    }
+}
+
+#[test]
+fn x_term_aliases_are_listed_and_parse() {
+    xmaster()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repost"))
+        .stdout(predicate::str::contains("conversation"))
+        .stdout(predicate::str::contains("quote"));
+    for cmd in ["repost", "unrepost", "reposters", "quote", "convo", "conversation"] {
+        xmaster().args([cmd, "--help"]).assert().success();
+    }
+}
+
+#[test]
+fn conversation_takes_a_post_url_and_count() {
+    xmaster()
+        .args(["conversation", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--count"));
+}
+
+#[test]
+fn post_dry_run_reports_route_and_cost_without_posting() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = offline(&dir)
+        .args(["post", "Rapamycin extended median lifespan 9-14% in mice", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let d = &json_of(&out.stdout)["data"];
+    assert_eq!(d["dry_run"], true);
+    assert_eq!(d["kind"], "post");
+    // No web cookies: a plain post goes to the paid API.
+    assert_eq!(d["route"], "api");
+    assert_eq!(d["est_cost_usd"], 0.015);
+    assert!(d["preflight_score"].as_u64().is_some());
+
+    let out = offline(&dir)
+        .args(["post", "Read it here: example.com/paper", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(json_of(&out.stdout)["data"]["est_cost_usd"], 0.2);
+}
+
+#[test]
+fn reply_and_quote_dry_runs_name_their_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = offline(&dir)
+        .args(["reply", "https://x.com/a/status/1234567890", "Which cohort was that?", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let d = &json_of(&out.stdout)["data"];
+    assert_eq!(d["kind"], "reply");
+    assert_eq!(d["reply_to"], "1234567890");
+
+    let out = offline(&dir)
+        .args(["quote", "1234567890", "This is the key figure", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    let d = &json_of(&out.stdout)["data"];
+    assert_eq!(d["kind"], "quote");
+    assert_eq!(d["quote"], "1234567890");
+}
+
+#[test]
+fn dry_run_rejects_missing_media_and_bad_polls() {
+    let dir = tempfile::tempdir().unwrap();
+    offline(&dir)
+        .args(["post", "hi", "--media", "/nonexistent/x.png", "--dry-run"])
+        .assert()
+        .code(3);
+    offline(&dir)
+        .args(["post", "pick one", "--poll", "only-one", "--dry-run"])
+        .assert()
+        .code(3);
+}
