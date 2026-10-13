@@ -36,7 +36,6 @@ tarpaulin-report.html
 # Team runs (CI artifacts)
 .team-runs/
 .claude/
-.team-runs/
 docs/x-algorithm-analysis/*.tar.gz
 thoughts/
 
@@ -45,3 +44,8 @@ thoughts/
 
 # Background task harness markers
 .task-incomplete
+
+# Agent scratch (handoffs, audits, editor caches)
+.claude/tsc-cache/
+handoff.md
+.research/
