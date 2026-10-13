@@ -1,7 +1,9 @@
 use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
+use crate::intel::judge::{self, Triage};
 use crate::output::{self, OutputFormat, Tableable};
+use crate::providers::jev::{self, Jev};
 use crate::providers::xapi::{TweetData, TweetLookup, XApi};
 use serde::Serialize;
 use std::sync::Arc;
@@ -13,6 +15,8 @@ struct EngageInboxResult {
     root_metrics: Option<RootMetrics>,
     totals: InboxTotals,
     heuristic: EngagementHeuristic,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    triage: Option<InboxTriage>,
     recommendations: Vec<InboxRecommendation>,
     quote_threads: Vec<QuoteThread>,
     suggested_next_commands: Vec<String>,
@@ -39,6 +43,19 @@ struct InboxTotals {
     quote_tweets_checked: usize,
     quote_replies_checked: usize,
     recommended_actions: usize,
+}
+
+/// JEV triage: `recommendations` keeps only what needs a reply (plus any
+/// item JEV could not judge); likes are listed by id, the rest counted.
+#[derive(Debug, Serialize)]
+struct InboxTriage {
+    model: &'static str,
+    reply: usize,
+    like: usize,
+    ignore: usize,
+    spam: usize,
+    unjudged: usize,
+    like_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +88,7 @@ struct QuoteThread {
     impressions: u64,
     text: String,
     replies_checked: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     replies: Vec<QuoteReply>,
 }
 
@@ -127,7 +145,7 @@ pub async fn execute(
     quote_reply_count: usize,
 ) -> Result<(), XmasterError> {
     let source_tweet_id = parse_tweet_id(id);
-    let api = XApi::new(ctx);
+    let api = XApi::new(ctx.clone());
     let mut notes = vec![
         "Native reposts do not have their own comments; this checks quote tweets/reposts-with-comment and replies under those quote tweets.".into(),
         "Recommendation priorities are read-only heuristics. The command never posts or drafts replies.".into(),
@@ -165,10 +183,14 @@ pub async fn execute(
         }
     };
 
+    // Each recommendation's parent text, for JEV: the source post, or the
+    // quote a quote-comment sits under. Empty = the source post.
     let mut recommendations = Vec::new();
+    let mut parents: Vec<String> = Vec::new();
     for reply in &direct_replies {
         if !is_self_authored(reply, self_username.as_deref()) {
             recommendations.push(recommend_direct_reply(reply));
+            parents.push(String::new());
         }
     }
 
@@ -177,6 +199,7 @@ pub async fn execute(
     for quote in quotes {
         if !is_self_authored(&quote, self_username.as_deref()) {
             recommendations.push(recommend_quote(&quote));
+            parents.push(String::new());
         }
 
         let quote_replies = if quote_reply_count == 0 {
@@ -198,17 +221,61 @@ pub async fn execute(
         for reply in &quote_replies {
             if !is_self_authored(reply, self_username.as_deref()) {
                 recommendations.push(recommend_quote_reply(reply, &quote));
+                parents.push(quote.text.clone());
             }
         }
 
         quote_threads.push(build_quote_thread(quote, quote_replies));
     }
 
-    recommendations.sort_by(|a, b| {
+    let mut paired: Vec<(InboxRecommendation, String)> = recommendations.into_iter().zip(parents).collect();
+    paired.sort_by(|(a, _), (b, _)| {
         b.priority
             .cmp(&a.priority)
             .then_with(|| b.likes.cmp(&a.likes))
             .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+
+    let triage = jev_triage(&ctx, &source_tweet_id, &paired).await;
+    let mut recommendations = Vec::new();
+    let mut summary = InboxTriage {
+        model: jev::MODEL,
+        reply: 0,
+        like: 0,
+        ignore: 0,
+        spam: 0,
+        unjudged: 0,
+        like_ids: Vec::new(),
+    };
+    let verdicts = triage.as_ref().map(|v| v.iter().copied()).into_iter().flatten().chain(std::iter::repeat(None));
+    for ((rec, _), verdict) in paired.into_iter().zip(verdicts) {
+        match verdict {
+            Some(Triage::Reply) => {
+                summary.reply += 1;
+                recommendations.push(rec);
+            }
+            Some(Triage::Like) => {
+                summary.like += 1;
+                summary.like_ids.push(rec.target_id);
+            }
+            Some(Triage::Ignore) => summary.ignore += 1,
+            Some(Triage::Spam) => summary.spam += 1,
+            None => {
+                summary.unjudged += 1;
+                recommendations.push(rec);
+            }
+        }
+    }
+    let triage = triage.map(|_| {
+        // Quote-comments were triaged above; don't repeat them here.
+        for thread in &mut quote_threads {
+            thread.replies.clear();
+        }
+        notes.push(format!(
+            "JEV triage: recommendations lists the {} that need a reply; like_ids has {} to like; {} ignored, {} spam hidden.",
+            summary.reply, summary.like, summary.ignore, summary.spam
+        ));
+        summary
     });
 
     let totals = InboxTotals {
@@ -229,6 +296,7 @@ pub async fn execute(
         root_metrics,
         totals,
         heuristic: author_reply_back_heuristic(),
+        triage,
         recommendations,
         quote_threads,
         suggested_next_commands,
@@ -237,6 +305,33 @@ pub async fn execute(
 
     output::render(format, &result, None);
     Ok(())
+}
+
+/// JEV verdicts for the first `judge::MAX_ITEMS` recommendations, judged
+/// as the owner of the source post. `None` keeps the heuristic list.
+async fn jev_triage(
+    ctx: &AppContext,
+    source_tweet_id: &str,
+    paired: &[(InboxRecommendation, String)],
+) -> Option<Vec<Option<Triage>>> {
+    let jev = Jev::from_ctx(ctx)?;
+    let owner = judge::owner(&ctx.config)?;
+    if paired.is_empty() {
+        return None;
+    }
+    let root = crate::providers::fxtwitter::fetch_post(source_tweet_id)
+        .await
+        .map(|(post, _)| post.text)
+        .unwrap_or_default();
+    let items: Vec<(&str, &str, &str)> = paired
+        .iter()
+        .take(judge::MAX_ITEMS)
+        .map(|(rec, parent)| {
+            let parent = if parent.is_empty() { root.as_str() } else { parent.as_str() };
+            (parent, rec.author.as_str(), rec.text.as_str())
+        })
+        .collect();
+    judge::triage(&jev, &owner, &items).await
 }
 
 async fn fetch_root_metrics(
@@ -392,5 +487,20 @@ fn author_reply_back_heuristic() -> EngagementHeuristic {
     EngagementHeuristic {
         name: "author_reply_back",
         rationale: "Replying back to people who replied to you builds a reciprocal engagement loop and accumulates dwell + follow_author signals. Priority ordering, not a fixed weight.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inbox_is_untriaged_without_jev() {
+        let mut config = crate::config::AppConfig::default();
+        config.settings.disable_jev = true;
+        let ctx = AppContext::new(config).unwrap();
+        let reply: TweetData = serde_json::from_value(serde_json::json!({"id": "1", "text": "Nice?"})).unwrap();
+        let paired = vec![(recommend_direct_reply(&reply), String::new())];
+        assert!(jev_triage(&ctx, "9", &paired).await.is_none());
     }
 }

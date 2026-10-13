@@ -1,4 +1,5 @@
 pub mod bookmarks;
+pub mod judge;
 pub mod store;
 pub mod preflight;
 pub mod scheduler;

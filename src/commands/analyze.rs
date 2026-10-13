@@ -1,7 +1,9 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
+use crate::intel::judge::{self, DraftFlag};
 use crate::intel::preflight::{self, AnalyzeContext, PostMode, PreflightResult, Severity};
 use crate::output::{self, OutputFormat, Tableable};
+use crate::providers::jev::{self, Jev};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -9,8 +11,53 @@ use std::sync::Arc;
 struct AnalyzeDisplay {
     #[serde(flatten)]
     result: PreflightResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jev: Option<JevReview>,
     #[serde(skip)]
     premium: bool,
+}
+
+/// JEV's second opinion, beside the rule score. `reach` (0-1) is an extra
+/// signal, not part of `score`; `flags` are advisory and never block.
+#[derive(Serialize)]
+pub(crate) struct JevReview {
+    model: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reach: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) flags: Vec<DraftFlag>,
+}
+
+/// Draft flags (and, when `with_reach`, the reach signal) for `text`,
+/// judged against the post at `target_id` when given. One round of
+/// concurrent requests; `None` without JEV or when both fail.
+pub(crate) async fn jev_review(
+    app: &AppContext,
+    text: &str,
+    target_id: Option<&str>,
+    with_reach: bool,
+) -> Option<JevReview> {
+    let jev = Jev::from_ctx(app)?;
+    let guard = async {
+        let target = match target_id {
+            Some(id) => crate::providers::fxtwitter::fetch_post(id).await.map(|(post, _)| post.text),
+            None => None,
+        };
+        judge::guard_draft(&jev, text, target.as_deref()).await
+    };
+    let reach = async {
+        if with_reach {
+            judge::reach(&jev, text).await
+        } else {
+            None
+        }
+    };
+    let (flags, reach) = tokio::join!(guard, reach);
+    (flags.is_some() || reach.is_some()).then(|| JevReview {
+        model: jev::MODEL,
+        reach,
+        flags: flags.unwrap_or_default(),
+    })
 }
 
 impl Tableable for AnalyzeDisplay {
@@ -120,6 +167,22 @@ impl Tableable for AnalyzeDisplay {
             ]);
         }
 
+        if let Some(jev) = &self.jev {
+            table.add_row(vec![
+                Cell::new("").add_attribute(Attribute::Dim),
+                Cell::new("--- JEV ---").add_attribute(Attribute::Dim),
+            ]);
+            if let Some(reach) = jev.reach {
+                table.add_row(vec![Cell::new("Reach signal"), Cell::new(format!("{:.0}/100", reach * 100.0))]);
+            }
+            for flag in &jev.flags {
+                table.add_row(vec![
+                    Cell::new(format!("[{}]", flag.code)).fg(Color::Yellow),
+                    Cell::new(flag.fix),
+                ]);
+            }
+        }
+
         // Issues section
         if !self.result.issues.is_empty() {
             table.add_row(vec![
@@ -201,7 +264,9 @@ pub async fn execute(
         ..Default::default()
     };
     let result = preflight::analyze(&resolved_text, &ctx);
-    let display = AnalyzeDisplay { result, premium };
+    let target_id = reply_to.map(crate::cli::parse_tweet_id);
+    let jev = jev_review(&app, &resolved_text, target_id.as_deref(), true).await;
+    let display = AnalyzeDisplay { result, jev, premium };
     output::render(format, &display, None);
     Ok(())
 }

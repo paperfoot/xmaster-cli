@@ -1,7 +1,9 @@
 use crate::context::AppContext;
 use crate::errors::XmasterError;
 use crate::intel::store::IntelStore;
+use crate::intel::judge;
 use crate::output::{self, OutputFormat, Tableable};
+use crate::providers::jev::{self, Jev};
 use crate::providers::xai::XaiSearch;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -29,13 +31,6 @@ pub fn default_target_band(my_followers: u64) -> (u64, u64) {
     let min = (my_followers * 2).clamp(500, 5_000);
     let max = (my_followers * 20).clamp(5_000, 100_000);
     (min, max)
-}
-
-/// Grox spam-classifier bucket penalty: reply chains under sub-500-follower
-/// accounts get extra spam scrutiny (grox/tasks/task_spam_detection.py buckets
-/// by ancestor follower count), so sub-500 targets are deprioritized.
-fn grox_small_account_penalty(followers: u64) -> f64 {
-    if followers < 500 { 0.15 } else { 0.0 }
 }
 
 fn compute_size_fit(target_followers: u64, my_followers: u64) -> f64 {
@@ -243,19 +238,16 @@ pub async fn recommend(
             let size_fit = compute_size_fit(c.followers, my_followers);
             let relevance = c.relevance;
 
-            let small_account_penalty = grox_small_account_penalty(c.followers);
-
-            // Opportunity scoring: reply_roi proxy + size_fit + reciprocity + reach + relevance,
-            // minus small-account-bucket penalty.
-            let score = 0.25 * reciprocity + 0.25 * size_fit + 0.20 * reach + 0.20 * relevance + 0.10
-                - small_account_penalty;
+            // Opportunity scoring: reply_roi proxy + size_fit + reciprocity + reach + relevance.
+            // (No small-account penalty: Grox's follower buckets only label
+            // metrics, they are not scrutiny tiers.)
+            let score = 0.25 * reciprocity + 0.25 * size_fit + 0.20 * reach + 0.20 * relevance + 0.10;
 
             let mut reasons = Vec::new();
             if reciprocity > 0.3 { reasons.push(format!("replied back {:.0}% of the time", reciprocity * 100.0)); }
             if size_fit > 0.8 { reasons.push("in your ideal follower band".into()); }
             if reach > 0.6 { reasons.push("large audience amplifies your reply".into()); }
             if relevance > 0.5 { reasons.push("topically relevant".into()); }
-            if small_account_penalty > 0.0 { reasons.push("small account (<500 followers) — Grox spam bucket risk".into()); }
 
             RecommendCandidate {
                 rank: 0,
@@ -515,9 +507,24 @@ pub struct FeedPost {
     pub reply_command: String,
     #[serde(skip_serializing_if = "is_zero_f32")]
     pub opportunity_score: f32,
+    /// JEV pick score (0-1) when JEV ranked the feed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jev_score: Option<f32>,
+    /// Why JEV picked it, built from its judgments.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub why: String,
 }
 
 fn is_zero_f32(v: &f32) -> bool { *v == 0.0 }
+
+/// How JEV ranked the feed: posts judged, and how many were dropped as
+/// off-niche, promo, nothing to add, or unjudged.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedJev {
+    pub model: &'static str,
+    pub judged: usize,
+    pub dropped: usize,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FeedResult {
@@ -528,6 +535,8 @@ pub struct FeedResult {
     pub posts: Vec<FeedPost>,
     pub total_found: usize,
     pub filtered_by_followers: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jev: Option<FeedJev>,
 }
 
 impl Tableable for FeedResult {
@@ -594,9 +603,11 @@ pub async fn feed(
     cli_topics: &[String],
     min_followers: u64,
     max_age_mins: u64,
-    count: usize,
+    count: Option<usize>,
 ) -> Result<(), XmasterError> {
     let api = crate::providers::xapi::XApi::new(ctx.clone());
+    // Search budget and heuristic page size; JEV mode returns its best 5.
+    let budget = count.unwrap_or(10);
 
     // Resolve topics: CLI args → split commas → fallback to niche.topics.
     // Empty result is not fatal — watchlist-only mode still returns posts
@@ -676,10 +687,10 @@ pub async fn feed(
         since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     };
 
-    let search_tweets = if watchlist_tweets.len() < count && !topics.is_empty() {
+    let search_tweets = if watchlist_tweets.len() < budget && !topics.is_empty() {
         // Budget per topic: split `count*5` evenly, min 10 per topic so even
         // a 5-topic fanout with count=10 still pulls 10/topic not 10/total.
-        let per_topic_cap = (count * 5 / topics.len()).clamp(10, 100);
+        let per_topic_cap = (budget * 5 / topics.len()).clamp(10, 100);
         let mut collected = Vec::new();
         for topic in &topics {
             let tweets = api
@@ -755,6 +766,8 @@ pub async fn feed(
             likes: metrics.map(|m| m.like_count).unwrap_or(0),
             replies: metrics.map(|m| m.reply_count).unwrap_or(0),
             opportunity_score: 0.0, // computed after collection
+            jev_score: None,
+            why: String::new(),
         });
     }
 
@@ -767,9 +780,7 @@ pub async fn feed(
         let freshness = 1.0 - (p.age_minutes as f64 / max_age_mins as f64).min(1.0);
         let size_fit = compute_size_fit(p.author_followers, my_followers);
         let openness = if p.likes > 0 { (p.replies as f64 / p.likes as f64).min(1.0) } else { 0.5 };
-        let small_account_penalty = grox_small_account_penalty(p.author_followers);
-        p.opportunity_score = (0.45 * freshness + 0.25 * size_fit + 0.20 * openness + 0.10
-            - small_account_penalty) as f32;
+        p.opportunity_score = (0.45 * freshness + 0.25 * size_fit + 0.20 * openness + 0.10) as f32;
     }
     // Primary: opportunity score, bucketed to 2 decimals so a marginally-higher
     // score can't bury a much fresher post. Secondary: age — fresher wins, because
@@ -779,7 +790,10 @@ pub async fn feed(
         let sb = (b.opportunity_score * 100.0).round() as i64;
         sb.cmp(&sa).then(a.age_minutes.cmp(&b.age_minutes))
     });
-    posts.truncate(count);
+    let jev = jev_pick(&ctx, &mut posts, count.unwrap_or(5)).await;
+    if jev.is_none() {
+        posts.truncate(budget);
+    }
 
     // Auto-add high-value accounts from search to watchlist (silent, never fails).
     // The topic label is the comma-joined list of all resolved topics from this
@@ -805,10 +819,41 @@ pub async fn feed(
         posts,
         total_found,
         filtered_by_followers: filtered_count,
+        jev,
     };
 
     output::render(format, &result, None);
     Ok(())
+}
+
+/// Keep the posts JEV judges worth a reply, best first, at most `keep`.
+/// `None` leaves `posts` untouched: no key, no owner profile, or JEV down.
+async fn jev_pick(ctx: &AppContext, posts: &mut Vec<FeedPost>, keep: usize) -> Option<FeedJev> {
+    let jev = Jev::from_ctx(ctx)?;
+    let owner = judge::owner(&ctx.config)?;
+    posts.truncate(judge::MAX_ITEMS);
+    let input: Vec<(&str, &str)> = posts.iter().map(|p| (p.author.as_str(), p.text.as_str())).collect();
+    let picks = judge::rank_posts(&jev, &owner, &input).await?;
+    let judged = picks.iter().flatten().count();
+    let total = posts.len();
+    let mut kept: Vec<(f64, FeedPost)> = posts
+        .drain(..)
+        .zip(picks)
+        .filter_map(|(mut post, pick)| {
+            let pick = pick.filter(|p| p.score >= judge::PICK_FLOOR)?;
+            post.jev_score = Some((pick.score * 100.0).round() as f32 / 100.0);
+            post.why = pick.why;
+            Some((pick.score, post))
+        })
+        .collect();
+    // Best content first; within a 0.1 band of pick score, the heuristic
+    // order (fresher, more open) breaks the tie.
+    kept.sort_by(|a, b| {
+        let band = |x: f64| (x * 10.0).round() as i64;
+        band(b.0).cmp(&band(a.0)).then(b.1.opportunity_score.total_cmp(&a.1.opportunity_score))
+    });
+    posts.extend(kept.into_iter().take(keep).map(|(_, p)| p));
+    Some(FeedJev { model: jev::MODEL, judged, dropped: total - posts.len() })
 }
 
 // ---------------------------------------------------------------------------
@@ -986,4 +1031,38 @@ pub async fn swarm(
 
     output::render(format, &result, None);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn post(id: &str) -> FeedPost {
+        FeedPost {
+            id: id.into(),
+            author: "someone".into(),
+            watchlist_username: None,
+            author_user_id: None,
+            author_followers: 10_000,
+            text: "text".into(),
+            age_minutes: 5,
+            likes: 1,
+            replies: 1,
+            reply_command: String::new(),
+            opportunity_score: 0.5,
+            jev_score: None,
+            why: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn feed_keeps_heuristic_list_without_jev() {
+        let mut config = crate::config::AppConfig::default();
+        config.settings.disable_jev = true;
+        let ctx = AppContext::new(config).unwrap();
+        let mut posts = vec![post("1"), post("2")];
+        assert!(jev_pick(&ctx, &mut posts, 5).await.is_none());
+        let ids: Vec<&str> = posts.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2"]);
+    }
 }

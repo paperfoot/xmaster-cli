@@ -15,14 +15,13 @@ const URL: &str = "https://api.typesafe.ai/v1/systemone";
 pub const MODEL: &str = "jev-1.13.0";
 const DEADLINE: Duration = Duration::from_millis(1500);
 
-#[allow(dead_code)] // wired into commands in the next commits
+#[derive(Clone)]
 pub struct Jev {
     client: reqwest::Client,
     key: String,
     url: String,
 }
 
-#[allow(dead_code)]
 impl Jev {
     /// None when no key is configured or `settings.disable_jev` is set.
     pub fn from_ctx(ctx: &AppContext) -> Option<Self> {
@@ -60,14 +59,37 @@ impl Jev {
             _ => None,
         }
     }
+
+    /// One request per state, all in flight at once (each under the same
+    /// deadline). Results keep input order; a failed request is `None`.
+    pub async fn ask_all(&self, states: Vec<Value>, questions: &Value) -> Vec<Option<Answers>> {
+        let mut set = tokio::task::JoinSet::new();
+        let n = states.len();
+        for (i, state) in states.into_iter().enumerate() {
+            let (jev, questions) = (self.clone(), questions.clone());
+            set.spawn(async move { (i, jev.ask(&state, &questions).await) });
+        }
+        let mut out: Vec<Option<Answers>> = (0..n).map(|_| None).collect();
+        while let Some(joined) = set.join_next().await {
+            if let Ok((i, answers)) = joined {
+                out[i] = answers;
+            }
+        }
+        out
+    }
 }
 
 /// Answers keyed by question id.
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct Answers(Map<String, Value>);
 
-#[allow(dead_code)]
+#[cfg(test)]
+impl From<Map<String, Value>> for Answers {
+    fn from(map: Map<String, Value>) -> Self {
+        Self(map)
+    }
+}
+
 impl Answers {
     /// P(yes) for a Noul question.
     pub fn noul(&self, id: &str) -> Option<f64> {
@@ -149,6 +171,16 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(jev(url).ask(&json!("s"), &json!({})).await.is_none());
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn ask_all_keeps_order_and_isolates_failures() {
+        let ok = mock(200, OK, Duration::ZERO).await;
+        let jev = jev(ok);
+        // The mock serves one connection; the second request must fail alone.
+        let out = jev.ask_all(vec![json!("a"), json!("b")], &json!({})).await;
+        assert_eq!(out.len(), 2);
+        assert_eq!(out.iter().filter(|a| a.is_some()).count(), 1);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
+use crate::intel::judge::DraftFlag;
 use crate::intel::preflight::{self, AnalyzeContext, MediaKind, PostMode};
 use crate::intel::store::IntelStore;
 use crate::output::{self, OutputFormat, Tableable};
@@ -18,6 +19,10 @@ struct PostResult {
     preflight_grade: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    /// JEV draft flags (generic, slop, off_topic, bait). Advisory: the post
+    /// went out; use them to rewrite the next one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    jev_flags: Vec<DraftFlag>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     suggested_next_commands: Vec<String>,
 }
@@ -170,16 +175,21 @@ pub async fn execute(
         }
     }
 
-    let result = api
-        .create_tweet(
+    // The JEV draft guard runs alongside the write, so it adds no latency;
+    // it is advisory and never holds the post.
+    let (posted, review) = tokio::join!(
+        api.create_tweet(
             text,
             reply_id.as_deref(),
             quote_id.as_deref(),
             media_ids.as_deref(),
             poll_options.as_deref(),
             Some(poll_duration),
-        )
-        .await
+        ),
+        crate::commands::analyze::jev_review(&ctx, text, reply_id.as_deref().or(quote_id.as_deref()), false),
+    );
+    let jev_flags = review.map(|r| r.flags).unwrap_or_default();
+    let result = posted
         .map_err(|err| {
             // ReplyRestricted already has a clear message — pass through
             if matches!(&err, XmasterError::ReplyRestricted(_)) {
@@ -263,12 +273,18 @@ pub async fn execute(
         suggested_next.push("Consider: xmaster analyze \"text\" before posting next time".into());
     }
 
+    if format == OutputFormat::Table {
+        for flag in &jev_flags {
+            eprintln!("JEV [{}]: {}", flag.code, flag.fix);
+        }
+    }
     let display = PostResult {
         id: result.id,
         text: result.text,
         preflight_score: if is_reply { None } else { Some(analysis.score) },
         preflight_grade: if is_reply { None } else { Some(analysis.grade) },
         warnings: if format == OutputFormat::Json && !is_reply { warnings } else { vec![] },
+        jev_flags,
         suggested_next_commands: suggested_next,
     };
     output::render(format, &display, None);

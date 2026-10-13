@@ -387,3 +387,46 @@ fn analyze_has_no_banned_phrases() {
         }
     }
 }
+
+// ─── JEV degrades to today's behaviour ──────────────────────────
+
+/// No key: analyze output is the plain preflight result, no `jev` block.
+#[test]
+fn analyze_without_jev_key_has_no_jev_block() {
+    xmaster()
+        .env("XMASTER_CONFIG_DIR", "/tmp/xmaster-test-no-jev")
+        .env_remove("TYPESAFE_API_KEY")
+        .args(["analyze", "Great post!", "--reply-to", "1234567890123456789", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("reply_generic"))
+        .stdout(predicate::str::contains("\"jev\"").not());
+}
+
+/// A rejected key (or no network) falls back within the deadline.
+#[test]
+fn analyze_with_bad_jev_key_falls_back() {
+    let started = std::time::Instant::now();
+    xmaster()
+        .env("XMASTER_CONFIG_DIR", "/tmp/xmaster-test-bad-jev")
+        .env("TYPESAFE_API_KEY", "not-a-real-key")
+        .args(["analyze", "Plain draft with a number: 42.", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\""))
+        .stdout(predicate::str::contains("\"jev\"").not());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+/// settings.disable_jev wins over a configured key.
+#[test]
+fn analyze_with_jev_disabled_skips_it() {
+    xmaster()
+        .env("XMASTER_CONFIG_DIR", "/tmp/xmaster-test-jev-off")
+        .env("TYPESAFE_API_KEY", "not-a-real-key")
+        .env("XMASTER_SETTINGS__DISABLE_JEV", "true")
+        .args(["analyze", "Plain draft", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"jev\"").not());
+}

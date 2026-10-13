@@ -298,7 +298,7 @@ pub async fn dispatch(
         Commands::HideReply { id } => moderation::hide_reply(ctx, format, id).await,
         Commands::UnhideReply { id } => moderation::unhide_reply(ctx, format, id).await,
         Commands::Read { id } => read_post::execute(ctx, format, id).await,
-        Commands::Replies { id, count } => replies::execute(ctx, format, id, *count).await,
+        Commands::Replies { id, count, all } => replies::execute(ctx, format, id, *count, *all).await,
         Commands::Likers { id, count } => tweet_engagement::likers(ctx, format, id, *count).await,
         Commands::Retweeters { id, count } => tweet_engagement::retweeters(ctx, format, id, *count).await,
         Commands::Quotes { id, count } => quotes::execute(ctx, format, id, *count).await,

@@ -277,13 +277,17 @@ pub enum Commands {
         id: String,
     },
 
-    /// Get replies to a tweet (uses conversation_id search)
+    /// Get replies to a tweet (uses conversation_id search). With JEV, replies
+    /// not worth reading (thanks, emoji, spam, no substance) are left out.
     Replies {
         /// Tweet ID or URL
         id: String,
         /// Max replies to fetch
         #[arg(long, short, alias = "limit", default_value = "20")]
         count: usize,
+        /// Show every reply, without JEV trimming
+        #[arg(long)]
+        all: bool,
     },
 
     /// List users who liked a tweet
@@ -564,9 +568,9 @@ pub enum EngageCommands {
         /// Maximum age in minutes (default: 30 — reply momentum dies after ~30-60 min)
         #[arg(long, default_value = "30")]
         max_age_mins: u64,
-        /// Number of posts to return (unified across all topics)
-        #[arg(long, short, alias = "limit", default_value = "10")]
-        count: usize,
+        /// Number of posts to return (default 10; with JEV, its best 5 worth a reply)
+        #[arg(long, short, alias = "limit")]
+        count: Option<usize>,
     },
     /// Find small-to-mid accounts replying under a big post — the 2026
     /// peer-to-peer growth lane.

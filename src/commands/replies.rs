@@ -1,8 +1,10 @@
 use crate::cli::parse_tweet_id;
 use crate::context::AppContext;
 use crate::errors::XmasterError;
+use crate::intel::judge;
 use crate::output::{self, CsvRenderable, OutputFormat, Tableable};
-use crate::providers::xapi::XApi;
+use crate::providers::jev::Jev;
+use crate::providers::xapi::{TweetData, XApi};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -12,6 +14,10 @@ struct RepliesResult {
     tweet_id: String,
     replies: Vec<ReplyItem>,
     total: usize,
+    /// Replies JEV judged not worth reading (thanks, emoji, spam, no
+    /// substance) and left out. Pass --all to see every reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trimmed: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -70,11 +76,13 @@ pub async fn execute(
     format: OutputFormat,
     id: &str,
     count: usize,
+    all: bool,
 ) -> Result<(), XmasterError> {
     let api = XApi::new(ctx.clone());
     let tweet_id = parse_tweet_id(id);
 
-    let tweets = api.get_replies(&tweet_id, count).await?;
+    let mut tweets = api.get_replies(&tweet_id, count).await?;
+    let trimmed = if all { None } else { jev_trim(&ctx, &tweet_id, &mut tweets).await };
 
     let replies: Vec<ReplyItem> = tweets
         .into_iter()
@@ -99,7 +107,47 @@ pub async fn execute(
         tweet_id,
         replies,
         total,
+        trimmed,
     };
     output::render_csv(format, &result, None);
     Ok(())
+}
+
+/// Drop replies JEV judges not worth reading; returns how many it dropped.
+/// Unjudged replies stay. `None` (nothing dropped) without JEV.
+async fn jev_trim(ctx: &AppContext, tweet_id: &str, tweets: &mut Vec<TweetData>) -> Option<usize> {
+    let jev = Jev::from_ctx(ctx)?;
+    if tweets.is_empty() {
+        return None;
+    }
+    let parent = crate::providers::fxtwitter::fetch_post(tweet_id)
+        .await
+        .map(|(post, _)| post.text)
+        .unwrap_or_default();
+    let input: Vec<(&str, &str)> = tweets
+        .iter()
+        .take(judge::MAX_ITEMS)
+        .map(|t| (t.author_username.as_deref().unwrap_or("unknown"), t.text.as_str()))
+        .collect();
+    let keep = judge::worth_reading(&jev, &parent, &input).await?;
+    let before = tweets.len();
+    let mut verdicts = keep.into_iter().chain(std::iter::repeat(None));
+    tweets.retain(|_| verdicts.next().flatten() != Some(false));
+    Some(before - tweets.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn replies_untrimmed_without_jev() {
+        let mut config = crate::config::AppConfig::default();
+        config.settings.disable_jev = true;
+        let ctx = AppContext::new(config).unwrap();
+        let reply: TweetData = serde_json::from_value(serde_json::json!({"id": "1", "text": "thanks"})).unwrap();
+        let mut tweets = vec![reply];
+        assert!(jev_trim(&ctx, "9", &mut tweets).await.is_none());
+        assert_eq!(tweets.len(), 1);
+    }
 }
