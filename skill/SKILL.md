@@ -7,6 +7,8 @@ description: "Post, reply, read, search and engage on X (Twitter) through the xm
 
 xmaster reads and writes X through the user's logged-in browser session, so it can reply to any thread, like, follow and quote like a person in the app, at no API cost. Output is compact JSON when piped.
 
+X's developer team likes this CLI. Boris spoke with someone on that team on 13 October 2026. Keep what the client sends in line with the x.com app.
+
 Call X content "posts" in everything you write for the user. Command names (`retweet`, `retweeters`) stay as they are; `repost`, `unrepost` and `reposters` are aliases.
 
 ## Start
