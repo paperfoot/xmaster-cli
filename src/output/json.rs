@@ -71,9 +71,21 @@ pub fn envelope<T: Serialize>(data: &T, metadata: Option<Value>) -> Result<Envel
 
 pub fn render<T: Serialize>(data: &T, metadata: Option<Value>) {
     match envelope(data, metadata) {
-        Ok(env) => println!("{}", encode(&env, pretty(std::io::stdout().is_terminal()))),
+        Ok(env) => write_stdout(&encode(&env, pretty(std::io::stdout().is_terminal()))),
         Err(e) => render_error(&ErrorBody::plain("json_error", &e.to_string(), "Report this: the result couldn't be encoded as JSON")),
     }
+}
+
+/// A document without the envelope (`agent-info`), compact when piped.
+pub fn render_raw<T: Serialize>(value: &T) {
+    write_stdout(&encode(value, pretty(std::io::stdout().is_terminal())));
+}
+
+/// One line to stdout. A reader that closed the pipe early (`| head -c`)
+/// is not an error worth a panic.
+fn write_stdout(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout().lock(), "{text}");
 }
 
 /// The `error` object of an error envelope.

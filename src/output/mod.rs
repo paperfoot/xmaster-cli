@@ -6,9 +6,19 @@ use crate::errors::XmasterError;
 use serde::Serialize;
 
 pub use csv::CsvRenderable;
-// Unused until the lead wires main.rs / agent_info.rs; drop the allow then.
-#[allow(unused_imports)]
 pub use json::set_pretty;
+
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--quiet`: drop notices meant for people (terminal hints, the star
+/// prompt). Data and errors always print.
+pub fn set_quiet(on: bool) {
+    QUIET.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn quiet() -> bool {
+    QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -72,7 +82,9 @@ pub fn render_hint<T: Serialize + Tableable>(format: OutputFormat, data: &T, hin
     match format {
         OutputFormat::Table => {
             table::render(data);
-            eprintln!("{hint}");
+            if !quiet() {
+                eprintln!("{hint}");
+            }
         }
         _ => render(format, data, Some(serde_json::json!({ "hint": hint }))),
     }
