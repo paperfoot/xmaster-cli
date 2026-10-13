@@ -111,6 +111,9 @@ pub struct Budget {
     pub half_caps_days: u32,
     /// Read each new post back through FxTwitter to catch silent fails.
     pub verify_writes: bool,
+    /// Before a like, reply, quote or repost, send the view events x.com
+    /// sends when a post renders and stays on screen (web session only).
+    pub view_events: bool,
 }
 
 impl Default for Budget {
@@ -141,6 +144,7 @@ impl Default for Budget {
             cooldown_hours: 24,
             half_caps_days: 7,
             verify_writes: true,
+            view_events: true,
         }
     }
 }
@@ -1266,6 +1270,7 @@ pub async fn gate(ctx: &AppContext, intent: &WriteIntent) -> Result<Permit, Xmas
 
     let own = own_handle();
     let fx = !ctx.config.settings.disable_fxtwitter;
+    let opened_ms = chrono::Utc::now().timestamp_millis();
     let (act, target) = resolve(intent, &snap, own.as_deref(), fx, now_secs()).await?;
 
     let now = now_secs();
@@ -1275,10 +1280,26 @@ pub async fn gate(ctx: &AppContext, intent: &WriteIntent) -> Result<Permit, Xmas
     };
     let wait = (plan.go_at - now_secs()).max(0.0);
     if wait >= 1.0 {
-        eprintln!("pacing: waiting {:.0}s ({})", wait, plan.why);
+        eprintln!("pacing: waiting {:.0}s like a person would ({})", wait, plan.why);
     }
-    if wait > 0.0 {
-        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+    // The post "renders" (impression, batched ~2 s later like the app) and
+    // stays on screen until the write (linger). Never blocks the write.
+    let viewed = intent
+        .target_id
+        .as_deref()
+        .filter(|_| b.view_events && act.reads() && ctx.config.has_web_cookies());
+    let handle = target.author.as_deref();
+    if let Some(id) = viewed {
+        let batch = wait.min(1.5 + rand::random::<f64>() * 1.5);
+        tokio::time::sleep(Duration::from_secs_f64(batch)).await;
+        crate::providers::web_events::send_impression(ctx, id, handle, opened_ms).await;
+    }
+    let rest = (plan.go_at - now_secs()).max(0.0);
+    if rest > 0.0 {
+        tokio::time::sleep(Duration::from_secs_f64(rest)).await;
+    }
+    if let Some(id) = viewed {
+        crate::providers::web_events::send_linger(ctx, id, handle, opened_ms).await;
     }
     let waited_secs = wait.round() as u64;
     LAST_WAIT.store(waited_secs, Ordering::Relaxed);

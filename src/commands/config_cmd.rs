@@ -421,6 +421,7 @@ const VALID_CONFIG_KEYS: &[&str] = &[
     "rails.cooldown_hours",
     "rails.half_caps_days",
     "rails.verify_writes",
+    "rails.view_events",
     "account.bio",
     "style.voice",
     "niche.topics",
