@@ -28,6 +28,7 @@ struct Post {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     date: Option<String>,
+    impressions: u64,
     likes: u64,
     replies: u64,
     reposts: u64,
@@ -38,6 +39,7 @@ impl From<TweetData> for Post {
         let m = t.public_metrics.as_ref();
         Self {
             author: t.author_username.as_deref().map(|u| format!("@{u}")).or(t.author_id.clone()).unwrap_or_default(),
+            impressions: m.map_or(0, |m| m.impression_count),
             likes: m.map_or(0, |m| m.like_count),
             replies: m.map_or(0, |m| m.reply_count),
             reposts: m.map_or(0, |m| m.retweet_count),
@@ -63,7 +65,7 @@ struct Conversation {
 impl Tableable for Conversation {
     fn to_table(&self) -> comfy_table::Table {
         let mut table = comfy_table::Table::new();
-        table.set_header(vec!["", "Author", "Text", "Likes", "ID"]);
+        table.set_header(vec!["", "Author", "Text", "Views", "Likes", "ID"]);
         let rows = self
             .ancestors
             .iter()
@@ -75,6 +77,7 @@ impl Tableable for Conversation {
                 role.to_string(),
                 p.author.clone(),
                 crate::utils::ellipsize(&p.text, 120).into_owned(),
+                p.impressions.to_string(),
                 p.likes.to_string(),
                 p.id.clone(),
             ]);
@@ -240,5 +243,13 @@ mod tests {
         let (_, _, replies) = split(view, "3", 1).unwrap();
         assert_eq!(replies.len(), 1);
         assert!(split(vec![post("4", Some("3"))], "3", 5).is_none());
+    }
+
+    #[test]
+    fn shows_views() {
+        let mut t = post("3", None);
+        t.public_metrics = serde_json::from_value(json!({"impression_count": 14000, "like_count": 9})).ok();
+        let v = serde_json::to_value(Post::from(t)).unwrap();
+        assert_eq!((v["impressions"].as_u64(), v["likes"].as_u64()), (Some(14000), Some(9)));
     }
 }
