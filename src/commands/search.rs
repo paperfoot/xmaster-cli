@@ -3,6 +3,7 @@ use crate::errors::XmasterError;
 use crate::intel::store::IntelStore;
 use crate::output::{self, CsvRenderable, OutputFormat, Tableable};
 use crate::providers::xapi::XApi;
+use crate::utils::imps_per_min;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -24,12 +25,6 @@ struct TweetRow {
     date: String,
     age_minutes: i64,
     imps_per_min: f64,
-}
-
-/// Views per minute of age, one decimal; age floors at 1 so a brand-new post
-/// doesn't divide by zero.
-fn imps_per_min(impressions: u64, age_minutes: i64) -> f64 {
-    (impressions as f64 / age_minutes.max(1) as f64 * 10.0).round() / 10.0
 }
 
 /// Client-side reorder, highest first; "date" is newest first. Stable, so
@@ -198,18 +193,20 @@ mod tests {
         assert_eq!(imps_per_min(1000, 30), 33.3);
         assert_eq!(imps_per_min(90, 60), 1.5);
         assert_eq!(imps_per_min(0, 10), 0.0);
-        // A post younger than a minute (or clock skew) counts as one minute.
-        assert_eq!(imps_per_min(250, 0), 250.0);
-        assert_eq!(imps_per_min(250, -3), 250.0);
+        // Under 15 minutes (or clock skew) counts as 15.
+        assert_eq!(imps_per_min(250, 0), 16.7);
+        assert_eq!(imps_per_min(250, -3), 16.7);
     }
 
     #[test]
     fn velocity_sorts_most_views_per_minute_first() {
-        // a: 10k over 5h = 33.3/min; b: 2k over 10m = 200/min; c: 600 over 2m = 300/min.
-        let mut rows = vec![row("a", 10_000, 300), row("b", 2_000, 10), row("c", 600, 2)];
+        // a: 10k over 5h = 33.3/min; b: 2k over 10m = 133.3/min and c: 600
+        // over 2m = 40/min, both counted over 15 min: a few early views on a
+        // brand-new post don't beat a thread already in the thousands.
+        let mut rows = vec![row("a", 10_000, 300), row("c", 600, 2), row("b", 2_000, 10)];
         sort_rows(&mut rows, "velocity");
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["c", "b", "a"]);
+        assert_eq!(ids, ["b", "c", "a"]);
         sort_rows(&mut rows, "views");
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["a", "b", "c"]);

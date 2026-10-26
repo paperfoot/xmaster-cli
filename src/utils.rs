@@ -118,6 +118,13 @@ fn url_len(s: &str) -> Option<usize> {
     ok.then_some(token.len())
 }
 
+/// Views per minute of age, one decimal. Age counts as at least 15 minutes
+/// (the feed's traction floor too), so a brand-new post's first few views
+/// can't outrank a thread that has gathered thousands over hours.
+pub fn imps_per_min(impressions: u64, age_minutes: i64) -> f64 {
+    (impressions as f64 / age_minutes.max(15) as f64 * 10.0).round() / 10.0
+}
+
 /// Length of a post as X counts it against the 280 limit (twitter-text v3):
 /// URLs count 23, an emoji sequence (ZWJ, skin tone, flag, keycap) counts 2,
 /// CJK and other code points outside the Latin/punctuation ranges count 2,

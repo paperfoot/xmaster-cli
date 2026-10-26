@@ -512,7 +512,7 @@ pub struct FeedPost {
     pub replies: u64,
     /// Views so far (display only, not scored).
     pub impressions: u64,
-    /// Views per minute of age, one decimal.
+    /// Views per minute of age (at least 15 min), one decimal.
     pub imps_per_min: f64,
     pub reply_command: String,
     /// Reply-target score (0-1): fresh, early, traction, reply-back odds,
@@ -1123,7 +1123,7 @@ fn candidates(
             likes: metrics.map(|m| m.like_count).unwrap_or(0),
             replies: metrics.map(|m| m.reply_count).unwrap_or(0),
             impressions,
-            imps_per_min: (impressions as f64 / age_minutes.max(1) as f64 * 10.0).round() / 10.0,
+            imps_per_min: crate::utils::imps_per_min(impressions, age_minutes),
             opportunity_score: 0.0,
             jev_score: None,
             why: String::new(),
@@ -1518,9 +1518,9 @@ mod tests {
         let json = serde_json::to_value(&kept[0]).unwrap();
         assert_eq!(json["impressions"], 12_345);
         assert_eq!(json["imps_per_min"], 617.3);
-        // Under a minute old counts as one minute.
+        // Under 15 minutes old counts as 15.
         let fresh = vec![found("2", "Claude Code's advisor tool pairs a cheaper main model with a stronger one", 0, now)];
-        assert_eq!(candidates(fresh, &[], false, 0, 480, &LocalFacts::default(), now).0[0].imps_per_min, 12_345.0);
+        assert_eq!(candidates(fresh, &[], false, 0, 480, &LocalFacts::default(), now).0[0].imps_per_min, 823.0);
     }
 
     #[tokio::test]
