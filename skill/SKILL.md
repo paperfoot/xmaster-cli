@@ -48,7 +48,7 @@ Pick the finder by the thread you want:
 - For big live threads on a story, rank search results by speed and reply with an image:
 
 ```
-xmaster search "<story keywords> -filter:replies" --since 3h -n 50 --sort velocity  # by imps_per_min
+xmaster search "<story keywords> lang:en -filter:replies" --mode top --since 6h -n 40 --sort velocity  # by imps_per_min
 xmaster conversation <id>                     # read the pick's thread
 xmaster reply <id> "text" --media img.png     # the image carries the reply
 ```

@@ -213,7 +213,8 @@ pub enum Commands {
         #[arg(long)]
         before: Option<String>,
         /// Reorder results (default: X's order). velocity: most views per
-        /// minute first, for finding big live threads to reply to
+        /// minute first, for finding big live threads to reply to (pair with
+        /// --mode top: on a busy story, recent results span only minutes)
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(std::iter::once("velocity").chain(POST_SORTS)))]
         sort: Option<String>,
     },
