@@ -11,7 +11,9 @@ use std::time::Duration;
 
 const URL: &str = "https://api.typesafe.ai/v1/systemone";
 /// Pinned so the eval numbers behind the prompts stay valid when the
-/// `jev-latest` alias moves.
+/// `jev-latest` alias moves. jev-1.14.0 (26 Oct 2026) was worse here: inbox
+/// needs-reply AUC 0.93 -> 0.90 and 7 picker flips at the floor against 2
+/// from noise; re-run `~/x/xmaster-jev-eval/eval_114.py` before moving.
 pub const MODEL: &str = "jev-1.13.0";
 const DEADLINE: Duration = Duration::from_millis(1500);
 
