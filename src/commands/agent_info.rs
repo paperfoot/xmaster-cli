@@ -563,7 +563,7 @@ const REPLIES: &[&str] = &[
     "`reply <id|url> \"text\"` reaches any thread through the web session. Without it, the X API only allows replies to people who mentioned you",
     "Read first: `conversation <id>` returns the parent chain, the post and its top replies in one free call",
     "Peer-sized threads: name one specific detail from the post (a claim, number, method or result) and ask one question the author can answer. An OP who likes or answers your reply lifts its place under the post. Image replies on big threads: the image carries the reply; a question is optional",
-    "Image reply on a big live thread: `search \"<story keywords> lang:en -filter:replies\" --mode top --since 6h -n 40 --sort velocity` ranks posts by imps_per_min (recent mode spans minutes on a busy story; top spans hours); read the pick with `conversation <id>`, then `reply <id> \"text\" --media img.png`",
+    "Image reply on a big live thread: `search \"<story keywords> lang:en -filter:replies\" --since 6h -n 40 --sort velocity` ranks top posts by imps_per_min; read the pick with `conversation <id>`, then `reply <id> \"text\" --media img.png`",
     "Check drafts with `reply <id> \"text\" --dry-run` or `analyze \"text\" --reply-to <id>`; rewrite once if JEV flags generic, slop, off_topic or bait",
     "X's LLM judge scores every reply to someone else's thread from 0 to 3; a 0 down-ranks it. An account-level AI-slop label hides all your posts from non-followers for 30 days",
     "One reply per stranger's conversation. Don't reply to your own reply under someone else's post: X runs a separate spam check on those chains",
@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn reply_tips_cover_the_image_reply_method() {
         let tips = serde_json::to_value(tips_for("replies")).unwrap()["replies"].to_string();
-        for part in ["-filter:replies\\\" --mode top --since 6h -n 40 --sort velocity", "conversation <id>", "--media img.png", "a question is optional"] {
+        for part in ["-filter:replies\\\" --since 6h -n 40 --sort velocity", "conversation <id>", "--media img.png", "a question is optional"] {
             assert!(tips.contains(part), "missing {part}: {tips}");
         }
     }

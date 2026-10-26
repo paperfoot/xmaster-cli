@@ -27,6 +27,13 @@ struct TweetRow {
     imps_per_min: f64,
 }
 
+/// Recent unless sorting by velocity: on a busy story the newest results
+/// span only minutes (50 "Claude Code" posts covered 19, 26 Oct), while top
+/// reaches the threads that have gathered views for hours.
+fn default_mode(sort: Option<&str>) -> &'static str {
+    if sort == Some("velocity") { "top" } else { "recent" }
+}
+
 /// Client-side reorder, highest first; "date" is newest first. Stable, so
 /// ties keep X's order.
 fn sort_rows(rows: &mut [TweetRow], sort: &str) {
@@ -114,7 +121,7 @@ pub async fn execute(
     ctx: Arc<AppContext>,
     format: OutputFormat,
     query: &str,
-    mode: &str,
+    mode: Option<&str>,
     count: usize,
     since: Option<&str>,
     before: Option<&str>,
@@ -133,6 +140,7 @@ pub async fn execute(
     let end_time = before.map(crate::commands::timeline::parse_since).transpose()
         .map_err(XmasterError::Config)?;
     let api = XApi::new(ctx.clone());
+    let mode = mode.unwrap_or_else(|| default_mode(sort));
     let tweets = api.search_tweets_paginated(query, mode, count, start_time.as_deref(), end_time.as_deref()).await?;
     if let Ok(store) = IntelStore::open() {
         let _ = store.record_discovered_posts("search", &tweets);
@@ -196,6 +204,13 @@ mod tests {
         // Under 15 minutes (or clock skew) counts as 15.
         assert_eq!(imps_per_min(250, 0), 16.7);
         assert_eq!(imps_per_min(250, -3), 16.7);
+    }
+
+    #[test]
+    fn velocity_searches_top_unless_a_mode_is_given() {
+        assert_eq!(default_mode(Some("velocity")), "top");
+        assert_eq!(default_mode(Some("likes")), "recent");
+        assert_eq!(default_mode(None), "recent");
     }
 
     #[test]

@@ -200,9 +200,10 @@ pub enum Commands {
         /// min_reposts: (since May 2026); -filter:replies drops replies.
         /// Keyword search no longer returns reposts
         query: String,
-        /// Search mode: recent (latest first) or top
-        #[arg(long, default_value = "recent", value_parser = ["recent", "latest", "top", "relevancy", "relevant", "popular"])]
-        mode: String,
+        /// Search mode: recent (latest first) or top (default: recent; top
+        /// with --sort velocity)
+        #[arg(long, value_parser = ["recent", "latest", "top", "relevancy", "relevant", "popular"])]
+        mode: Option<String>,
         /// Number of results
         #[arg(long, short, visible_alias = "limit", visible_short_alias = 'n', default_value = "10")]
         count: usize,
@@ -213,8 +214,7 @@ pub enum Commands {
         #[arg(long)]
         before: Option<String>,
         /// Reorder results (default: X's order). velocity: most views per
-        /// minute first, for finding big live threads to reply to (pair with
-        /// --mode top: on a busy story, recent results span only minutes)
+        /// minute first, for finding big live threads to reply to
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(std::iter::once("velocity").chain(POST_SORTS)))]
         sort: Option<String>,
     },
