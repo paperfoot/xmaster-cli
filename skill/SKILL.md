@@ -53,6 +53,17 @@ xmaster conversation <id>                     # read the pick's thread
 xmaster reply <id> "text" --media img.png     # the image carries the reply
 ```
 
+Before an image reply under a big thread, score it 0-2 on each point and send at 10 or more of 14:
+1. Attention: the parent is still gaining views. Run `xmaster metrics <id>` when you pick it and again before replying; `velocity.imps_per_min_since_last` is its live rate.
+2. Mood: it fits what that crowd already feels. Amusement, awe, anger and relief travel; calm and sadness don't.
+3. Speed: it reads in under 2 seconds.
+4. The gap: the text sets up, the image pays off, and the reader closes the gap.
+5. A reason to pass it on: status, usefulness or tribe.
+6. The butt: the company or the situation, never the buyers.
+7. Friction: no ask, plug or link in a stranger's thread.
+
+Write a fresh setup for each thread, 15 words or fewer, aimed at that post's words. Repeated text is blocked as a duplicate.
+
 Write replies that X's reply judge and readers both reward:
 - Peer-sized threads: name one specific detail from the post (a claim, number, method or result) and ask one question the author can answer. An author who likes or answers your reply lifts it under the post.
 - Image replies on big threads: the image carries the reply, so a question is optional.

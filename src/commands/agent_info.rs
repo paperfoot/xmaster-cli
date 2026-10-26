@@ -564,6 +564,7 @@ const REPLIES: &[&str] = &[
     "Read first: `conversation <id>` returns the parent chain, the post and its top replies in one free call",
     "Peer-sized threads: name one specific detail from the post (a claim, number, method or result) and ask one question the author can answer. An OP who likes or answers your reply lifts its place under the post. Image replies on big threads: the image carries the reply; a question is optional",
     "Image reply on a big live thread: `search \"<story keywords> lang:en -filter:replies\" --since 6h -n 40 --sort velocity` ranks top posts by imps_per_min; read the pick with `conversation <id>`, then `reply <id> \"text\" --media img.png`",
+    "Before an image reply on a big thread, score 0-2 each and send at 10+ of 14: parent still gaining views (`metrics <id>` twice: velocity.imps_per_min_since_last is its live rate), fits the crowd's mood, reads in 2 s, the text sets up and the image pays off, a reason to share, the butt is the company or situation never buyers, no ask, plug or link. A fresh setup per thread, 15 words or fewer",
     "Check drafts with `reply <id> \"text\" --dry-run` or `analyze \"text\" --reply-to <id>`; rewrite once if JEV flags generic, slop, off_topic or bait",
     "X's LLM judge scores every reply to someone else's thread from 0 to 3; a 0 down-ranks it. An account-level AI-slop label hides all your posts from non-followers for 30 days",
     "One reply per stranger's conversation. Don't reply to your own reply under someone else's post: X runs a separate spam check on those chains",
