@@ -347,6 +347,8 @@ pub async fn execute(
             Some(analysis.score as f64),
             analysis_json_str.as_deref(),
             None,
+            !media.is_empty(),
+            poll_options.is_some(),
         );
 
         // Log reply for reciprocity tracking with style classification.

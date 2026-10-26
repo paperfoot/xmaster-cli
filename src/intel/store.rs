@@ -395,6 +395,8 @@ impl IntelStore {
         preflight_score: Option<f64>,
         analysis_json: Option<&str>,
         scheduled_post_id: Option<&str>,
+        has_media: bool,
+        has_poll: bool,
     ) -> Result<(), rusqlite::Error> {
         let now = Utc::now();
         let local_now = chrono::Local::now();
@@ -416,7 +418,7 @@ impl IntelStore {
                  reply_to_id, quote_of_id, preflight_score,
                  analysis_json, analysis_version, scheduled_post_id,
                  local_day_of_week, local_hour_of_day, tz_offset_minutes)
-             VALUES (?1,?2,?3,?4,?5,0,0,?6,?7,?8,?9,?10,?11,?12,?13,?14,1,?15,?16,?17,?18)",
+             VALUES (?1,?2,?3,?4,?5,?19,?20,?6,?7,?8,?9,?10,?11,?12,?13,?14,1,?15,?16,?17,?18)",
             params![
                 tweet_id,
                 text,
@@ -436,6 +438,8 @@ impl IntelStore {
                 local_day,
                 local_hour,
                 tz_offset,
+                has_media,
+                has_poll,
             ],
         )?;
         Ok(())
@@ -455,6 +459,8 @@ impl IntelStore {
         preflight_score: Option<f64>,
         analysis_json: Option<&str>,
         scheduled_post_id: Option<&str>,
+        has_media: bool,
+        has_poll: bool,
     ) -> Result<(), rusqlite::Error> {
         self.log_post(
             tweet_id,
@@ -465,6 +471,8 @@ impl IntelStore {
             preflight_score,
             analysis_json,
             scheduled_post_id,
+            has_media,
+            has_poll,
         )
     }
 
@@ -1101,7 +1109,7 @@ mod tests {
     fn log_and_retrieve_post() {
         let store = test_store();
         store
-            .log_post("tweet_001", "Hello world!", "opinion", None, None, Some(85.0), None, None)
+            .log_post("tweet_001", "Hello world!", "opinion", None, None, Some(85.0), None, None, false, false)
             .unwrap();
 
         let posts = store.get_post_history(10).unwrap();
@@ -1117,11 +1125,11 @@ mod tests {
     fn duplicate_tweet_id_ignored() {
         let store = test_store();
         store
-            .log_post("tweet_dup", "First", "opinion", None, None, None, None, None)
+            .log_post("tweet_dup", "First", "opinion", None, None, None, None, None, false, false)
             .unwrap();
         // INSERT OR IGNORE — second insert should not fail or create duplicate
         store
-            .log_post("tweet_dup", "Second", "opinion", None, None, None, None, None)
+            .log_post("tweet_dup", "Second", "opinion", None, None, None, None, None, false, false)
             .unwrap();
 
         let posts = store.get_post_history(10).unwrap();
@@ -1161,21 +1169,21 @@ mod tests {
         let store = test_store();
         // Standalone post that hit 12k imps — a candidate
         store
-            .log_post("big_hit", "a viral thought", "text", None, None, None, None, None)
+            .log_post("big_hit", "a viral thought", "text", None, None, None, None, None, false, false)
             .unwrap();
         store
             .log_metric_snapshot("big_hit", 400, 50, 30, 12_000, 100, 10, 5, 30, None)
             .unwrap();
         // Standalone post with only 1k imps — below threshold
         store
-            .log_post("small_post", "meh", "text", None, None, None, None, None)
+            .log_post("small_post", "meh", "text", None, None, None, None, None, false, false)
             .unwrap();
         store
             .log_metric_snapshot("small_post", 10, 1, 0, 1_000, 5, 0, 0, 20, None)
             .unwrap();
         // Reply that happened to go viral — must be excluded
         store
-            .log_post("viral_reply", "nailed it", "reply", Some("other"), None, None, None, None)
+            .log_post("viral_reply", "nailed it", "reply", Some("other"), None, None, None, None, false, false)
             .unwrap();
         store
             .log_metric_snapshot("viral_reply", 500, 60, 40, 15_000, 80, 15, 20, 40, None)
@@ -1192,13 +1200,13 @@ mod tests {
     fn standalone_24h_excludes_replies() {
         let store = test_store();
         store
-            .log_post("p_1", "a standalone post", "text", None, None, None, None, None)
+            .log_post("p_1", "a standalone post", "text", None, None, None, None, None, false, false)
             .unwrap();
         store
-            .log_post("p_2", "reply to something", "reply", Some("other_id"), None, None, None, None)
+            .log_post("p_2", "reply to something", "reply", Some("other_id"), None, None, None, None, false, false)
             .unwrap();
         store
-            .log_post("p_3", "thread opener", "thread_hook", None, None, None, None, None)
+            .log_post("p_3", "thread opener", "thread_hook", None, None, None, None, None, false, false)
             .unwrap();
         let v = store.get_recent_post_velocity().unwrap();
         assert_eq!(v.posts_24h, 3, "all three rows count toward posts_24h");
@@ -1206,10 +1214,25 @@ mod tests {
     }
 
     #[test]
+    fn logged_posts_keep_media_and_poll_flags() {
+        let store = test_store();
+        store.log_post("with_media", "chart", "media", None, None, None, None, None, true, false).unwrap();
+        store.log_post("with_poll", "which one?", "text", None, None, None, None, None, false, true).unwrap();
+        let flags = |id: &str| -> (bool, bool) {
+            store
+                .conn
+                .query_row("SELECT has_media, has_poll FROM posts WHERE tweet_id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+        };
+        assert_eq!(flags("with_media"), (true, false));
+        assert_eq!(flags("with_poll"), (false, true));
+    }
+
+    #[test]
     fn metric_snapshot_persists_url_clicks() {
         let store = test_store();
         store
-            .log_post("tweet_url", "Check this link", "text", None, None, None, None, None)
+            .log_post("tweet_url", "Check this link", "text", None, None, None, None, None, false, false)
             .unwrap();
         store
             .log_metric_snapshot("tweet_url", 5, 1, 0, 200, 0, 0, 3, 10, Some(42))
@@ -1229,7 +1252,7 @@ mod tests {
     fn metric_snapshot_persists_url_clicks_null_when_none() {
         let store = test_store();
         store
-            .log_post("tweet_null", "no link", "text", None, None, None, None, None)
+            .log_post("tweet_null", "no link", "text", None, None, None, None, None, false, false)
             .unwrap();
         store
             .log_metric_snapshot("tweet_null", 1, 0, 0, 10, 0, 0, 0, 5, None)
@@ -1249,7 +1272,7 @@ mod tests {
     fn metric_snapshot_and_retrieval() {
         let store = test_store();
         store
-            .log_post("tweet_metrics", "Test post", "opinion", None, None, None, None, None)
+            .log_post("tweet_metrics", "Test post", "opinion", None, None, None, None, None, false, false)
             .unwrap();
         store
             .log_metric_snapshot("tweet_metrics", 10, 5, 3, 1000, 2, 1, 50, 60, None)
@@ -1311,6 +1334,8 @@ mod tests {
                 Some(75.0),
                 Some(r#"{"score":75}"#),
                 Some("sched_123"),
+                false,
+                false,
             )
             .unwrap();
 
@@ -1571,7 +1596,7 @@ mod tests {
         reply_tweet_id: &str,
     ) {
         store
-            .log_post(reply_tweet_id, "reply body", "text", Some(target_tweet_id), None, None, None, None)
+            .log_post(reply_tweet_id, "reply body", "text", Some(target_tweet_id), None, None, None, None, false, false)
             .unwrap();
         store
             .log_reply(
@@ -1677,7 +1702,7 @@ mod tests {
     fn find_hot_reply_targets_skips_stale_replies() {
         let store = test_store();
         store
-            .log_post("r1", "old reply body", "text", Some("t1"), None, None, None, None)
+            .log_post("r1", "old reply body", "text", Some("t1"), None, None, None, None, false, false)
             .unwrap();
         let old_ts = chrono::Utc::now().timestamp() - 30 * 24 * 3600;
         store
@@ -1809,7 +1834,7 @@ mod tests {
             .log_metric_snapshot("r1", 0, 0, 0, 1000, 0, 0, 5, 5, None)
             .unwrap();
         store
-            .log_post("r2", "stale reply body", "text", Some("t2"), None, None, None, None)
+            .log_post("r2", "stale reply body", "text", Some("t2"), None, None, None, None, false, false)
             .unwrap();
         let old_ts = chrono::Utc::now().timestamp() - 20 * 24 * 3600;
         store

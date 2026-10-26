@@ -414,6 +414,8 @@ impl PostScheduler {
                             Some(pf.score as f64),
                             analysis_json.as_deref(),
                             Some(id),
+                            has_media,
+                            false,
                         );
                         // Track reply style for scheduled replies
                         if is_reply {

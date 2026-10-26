@@ -172,6 +172,8 @@ pub async fn execute(
                         if i == 0 { Some(analysis.score as f64) } else { None },
                         analysis_json.as_deref(),
                         None,
+                        tweet_media.is_some(),
+                        false,
                     );
                 }
                 posted_ids.push(resp.id);
