@@ -93,6 +93,7 @@ Read `error.code`, `error.suggestion`, `error.retryable` and `error.retry_after_
 
 - `write_unconfirmed`: the write may have gone through. Check with `xmaster timeline` or `xmaster conversation <id>` before sending again.
 - Writes are paced with daily limits and gaps between actions, so agent activity stays within normal use. If a write is refused for pacing, the error says why: wait or do other work, then try later. Never loop on it.
+- The caps (`rails.replies_per_hour` 5, `rails.replies_per_day` 20 and the other `rails.*` keys) are counted on this machine, so every session shares them. `xmaster rails status` shows what used each one. Raise a cap only when the user asks.
 - If X shows a captcha, a lock or an "automated" warning (code 226), stop all writes and ask the user to open x.com and clear it.
 - **A reply that fails is never split into a thread or re-sent in pieces.** Copy the text to the clipboard (`printf '%s' "text" | pbcopy` on macOS) and tell the user, so they can paste it in the app.
 

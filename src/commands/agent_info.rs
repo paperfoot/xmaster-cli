@@ -52,7 +52,7 @@ struct AgentInfo {
     exit_codes: BTreeMap<String, &'static str>,
     envelope: Envelope,
     cost: Cost,
-    pacing: &'static str,
+    pacing: String,
     jev: Jev,
     access: &'static str,
     tips: &'static str,
@@ -106,6 +106,7 @@ fn manifest() -> AgentInfo {
         .as_ref()
         .is_some_and(|c| c.jev_key().is_some() && !c.settings.disable_jev);
     // The voice can run to a page; point at it rather than inline it.
+    let rails = cfg.as_ref().map(|c| c.rails.clone()).unwrap_or_default();
     let writing_style = cfg
         .is_some_and(|c| !c.style.voice.is_empty())
         .then_some("set: `config get style.voice` before drafting");
@@ -140,7 +141,12 @@ fn manifest() -> AgentInfo {
             free: "with web cookies: read, conversation, replies, search, timelines, mentions, profiles, others' metrics; all posts, replies, quotes, likes, reposts, bookmarks, follows, deletes, mutes, blocks",
             paid: "X API ($0.015/post, $0.20 with a link): no web session, polls, DMs, lists, bookmarks, likers, reposters, quotes, followers, users, volume, own private metrics; search-ai, trending: xAI. --dry-run shows route, cost",
         },
-        pacing: "Writes keep daily limits and gaps, within normal use. If one is refused, the error says why: wait or try later, don't loop",
+        pacing: format!(
+            "Writes keep caps and gaps, shared by every session on this machine; a refusal says why and when: \
+             wait, don't loop. Caps (config rails.*): replies_per_hour {}, replies_per_day {}, posts_per_day {}; \
+             raise one only when the user asks. rails status: counts, recent writes",
+            rails.replies_per_hour, rails.replies_per_day, rails.posts_per_day
+        ),
         jev: Jev {
             active: jev_active,
             model: crate::providers::jev::MODEL,

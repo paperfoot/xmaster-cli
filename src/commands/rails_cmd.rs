@@ -3,7 +3,7 @@
 
 use crate::context::AppContext;
 use crate::errors::XmasterError;
-use crate::intel::rails::{self, RailsStatus};
+use crate::intel::rails::{self, CapWrite, RailsStatus};
 use crate::output::{self, OutputFormat, Tableable};
 use serde::Serialize;
 use std::sync::Arc;
@@ -45,11 +45,33 @@ impl Tableable for RailsStatus {
         for id in &self.possible_silent_fails {
             notes.push(format!("Possible silent fail: https://x.com/i/status/{id}"));
         }
+        // The writes each cap counts, newest five per action
+        for a in self.actions.iter().filter(|a| !a.writes_24h.is_empty()) {
+            let earlier = a.writes_24h.len().saturating_sub(5);
+            let mut list: Vec<String> = a.writes_24h[earlier..].iter().map(write_label).collect();
+            if earlier > 0 {
+                list.insert(0, format!("+{earlier} earlier"));
+            }
+            notes.push(format!("{} in 24h: {}", a.action, list.join(", ")));
+        }
         for n in notes {
             table.add_row(vec![n]);
         }
         table
     }
+}
+
+/// `14:02Z @alice 1234 (pending)`: UTC time, then whatever the ledger kept.
+fn write_label(w: &CapWrite) -> String {
+    let mut label = w.at.get(11..16).map(|t| format!("{t}Z")).unwrap_or_else(|| w.at.clone());
+    for part in [w.author.as_ref().map(|a| format!("@{a}")), w.target_id.clone(), w.status.map(|s| format!("({s})"))]
+        .into_iter()
+        .flatten()
+    {
+        label.push(' ');
+        label.push_str(&part);
+    }
+    label
 }
 
 #[derive(Serialize)]

@@ -319,21 +319,23 @@ impl Act {
         }
     }
 
-    /// (cap, window, label) pairs; a cap of 0 is off.
-    fn caps(self, b: &Budget) -> Vec<(u32, f64, &'static str)> {
+    /// (cap, window, label, config key) tuples; a cap of 0 is off.
+    fn caps(self, b: &Budget) -> Vec<(u32, f64, &'static str, &'static str)> {
         match self {
-            Act::Post => vec![(b.posts_per_day, DAY, "posts per day")],
+            Act::Post => vec![(b.posts_per_day, DAY, "posts per day", "rails.posts_per_day")],
             Act::Reply => vec![
-                (b.replies_per_day, DAY, "replies per day"),
-                (b.replies_per_hour, HOUR, "replies per hour"),
+                (b.replies_per_day, DAY, "replies per day", "rails.replies_per_day"),
+                (b.replies_per_hour, HOUR, "replies per hour", "rails.replies_per_hour"),
             ],
-            Act::OwnReply => vec![(b.own_replies_per_day, DAY, "replies in your threads per day")],
-            Act::Quote => vec![(b.quotes_per_day, DAY, "quotes per day")],
-            Act::Like => vec![(b.likes_per_day, DAY, "likes per day")],
-            Act::Repost => vec![(b.reposts_per_day, DAY, "reposts per day")],
-            Act::Follow => vec![(b.follows_per_day, DAY, "follows per day")],
-            Act::Unfollow => vec![(b.unfollows_per_day, DAY, "unfollows per day")],
-            Act::Dm => vec![(b.dms_per_day, DAY, "DMs per day")],
+            Act::OwnReply => {
+                vec![(b.own_replies_per_day, DAY, "replies in your threads per day", "rails.own_replies_per_day")]
+            }
+            Act::Quote => vec![(b.quotes_per_day, DAY, "quotes per day", "rails.quotes_per_day")],
+            Act::Like => vec![(b.likes_per_day, DAY, "likes per day", "rails.likes_per_day")],
+            Act::Repost => vec![(b.reposts_per_day, DAY, "reposts per day", "rails.reposts_per_day")],
+            Act::Follow => vec![(b.follows_per_day, DAY, "follows per day", "rails.follows_per_day")],
+            Act::Unfollow => vec![(b.unfollows_per_day, DAY, "unfollows per day", "rails.unfollows_per_day")],
+            Act::Dm => vec![(b.dms_per_day, DAY, "DMs per day", "rails.dms_per_day")],
             _ => vec![],
         }
         .into_iter()
@@ -507,14 +509,19 @@ struct Plan {
 struct Bound {
     at: f64,
     why: String,
+    /// Config key of the cap that set `at`, if a cap did.
+    cap_key: Option<&'static str>,
 }
 
 impl Bound {
-    fn raise(&mut self, at: f64, why: impl FnOnce() -> String) {
-        if at > self.at {
-            self.at = at;
-            self.why = why();
+    fn raise(&mut self, at: f64, why: impl FnOnce() -> String) -> bool {
+        if at <= self.at {
+            return false;
         }
+        self.at = at;
+        self.why = why();
+        self.cap_key = None;
+        true
     }
 }
 
@@ -522,14 +529,23 @@ fn refuse(code: &'static str, message: String) -> XmasterError {
     XmasterError::Api { provider: "rails", code, message }
 }
 
-/// `budget_exceeded`: the write is allowed later, at a known time.
-fn later(why: &str, wait: f64, now: f64) -> XmasterError {
+/// `budget_exceeded`: the write is allowed later, at a known time. A cap
+/// names its config key, so agents find it without reading the source.
+fn later(why: &str, cap_key: Option<&str>, wait: f64, now: f64) -> XmasterError {
     let secs = wait.ceil().max(1.0) as u64;
+    let cap = cap_key
+        .map(|k| {
+            format!(
+                ". Cap set by {k} (shared by every session on this machine); raise it with \
+                 `xmaster config set {k} N` only when the user asks"
+            )
+        })
+        .unwrap_or_default();
     refuse(
         "budget_exceeded",
         format!(
             "Not sent: {why}. Next allowed at {} (retry_after_secs={secs}). \
-             Nothing was posted; rerun the same command then, or do something else meanwhile",
+             Nothing was posted; rerun the same command then, or do something else meanwhile{cap}",
             fmt_ts(now + secs as f64)
         ),
     )
@@ -583,13 +599,13 @@ fn effective_cap(cap: u32, half: bool) -> u32 {
 /// Earliest time any write of `act` may go: X parks, caps, gaps, bursts.
 /// `light_gap` / `thread_gap` are the floors for those classes of write.
 fn pacing_bound(b: &Budget, snap: &Snapshot, act: Act, now: f64, light_gap: f64, thread_gap: f64) -> Bound {
-    let mut bound = Bound { at: now, why: String::new() };
+    let mut bound = Bound { at: now, why: String::new(), cap_key: None };
 
     let parked = snap.kv_f(&format!("blocked_until:{}", act.family()));
     bound.raise(parked, || format!("X rate-limited {} writes", act.family()));
 
     let half = snap.half_caps(now);
-    for (cap, window, label) in act.caps(b) {
+    for (cap, window, label, key) in act.caps(b) {
         let cap = effective_cap(cap, half);
         let mut ats: Vec<f64> = snap
             .landed(now)
@@ -600,7 +616,9 @@ fn pacing_bound(b: &Budget, snap: &Snapshot, act: Act, now: f64, light_gap: f64,
         if ats.len() >= cap as usize {
             let free_at = ats[ats.len() - cap as usize] + window;
             let halved = if half { " (halved after an X challenge)" } else { "" };
-            bound.raise(free_at, || format!("cap of {cap} {label} reached{halved}"));
+            if bound.raise(free_at, || format!("cap of {cap} {label} reached{halved}")) {
+                bound.cap_key = Some(key);
+            }
         }
     }
 
@@ -700,7 +718,7 @@ fn plan(
 
     let pacing_wait = bound.at - now;
     if pacing_wait > b.max_auto_wait_secs as f64 {
-        return Err(later(&bound.why, pacing_wait, now));
+        return Err(later(&bound.why, bound.cap_key, pacing_wait, now));
     }
 
     let mut go_at = bound.at;
@@ -1443,6 +1461,39 @@ pub struct ActionStatus {
     pub wait_secs: u64,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    /// Capped actions: the writes `used_24h` counts, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub writes_24h: Vec<CapWrite>,
+}
+
+/// One write that counts against a cap.
+#[derive(Debug, Serialize)]
+pub struct CapWrite {
+    pub at: String,
+    /// The post replied to, quoted, liked or reposted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    /// The target's author, or the account followed or messaged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// The post this write created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_id: Option<String>,
+    /// Set unless X confirmed the write: pending, unconfirmed, possible_silent_fail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
+}
+
+impl From<&Row> for CapWrite {
+    fn from(r: &Row) -> Self {
+        Self {
+            at: fmt_ts(r.at),
+            target_id: r.target_id.clone(),
+            author: r.author.clone(),
+            post_id: r.new_id.clone(),
+            status: (r.status != Status::Ok).then(|| r.status.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1492,7 +1543,15 @@ fn status_from(b: &Budget, snap: &Snapshot, now: f64) -> RailsStatus {
             let (cap_24h, cap_1h) = (cap_for(DAY), cap_for(HOUR));
             let used_24h = count(act, DAY);
             let bound = pacing_bound(b, snap, act, now, LIGHT_GAP_SECS, THREAD_GAP_SECS);
-            RailsStatus::action(act, used_24h, cap_24h, cap_1h.map(|_| count(act, HOUR)), cap_1h, &bound, now)
+            let writes_24h = if caps.is_empty() {
+                Vec::new()
+            } else {
+                snap.landed(now).filter(|r| r.act == act && r.at > now - DAY).map(CapWrite::from).collect()
+            };
+            ActionStatus {
+                writes_24h,
+                ..RailsStatus::action(act, used_24h, cap_24h, cap_1h.map(|_| count(act, HOUR)), cap_1h, &bound, now)
+            }
         })
         .collect();
     RailsStatus {
@@ -1534,6 +1593,7 @@ impl RailsStatus {
             next_allowed_at: fmt_ts(bound.at),
             wait_secs: (bound.at - now).max(0.0).ceil() as u64,
             reason: if bound.at > now { bound.why.clone() } else { String::new() },
+            writes_24h: Vec::new(),
         }
     }
 }
@@ -1702,6 +1762,51 @@ mod tests {
         s.kv.insert("half_caps_until".into(), (T0 + 30.0 * DAY).to_string());
         let e = go(&b, &s, Act::Like, &Target::default(), T0 + 30.0 * 600.0).unwrap_err();
         assert!(e.to_string().contains("halved"), "{e}");
+    }
+
+    #[test]
+    fn a_cap_refusal_names_its_config_key_and_gaps_do_not() {
+        let b = Budget::default();
+        let replies: Vec<Row> = (0..5).map(|i| row(T0 + i as f64 * 300.0, Act::Reply)).collect();
+        let e = go(&b, &snap(replies), Act::Reply, &Target::default(), T0 + 1_500.0).unwrap_err();
+        assert_eq!(e.error_code(), "budget_exceeded");
+        let msg = e.to_string();
+        assert!(msg.contains("cap of 5 replies per hour reached"), "{msg}");
+        assert!(
+            msg.contains(
+                "Cap set by rails.replies_per_hour (shared by every session on this machine); \
+                 raise it with `xmaster config set rails.replies_per_hour N` only when the user asks"
+            ),
+            "{msg}"
+        );
+
+        let mut r = row(T0, Act::Like);
+        r.next_gap = 400.0;
+        let e = go(&b, &snap(vec![r]), Act::Like, &Target::default(), T0).unwrap_err();
+        assert!(!e.to_string().contains("rails."), "{e}");
+    }
+
+    #[test]
+    fn status_lists_the_writes_each_cap_counts() {
+        let b = Budget::default();
+        let reply = Row {
+            target_id: Some("111".into()),
+            author: Some("alice".into()),
+            new_id: Some("222".into()),
+            ..row(T0 - 600.0, Act::Reply)
+        };
+        let old = Row { target_id: Some("000".into()), ..row(T0 - DAY - 1.0, Act::Reply) };
+        let st = status_from(&b, &snap(vec![old, reply, row(T0 - 60.0, Act::Delete)]), T0);
+        let v = serde_json::to_value(&st).unwrap();
+        let reply = v["actions"].as_array().unwrap().iter().find(|a| a["action"] == "reply").unwrap();
+        assert_eq!(reply["used_1h"], 1);
+        assert_eq!(
+            reply["writes_24h"],
+            serde_json::json!([{"at": fmt_ts(T0 - 600.0), "target_id": "111", "author": "alice", "post_id": "222"}])
+        );
+        // Uncapped actions list nothing
+        let delete = v["actions"].as_array().unwrap().iter().find(|a| a["action"] == "delete").unwrap();
+        assert!(delete.get("writes_24h").is_none(), "{delete}");
     }
 
     #[test]

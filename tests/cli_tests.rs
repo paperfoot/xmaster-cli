@@ -678,3 +678,16 @@ fn dry_run_rejects_missing_media_and_bad_polls() {
         .assert()
         .code(3);
 }
+
+/// The write caps are findable: agent-info names the rails keys, that every
+/// session on the machine shares them, and to raise one only when asked.
+#[test]
+fn agent_info_names_the_rails_caps() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = xmaster().env("XMASTER_CONFIG_DIR", dir.path()).arg("agent-info").output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pacing = v["pacing"].as_str().unwrap();
+    for part in ["config rails.*", "replies_per_hour 5", "shared by every session", "only when the user asks", "rails status"] {
+        assert!(pacing.contains(part), "missing {part}: {pacing}");
+    }
+}
