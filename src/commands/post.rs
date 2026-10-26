@@ -262,7 +262,7 @@ pub async fn execute(
     if dry_run {
         let draft = Draft { text, reply_to, quote, media, poll, poll_duration };
         let (route, _) = route(&ctx, &draft);
-        let review = crate::commands::analyze::jev_review(&ctx, text, reply_to.or(quote), false).await;
+        let review = crate::commands::analyze::jev_review(&ctx, text, reply_to.or(quote), !media.is_empty(), false).await;
         let est_cost_usd = match route {
             "web" => 0.0,
             _ if has_link(text) => API_POST_WITH_URL_USD,
@@ -320,7 +320,7 @@ pub async fn execute(
             poll_options.as_deref(),
             Some(poll_duration),
         ),
-        crate::commands::analyze::jev_review(&ctx, text, reply_id.as_deref().or(quote_id.as_deref()), false),
+        crate::commands::analyze::jev_review(&ctx, text, reply_id.as_deref().or(quote_id.as_deref()), !media.is_empty(), false),
     );
     let jev_flags = review.map(|r| r.flags).unwrap_or_default();
     let result = posted.map_err(reclassify_403)?;

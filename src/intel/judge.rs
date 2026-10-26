@@ -213,14 +213,17 @@ const FLAGS: [(&str, &str); 4] = [
 ];
 
 /// Flags for a draft; `target` is the text of the post being replied to.
-/// Without a target only the slop and bait checks apply.
-pub async fn guard_draft(jev: &Jev, draft: &str, target: Option<&str>) -> Option<Vec<DraftFlag>> {
-    let all = questions("draft");
-    let (state, qs) = match target {
-        Some(target) => (json!({"draft": draft, "target": target}), all.clone()),
-        None => (json!({"draft": draft}), json!({"slop": all["slop"], "bait": all["bait"]})),
+/// Without a target only the slop and bait checks apply. With media the
+/// generic check is skipped: JEV reads only the text, and a caption reads as
+/// generic when the image carries the point (on 56 real image replies, good
+/// ones warned 13/39 with it, 8/39 without; off-topic caught 48/56 either
+/// way, 26 Oct). Sending the image itself scored no better.
+pub async fn guard_draft(jev: &Jev, draft: &str, target: Option<&str>, has_media: bool) -> Option<Vec<DraftFlag>> {
+    let state = match target {
+        Some(target) => json!({"draft": draft, "target": target}),
+        None => json!({"draft": draft}),
     };
-    let answers = jev.ask(&state, &qs).await?;
+    let answers = jev.ask(&state, &draft_questions(target.is_some(), has_media)).await?;
     Some(
         FLAGS
             .iter()
@@ -230,6 +233,20 @@ pub async fn guard_draft(jev: &Jev, draft: &str, target: Option<&str>) -> Option
             })
             .collect(),
     )
+}
+
+/// The draft questions that apply: off_topic and generic need a target, and
+/// generic is skipped for a draft with media.
+fn draft_questions(has_target: bool, has_media: bool) -> Value {
+    let all = questions("draft");
+    let mut codes = vec!["bait", "slop"];
+    if has_target {
+        codes.push("off_topic");
+        if !has_media {
+            codes.push("generic");
+        }
+    }
+    Value::Object(codes.into_iter().map(|c| (c.to_string(), all[c].clone())).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +303,15 @@ mod tests {
             "english": {"noul": 0.99}, "can_add": {"score": 1.8}, "invites": {"noul": 0.8}, "target": {"score": 1.7}
         }));
         assert!(pick(&off, false).unwrap().score < PICK_FLOOR);
+    }
+
+    #[test]
+    fn media_drafts_skip_the_generic_check() {
+        let keys = |t, m| draft_questions(t, m).as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(true, false), ["bait", "generic", "off_topic", "slop"]);
+        assert_eq!(keys(true, true), ["bait", "off_topic", "slop"]);
+        assert_eq!(keys(false, true), ["bait", "slop"]);
+        assert_eq!(draft_questions(true, true)["off_topic"], questions("draft")["off_topic"], "questions go unchanged");
     }
 
     #[test]

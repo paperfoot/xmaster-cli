@@ -35,6 +35,7 @@ pub(crate) async fn jev_review(
     app: &AppContext,
     text: &str,
     target_id: Option<&str>,
+    has_media: bool,
     with_reach: bool,
 ) -> Option<JevReview> {
     let jev = Jev::from_ctx(app)?;
@@ -43,7 +44,7 @@ pub(crate) async fn jev_review(
             Some(id) => crate::providers::fxtwitter::fetch_post(id).await.map(|(post, _)| post.text),
             None => None,
         };
-        judge::guard_draft(&jev, text, target.as_deref()).await
+        judge::guard_draft(&jev, text, target.as_deref(), has_media).await
     };
     let reach = async {
         if with_reach {
@@ -265,7 +266,7 @@ pub async fn execute(
     };
     let result = preflight::analyze(&resolved_text, &ctx);
     let target_id = reply_to.map(crate::cli::parse_tweet_id);
-    let jev = jev_review(&app, &resolved_text, target_id.as_deref(), true).await;
+    let jev = jev_review(&app, &resolved_text, target_id.as_deref(), false, true).await;
     let display = AnalyzeDisplay { result, jev, premium };
     output::render(format, &display, None);
     Ok(())
