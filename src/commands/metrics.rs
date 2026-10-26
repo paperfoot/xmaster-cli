@@ -177,6 +177,40 @@ struct MetricsBatch {
     /// own clock, because the CLI runs in a real shell with an accurate clock.
     now: String,
     rows: Vec<MetricsRow>,
+    /// Totals across `rows`, only with `--sum`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<MetricsTotal>,
+}
+
+/// The count columns summed across rows. Ages, rates, ratios and deltas are
+/// left out: they don't add up across posts.
+#[derive(Serialize, Default, Debug, PartialEq)]
+struct MetricsTotal {
+    posts: usize,
+    impressions: u64,
+    likes: u64,
+    retweets: u64,
+    replies: u64,
+    quotes: u64,
+    bookmarks: u64,
+    profile_clicks: u64,
+    url_clicks: u64,
+}
+
+impl MetricsTotal {
+    fn of(rows: &[MetricsRow]) -> Self {
+        rows.iter().fold(Self::default(), |t, r| Self {
+            posts: t.posts + 1,
+            impressions: t.impressions + r.impressions,
+            likes: t.likes + r.likes,
+            retweets: t.retweets + r.retweets,
+            replies: t.replies + r.replies,
+            quotes: t.quotes + r.quotes,
+            bookmarks: t.bookmarks + r.bookmarks,
+            profile_clicks: t.profile_clicks + r.profile_clicks,
+            url_clicks: t.url_clicks + r.url_clicks,
+        })
+    }
 }
 
 impl Tableable for MetricsBatch {
@@ -215,6 +249,17 @@ impl Tableable for MetricsBatch {
                 velocity_cell,
             ]);
         }
+        if let Some(t) = &self.total {
+            table.add_row(vec![
+                "Total".into(),
+                format!("{} posts", t.posts),
+                t.impressions.to_string(),
+                t.likes.to_string(),
+                t.replies.to_string(),
+                t.profile_clicks.to_string(),
+                String::new(),
+            ]);
+        }
         table
     }
 }
@@ -224,7 +269,15 @@ impl CsvRenderable for MetricsBatch {
         MetricsRow::csv_headers()
     }
     fn csv_rows(&self) -> Vec<Vec<String>> {
-        self.rows.iter().flat_map(|r| r.csv_rows()).collect()
+        let mut out: Vec<Vec<String>> = self.rows.iter().flat_map(|r| r.csv_rows()).collect();
+        if let Some(t) = &self.total {
+            let counts = [t.impressions, t.likes, t.retweets, t.replies, t.quotes, t.bookmarks, t.profile_clicks, t.url_clicks];
+            let mut row = vec!["total".to_string(), String::new()];
+            row.extend(counts.iter().map(u64::to_string));
+            row.extend([String::new(), String::new()]);
+            out.push(row);
+        }
+        out
     }
 }
 
@@ -330,6 +383,7 @@ pub async fn execute_batch(
     ctx: Arc<AppContext>,
     format: OutputFormat,
     ids: &[String],
+    sum: bool,
 ) -> Result<(), XmasterError> {
     if ids.is_empty() {
         return Err(XmasterError::InvalidInput("give at least one post ID or URL".into()));
@@ -465,13 +519,74 @@ pub async fn execute_batch(
     // For a single tweet, render the detailed single-row view. For multiple,
     // render the compact batch table. JSON output always uses the batch shape
     // so agents get a stable schema regardless of input size.
-    if rows.len() == 1 && format == OutputFormat::Table {
+    if rows.len() == 1 && format == OutputFormat::Table && !sum {
         let meta = serde_json::json!({ "now": now_iso });
         output::render(format, &rows[0], Some(meta));
     } else {
-        let batch = MetricsBatch { now: now_iso, rows };
+        let total = sum.then(|| MetricsTotal::of(&rows));
+        let batch = MetricsBatch { now: now_iso, rows, total };
         output::render_csv(format, &batch, None);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, counts: [u64; 8]) -> MetricsRow {
+        let [impressions, likes, retweets, replies, quotes, bookmarks, profile_clicks, url_clicks] = counts;
+        MetricsRow {
+            tweet_id: id.into(),
+            created_at: None,
+            age_seconds: Some(600),
+            age_human: Some("10 min".into()),
+            impressions,
+            likes,
+            retweets,
+            replies,
+            quotes,
+            bookmarks,
+            profile_clicks,
+            url_clicks,
+            profile_click_rate_per_1k: Some(2.0),
+            bookmark_to_like_ratio: Some(0.5),
+            delta: None,
+            velocity: Some(Velocity { imps_per_min_since_post: Some(100.0), imps_per_min_since_last: None }),
+        }
+    }
+
+    fn batch(sum: bool) -> MetricsBatch {
+        let rows = vec![row("1", [1000, 20, 3, 4, 1, 10, 5, 2]), row("2", [250, 5, 0, 2, 0, 1, 1, 0])];
+        let total = sum.then(|| MetricsTotal::of(&rows));
+        MetricsBatch { now: "2026-10-26T00:00:00Z".into(), rows, total }
+    }
+
+    #[test]
+    fn sum_adds_the_count_columns() {
+        let json = serde_json::to_value(batch(true)).unwrap();
+        assert_eq!(
+            json["total"],
+            serde_json::json!({
+                "posts": 2, "impressions": 1250, "likes": 25, "retweets": 3, "replies": 6,
+                "quotes": 1, "bookmarks": 11, "profile_clicks": 6, "url_clicks": 2,
+            })
+        );
+        let table = batch(true).to_table().to_string();
+        let last = table.lines().rev().find(|l| l.contains("Total")).unwrap();
+        for cell in ["2 posts", "1250", "25", "6"] {
+            assert!(last.contains(cell), "{last}");
+        }
+        let csv = batch(true).csv_rows();
+        assert_eq!(csv.last().unwrap()[..4], ["total", "", "1250", "25"]);
+    }
+
+    #[test]
+    fn no_total_without_sum() {
+        let json = serde_json::to_value(batch(false)).unwrap();
+        assert!(json.get("total").is_none());
+        assert!(!batch(false).to_table().to_string().contains("Total"));
+        assert_eq!(batch(false).csv_rows().len(), 2);
+    }
 }
 

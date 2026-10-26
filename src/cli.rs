@@ -356,6 +356,9 @@ pub enum Commands {
         /// Post ID(s) or URL(s)
         #[arg(required = true, value_parser = post_id)]
         ids: Vec<String>,
+        /// Add a total row: impressions, likes, replies and the other counts summed
+        #[arg(long)]
+        sum: bool,
     },
 
     /// Manage X lists

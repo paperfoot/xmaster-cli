@@ -417,7 +417,7 @@ pub async fn dispatch(
             let draft = post::Draft { text, reply_to: None, quote: Some(id), media, poll: None, poll_duration: 1440 };
             post::execute(ctx, format, draft, *dry_run).await
         }
-        Commands::Metrics { ids } => metrics::execute_batch(ctx, format, ids).await,
+        Commands::Metrics { ids, sum } => metrics::execute_batch(ctx, format, ids, *sum).await,
         Commands::Lists { action } => match action {
             ListCommands::Create { name, description } => {
                 lists::create(ctx, format, name, description.as_deref()).await
