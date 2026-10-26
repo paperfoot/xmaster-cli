@@ -723,6 +723,12 @@ fn topic_query(topic: &str, web: bool) -> String {
     if web { format!("{core} {filters} min_faves:{FEED_MIN_FAVES}") } else { format!("{core} {filters}") }
 }
 
+/// Whether a watchlist entry's topic label (comma-separated, as the feed
+/// stores it) names one of `topics`.
+fn watched_for(label: Option<&str>, topics: &[String]) -> bool {
+    label.is_some_and(|l| l.split(',').any(|part| topics.iter().any(|t| t.eq_ignore_ascii_case(part.trim()))))
+}
+
 /// Watchlist handles as `(from:a OR from:b …)` searches: one call per ~20
 /// accounts instead of one timeline read each.
 fn watchlist_queries(handles: &[String], web: bool) -> Vec<String> {
@@ -967,12 +973,16 @@ pub async fn feed(
 
     // One concurrent round of searches: each topic, then the watchlist as
     // `from:` chunks. Free through the web session; on the paid API, fewer
-    // posts per search.
+    // posts per search. A named topic searches only the accounts watched for
+    // it, so its slots aren't spent on the niche's accounts.
     let watchlist: Vec<String> = IntelStore::open()
         .ok()
         .and_then(|s| s.list_watchlist().ok())
-        .map(|w| w.into_iter().map(|e| e.username).collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| !named || watched_for(e.topic.as_deref(), &topics))
+        .map(|e| e.username)
+        .collect();
     let web = ctx.config.web_reads();
     let wl_queries = watchlist_queries(&watchlist, web);
     topics.truncate(FEED_MAX_SEARCHES - wl_queries.len().min(2));
@@ -1033,9 +1043,12 @@ pub async fn feed(
         posts.truncate(keep);
     }
 
-    // Grow the watchlist with on-niche accounts worth checking again.
+    // Grow the watchlist with on-niche accounts worth checking again. Not
+    // from a named topic: accounts found for one story would take the niche
+    // feed's watchlist searches (newest first) on every later run.
     let topic_label = topics.join(",");
-    if let Ok(store) = IntelStore::open() {
+    let store = if named { None } else { IntelStore::open().ok() };
+    if let Some(store) = store {
         for p in posts.iter().filter(|p| p.author_followers >= 10_000) {
             if let Some(username) = p.watchlist_username.as_deref() {
                 let _ = store.add_watchlist(
@@ -1390,6 +1403,16 @@ mod tests {
         assert_eq!(topic_query("gene therapy", false), "(gene therapy) lang:en -is:reply -is:retweet");
         // Operator topics pass through.
         assert!(topic_query("longevity OR senolytics", true).starts_with("(longevity OR senolytics) "));
+    }
+
+    #[test]
+    fn a_named_topic_searches_only_accounts_watched_for_it() {
+        let topics = vec!["Claude Code".to_string()];
+        assert!(watched_for(Some("Claude Code"), &topics));
+        assert!(watched_for(Some("AI agents, claude code"), &topics));
+        assert!(!watched_for(Some("longevity science,aging biology"), &topics));
+        assert!(!watched_for(Some("Claude Code tips"), &topics), "a label part must equal the topic");
+        assert!(!watched_for(None, &topics));
     }
 
     #[test]
