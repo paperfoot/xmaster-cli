@@ -510,6 +510,10 @@ pub struct FeedPost {
     pub age_minutes: i64,
     pub likes: u64,
     pub replies: u64,
+    /// Views so far (display only, not scored).
+    pub impressions: u64,
+    /// Views per minute of age, one decimal.
+    pub imps_per_min: f64,
     pub reply_command: String,
     /// Reply-target score (0-1): fresh, early, traction, reply-back odds,
     /// follows you, on topic.
@@ -565,7 +569,7 @@ fn is_zero_usize(v: &usize) -> bool { *v == 0 }
 impl Tableable for FeedResult {
     fn to_table(&self) -> comfy_table::Table {
         let mut table = comfy_table::Table::new();
-        table.set_header(vec!["Age", "Author", "Followers", "Text", "Likes", "Reply cmd"]);
+        table.set_header(vec!["Age", "Author", "Followers", "Text", "Likes", "Views", "Views/min", "Reply cmd"]);
         for p in &self.posts {
             let text_preview: String = p.text.chars().take(60).collect::<String>()
                 + if p.text.chars().count() > 60 { "..." } else { "" };
@@ -575,6 +579,8 @@ impl Tableable for FeedResult {
                 format_followers(p.author_followers),
                 text_preview,
                 p.likes.to_string(),
+                format_followers(p.impressions),
+                format!("{:.1}", p.imps_per_min),
                 p.reply_command.clone(),
             ]);
         }
@@ -1103,6 +1109,7 @@ fn candidates(
             continue;
         }
         let metrics = t.public_metrics.as_ref();
+        let impressions = metrics.map(|m| m.impression_count).unwrap_or(0);
         let author = t.author_username.clone().unwrap_or_else(|| t.author_id.clone().unwrap_or_default());
         posts.push(FeedPost {
             reply_command: format!("xmaster reply {} \"your reply\"", t.id),
@@ -1115,6 +1122,8 @@ fn candidates(
             age_minutes,
             likes: metrics.map(|m| m.like_count).unwrap_or(0),
             replies: metrics.map(|m| m.reply_count).unwrap_or(0),
+            impressions,
+            imps_per_min: (impressions as f64 / age_minutes.max(1) as f64 * 10.0).round() / 10.0,
             opportunity_score: 0.0,
             jev_score: None,
             why: String::new(),
@@ -1359,6 +1368,8 @@ mod tests {
             age_minutes: 5,
             likes: 1,
             replies: 1,
+            impressions: 100,
+            imps_per_min: 20.0,
             reply_command: String::new(),
             opportunity_score: 0.5,
             jev_score: None,
@@ -1497,6 +1508,19 @@ mod tests {
         assert_eq!(ids(false), ["1"]);
         // The configured niche with JEV: JEV judges both.
         assert_eq!(ids(true), ["1", "2"]);
+    }
+
+    #[test]
+    fn feed_posts_show_views_per_minute() {
+        let now = chrono::Utc::now();
+        let posts = vec![found("1", "Claude Code's advisor tool pairs a cheaper main model with a stronger one", 20, now)];
+        let (kept, _) = candidates(posts, &[], false, 0, 480, &LocalFacts::default(), now);
+        let json = serde_json::to_value(&kept[0]).unwrap();
+        assert_eq!(json["impressions"], 12_345);
+        assert_eq!(json["imps_per_min"], 617.3);
+        // Under a minute old counts as one minute.
+        let fresh = vec![found("2", "Claude Code's advisor tool pairs a cheaper main model with a stronger one", 0, now)];
+        assert_eq!(candidates(fresh, &[], false, 0, 480, &LocalFacts::default(), now).0[0].imps_per_min, 12_345.0);
     }
 
     #[tokio::test]
