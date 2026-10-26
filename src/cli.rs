@@ -18,6 +18,9 @@ Examples:
   xmaster reply 1234567890 \"The dose-response point is the key one\" --dry-run
   xmaster metrics 1234567890 1234567891";
 
+/// Client-side sorts shared by `timeline --sort` and `search --sort`.
+const POST_SORTS: [&str; 7] = ["impressions", "views", "likes", "reposts", "retweets", "rts", "date"];
+
 #[derive(Parser)]
 #[command(
     name = "xmaster",
@@ -177,7 +180,7 @@ pub enum Commands {
         #[arg(long)]
         before: Option<String>,
         /// Sort by: impressions, likes, reposts, date (default: date)
-        #[arg(long, value_parser = ["impressions", "views", "likes", "reposts", "retweets", "rts", "date"])]
+        #[arg(long, value_parser = POST_SORTS)]
         sort: Option<String>,
     },
 
@@ -194,7 +197,8 @@ pub enum Commands {
     /// Search posts (X search operators work)
     Search {
         /// Search query. Supports X operators, incl. min_likes:/min_replies:/
-        /// min_reposts: (since May 2026). Keyword search no longer returns reposts
+        /// min_reposts: (since May 2026); -filter:replies drops replies.
+        /// Keyword search no longer returns reposts
         query: String,
         /// Search mode: recent (latest first) or top
         #[arg(long, default_value = "recent", value_parser = ["recent", "latest", "top", "relevancy", "relevant", "popular"])]
@@ -208,6 +212,10 @@ pub enum Commands {
         /// Only show posts before this time (e.g. "12h", "7d", or ISO 8601)
         #[arg(long)]
         before: Option<String>,
+        /// Reorder results (default: X's order). velocity: most views per
+        /// minute first, for finding big live threads to reply to
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(std::iter::once("velocity").chain(POST_SORTS)))]
+        sort: Option<String>,
     },
 
     /// AI-powered search (xAI/Grok)
@@ -1168,6 +1176,19 @@ mod tests {
         assert!(matches!(parse(&["unrepost", "1"]).unwrap().command, Commands::Unretweet { .. }));
         assert!(matches!(parse(&["reposters", "1"]).unwrap().command, Commands::Retweeters { .. }));
         assert!(matches!(parse(&["convo", "1"]).unwrap().command, Commands::Conversation { count: 10, .. }));
+    }
+
+    #[test]
+    fn search_sort_takes_velocity_and_the_timeline_sorts() {
+        for sort in ["velocity", "views", "likes", "date"] {
+            let cli = parse(&["search", "q", "--sort", sort]).unwrap();
+            assert!(matches!(cli.command, Commands::Search { sort: Some(ref s), .. } if s == sort));
+        }
+        assert!(matches!(parse(&["search", "q"]).unwrap().command, Commands::Search { sort: None, .. }));
+        let e = parse(&["search", "q", "--sort", "vibes"]).err().unwrap();
+        let (message, _) = explain_parse_error(&e, &["search".into(), "q".into(), "--sort".into(), "vibes".into()]);
+        assert!(message.contains("invalid value 'vibes'") && message.contains("velocity"), "{message}");
+        assert!(parse(&["timeline", "--sort", "velocity"]).is_err());
     }
 
     #[test]

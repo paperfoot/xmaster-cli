@@ -293,7 +293,9 @@ pub async fn dispatch(
         },
         Commands::Timeline { user, count, since, before, sort } => timeline::timeline(ctx, format, user.as_deref(), *count, since.as_deref(), before.as_deref(), sort.as_deref()).await,
         Commands::Mentions { count, since_id } => timeline::mentions(ctx, format, *count, since_id.as_deref()).await,
-        Commands::Search { query, mode, count, since, before } => search::execute(ctx, format, query, mode, *count, since.as_deref(), before.as_deref()).await,
+        Commands::Search { query, mode, count, since, before, sort } => {
+            search::execute(ctx, format, query, mode, *count, since.as_deref(), before.as_deref(), sort.as_deref()).await
+        }
         Commands::SearchAi { query, count, from_date, to_date } => {
             search_ai::execute(ctx, format, query, *count, from_date.as_deref(), to_date.as_deref()).await
         }
