@@ -212,7 +212,7 @@ pub async fn execute(
     for issue in &analysis.issues {
         let is_reply_quality = matches!(
             issue.code.as_str(),
-            "reply_too_short" | "reply_generic" | "reply_emoji_only"
+            "reply_too_short" | "reply_generic" | "reply_emoji_only" | "long_image_caption"
         );
         if issue.severity == preflight::Severity::Critical {
             warnings.push(format!("[CRITICAL] {}: {}", issue.code, issue.message));

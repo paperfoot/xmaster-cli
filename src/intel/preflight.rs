@@ -458,6 +458,23 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
         score -= 15;
     }
 
+    // The text of an image reply only sets up what the image pays off: in the
+    // 25 Oct field test the winning setups ran 6-18 words, while 44-53-word
+    // replies drew 27-55 views.
+    if ctx.is_reply() && features.has_media && features.word_count > 20 {
+        issues.push(Issue {
+            severity: Severity::Warning,
+            code: "long_image_caption".into(),
+            message: format!(
+                "{} words with an image: the image carries an image reply, and setups that won ran 6-18 words",
+                features.word_count
+            ),
+            fix: Some("Cut to one setup line of 15 words or fewer that only the image pays off".into()),
+            group: IssueGroup::Substance,
+        });
+        score -= 10;
+    }
+
     // --- Info issues (score -= 5) ---
     // An image reply on a big thread lets the image carry it; a question is optional
     if !features.has_question && !(ctx.is_reply() && features.has_media) {
@@ -2203,6 +2220,17 @@ mod tests {
         // Posts with an image still get the nudge
         let post = AnalyzeContext { has_media: true, media_kind: Some(MediaKind::Image), ..Default::default() };
         assert!(codes(&post).contains(&"no_question".to_string()));
+    }
+
+    #[test]
+    fn long_image_reply_captions_are_flagged() {
+        let image = AnalyzeContext { has_media: true, media_kind: Some(MediaKind::Image), ..reply_ctx() };
+        let codes = |text: &str, ctx: &AnalyzeContext| analyze(text, ctx).issues.into_iter().map(|i| i.code).collect::<Vec<_>>();
+        let long = "We hit this exact limit every week, so I built a small menu bar app that shows the gauge and switches accounts before the reset";
+        assert!(codes(long, &image).contains(&"long_image_caption".to_string()));
+        assert!(!codes("Resets 12am. My agents didn't wait.", &image).contains(&"long_image_caption".to_string()));
+        // Text replies keep their own length rules
+        assert!(!codes(long, &reply_ctx()).contains(&"long_image_caption".to_string()));
     }
 
     #[test]
