@@ -44,13 +44,14 @@ struct TweetRow {
     impressions: u64,
     likes: u64,
     retweets: u64,
+    replies: u64,
     date: String,
 }
 
 impl Tableable for TweetList {
     fn to_table(&self) -> comfy_table::Table {
         let mut table = comfy_table::Table::new();
-        table.set_header(vec!["ID", "Author", "Text", "Views", "Likes", "RTs", "Date"]);
+        table.set_header(vec!["ID", "Author", "Text", "Views", "Likes", "RTs", "Replies", "Date"]);
         for t in &self.tweets {
             let truncated = if t.text.chars().count() > 80 {
                 format!("{}...", crate::utils::safe_truncate(&t.text, 77))
@@ -64,6 +65,7 @@ impl Tableable for TweetList {
                 t.impressions.to_string(),
                 t.likes.to_string(),
                 t.retweets.to_string(),
+                t.replies.to_string(),
                 t.date.clone(),
             ]);
         }
@@ -73,7 +75,7 @@ impl Tableable for TweetList {
 
 impl CsvRenderable for TweetList {
     fn csv_headers() -> Vec<&'static str> {
-        vec!["id", "author", "text", "impressions", "likes", "retweets", "date"]
+        vec!["id", "author", "text", "impressions", "likes", "retweets", "replies", "date"]
     }
 
     fn csv_rows(&self) -> Vec<Vec<String>> {
@@ -87,6 +89,7 @@ impl CsvRenderable for TweetList {
                     t.impressions.to_string(),
                     t.likes.to_string(),
                     t.retweets.to_string(),
+                    t.replies.to_string(),
                     t.date.clone(),
                 ]
             })
@@ -107,6 +110,7 @@ fn tweets_to_list(tweets: Vec<crate::providers::xapi::TweetData>) -> TweetList {
                 impressions: metrics.map(|m| m.impression_count).unwrap_or(0),
                 likes: metrics.map(|m| m.like_count).unwrap_or(0),
                 retweets: metrics.map(|m| m.retweet_count).unwrap_or(0),
+                replies: metrics.map(|m| m.reply_count).unwrap_or(0),
                 date: t.created_at.unwrap_or_default(),
             }
         }).collect(),
@@ -169,4 +173,20 @@ pub async fn mentions(
     }
     output::render_csv(format, &tweets_to_list(tweets), None);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_carry_reply_counts() {
+        let t: crate::providers::xapi::TweetData = serde_json::from_value(serde_json::json!({
+            "id": "1", "text": "hi", "author_username": "a",
+            "public_metrics": {"reply_count": 7, "like_count": 3, "impression_count": 900}
+        }))
+        .unwrap();
+        let v = serde_json::to_value(tweets_to_list(vec![t])).unwrap();
+        assert_eq!(v["tweets"][0]["replies"].as_u64(), Some(7));
+    }
 }
