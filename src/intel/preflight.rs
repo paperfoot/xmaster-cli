@@ -459,7 +459,8 @@ pub fn analyze(text: &str, ctx: &AnalyzeContext) -> PreflightResult {
     }
 
     // --- Info issues (score -= 5) ---
-    if !features.has_question {
+    // An image reply on a big thread lets the image carry it; a question is optional
+    if !features.has_question && !(ctx.is_reply() && features.has_media) {
         issues.push(Issue {
             severity: Severity::Info,
             code: "no_question".into(),
@@ -2190,6 +2191,18 @@ mod tests {
             .issues
             .iter()
             .any(|i| matches!(i.code.as_str(), "reply_generic" | "reply_emoji_only" | "reply_too_short")));
+    }
+
+    #[test]
+    fn image_replies_need_no_question() {
+        let text = "Same curve in the 2024 cohort data, plotted against dose.";
+        let codes = |ctx: &AnalyzeContext| analyze(text, ctx).issues.into_iter().map(|i| i.code).collect::<Vec<_>>();
+        let image = AnalyzeContext { has_media: true, media_kind: Some(MediaKind::Image), ..reply_ctx() };
+        assert!(!codes(&image).contains(&"no_question".to_string()), "{:?}", codes(&image));
+        assert!(codes(&reply_ctx()).contains(&"no_question".to_string()));
+        // Posts with an image still get the nudge
+        let post = AnalyzeContext { has_media: true, media_kind: Some(MediaKind::Image), ..Default::default() };
+        assert!(codes(&post).contains(&"no_question".to_string()));
     }
 
     #[test]

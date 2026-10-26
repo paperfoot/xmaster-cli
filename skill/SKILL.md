@@ -43,8 +43,19 @@ xmaster reply <id|url> "final text"
 
 For a URL the user hands you, start at `conversation <url>`. For a quick look, `read <url>`.
 
+Pick the finder by the thread you want:
+- `engage feed` finds peer-sized posts whose authors may reply back. Each result carries `impressions` and `imps_per_min`.
+- For big live threads on a story, rank search results by speed and reply with an image:
+
+```
+xmaster search "<story keywords> -filter:replies" --since 3h -n 50 --sort velocity  # by imps_per_min
+xmaster conversation <id>                     # read the pick's thread
+xmaster reply <id> "text" --media img.png     # the image carries the reply
+```
+
 Write replies that X's reply judge and readers both reward:
-- Name a specific detail from the post (a claim, number, method or result), or ask the author something they can answer. An author who likes or answers your reply lifts it under the post.
+- Peer-sized threads: name one specific detail from the post (a claim, number, method or result) and ask one question the author can answer. An author who likes or answers your reply lifts it under the post.
+- Image replies on big threads: the image carries the reply, so a question is optional.
 - No generic praise ("Great post!", "100%"), no AI filler, no hashtags, no emoji decoration.
 - No links and no more than one @mention in a reply to a stranger.
 - One reply per stranger's conversation. Never reply to your own reply under someone else's post.
