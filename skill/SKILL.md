@@ -35,8 +35,8 @@ The user often can't type, so keep friction low: when they ask for an action, do
 
 ```
 xmaster engage feed                          # fresh posts worth a reply (uses niche.topics)
-xmaster engage feed "longevity" "AI agents"  # or name topics
-xmaster conversation <id|url>                # parent chain, the post, top replies: one free call
+xmaster engage feed "longevity" "AI agents"  # or name topics: only posts on them
+xmaster conversation <id|url>                # parent chain, the post, top replies, their media: one free call
 xmaster reply <id|url> "draft" --dry-run     # preflight, JEV flags, length, route, cost; sends nothing
 xmaster reply <id|url> "final text"
 ```
@@ -59,7 +59,7 @@ Write replies that X's reply judge and readers both reward:
 - No generic praise ("Great post!", "100%"), no AI filler, no hashtags, no emoji decoration.
 - No links and no more than one @mention in a reply to a stranger.
 - One reply per stranger's conversation. Never reply to your own reply under someone else's post.
-- If `--dry-run` shows JEV flags (generic, slop, off_topic, bait), rewrite once and check again.
+- If `--dry-run` shows JEV flags (generic, slop, off_topic, bait), rewrite once and check again. JEV reads only the text, so replies with media skip the generic check.
 - Match the user's voice: `xmaster config get style.voice`.
 
 Quote instead of reply when the user has a take worth showing their own followers: `xmaster quote <id> "take"`. A quote reaches the user's followers' feeds; a reply reaches the people reading that thread.
@@ -115,7 +115,7 @@ xmaster read <id|url>                          # text, author, metrics, media
 xmaster timeline --user <handle> --sort impressions -n 50
 xmaster timeline --user <handle> --since 24h
 xmaster search "query min_likes:50" -n 20      # X search operators work
-xmaster metrics ID1 ID2 ID3                    # one call for up to 100 posts; never loop per ID
+xmaster metrics ID1 ID2 ID3 --sum              # one call for up to 100 posts, plus a total; never loop per ID
 xmaster track run                              # snapshot recent posts, record reply-backs
 xmaster engage hot-targets                     # accounts where the user's replies did best
 xmaster user <handle>

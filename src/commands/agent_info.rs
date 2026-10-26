@@ -124,7 +124,7 @@ fn manifest() -> AgentInfo {
             "optional: keys.jev (JEV), keys.xai (search-ai), X API keys (paid fallback)",
         ],
         workflows: [
-            "reply: engage feed -> conversation <id> -> reply <id> \"text\" (--dry-run first)",
+            "reply: engage feed (peers) or search \"<kw>\" --sort velocity (big threads) -> conversation <id> -> reply <id> \"text\" (--dry-run first)",
             "inbox: engage inbox <own post id>: reply to recommendations, like triage.like_ids",
             "post: post \"text\" --dry-run, then post (originals need the user's yes)",
             "after: track run; metrics ID1 ID2 ... in one call",

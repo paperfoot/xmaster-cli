@@ -502,7 +502,7 @@ fn agent_info_tips_list_the_scorer_terms() {
 fn agent_info_stays_small() {
     let out = xmaster().arg("agent-info").env("XMASTER_CONFIG_DIR", "/nonexistent-xmaster-test").output().expect("run");
     assert!(out.status.success());
-    assert!(out.stdout.len() <= 7200, "agent-info is {} bytes", out.stdout.len());
+    assert!(out.stdout.len() <= 7300, "agent-info is {} bytes", out.stdout.len());
 }
 
 #[test]
