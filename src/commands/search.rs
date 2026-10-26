@@ -47,8 +47,8 @@ fn sort_rows(rows: &mut [TweetRow], sort: &str) {
 }
 
 /// Compact human age: 45m, 6h, 3.0d. Lets the agent (and humans) see at a
-/// glance whether a post is fresh enough to be worth replying to — reply
-/// momentum dies after ~30-60 min.
+/// glance whether a post is fresh enough to reply to: ~30 min for a reply-back
+/// from a peer-sized author; big live threads keep gathering views for hours.
 fn human_age(minutes: i64) -> String {
     if minutes < 0 {
         "0m".into()

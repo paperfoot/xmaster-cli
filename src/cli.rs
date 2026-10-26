@@ -710,7 +710,7 @@ pub enum EngageCommands {
         /// Minimum follower count for authors
         #[arg(long, default_value = "5000")]
         min_followers: u64,
-        /// Maximum age in minutes (default: 30 — reply momentum dies after ~30-60 min)
+        /// Maximum age in minutes (default: 30, for replies that want a reply-back; for big live threads use `search --sort velocity`)
         #[arg(long, default_value = "30")]
         max_age_mins: u64,
         /// Number of posts to return (default 10; with JEV, its best 5 worth a reply)
