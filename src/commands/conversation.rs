@@ -32,6 +32,9 @@ struct Post {
     likes: u64,
     replies: u64,
     reposts: u64,
+    /// Images and videos on the post, as `read` lists them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    media_urls: Vec<String>,
 }
 
 impl From<TweetData> for Post {
@@ -46,6 +49,7 @@ impl From<TweetData> for Post {
             id: t.id,
             text: t.text,
             date: t.created_at,
+            media_urls: t.media_urls,
         }
     }
 }
@@ -76,7 +80,10 @@ impl Tableable for Conversation {
             table.add_row(vec![
                 role.to_string(),
                 p.author.clone(),
-                crate::utils::ellipsize(&p.text, 120).into_owned(),
+                match p.media_urls.len() {
+                    0 => crate::utils::ellipsize(&p.text, 120).into_owned(),
+                    n => format!("{} [{n} media]", crate::utils::ellipsize(&p.text, 120)),
+                },
                 p.impressions.to_string(),
                 p.likes.to_string(),
                 p.id.clone(),
@@ -246,10 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn shows_views() {
+    fn shows_views_and_media() {
         let mut t = post("3", None);
         t.public_metrics = serde_json::from_value(json!({"impression_count": 14000, "like_count": 9})).ok();
+        t.media_urls = vec!["https://pbs.twimg.com/media/a.jpg".into()];
         let v = serde_json::to_value(Post::from(t)).unwrap();
         assert_eq!((v["impressions"].as_u64(), v["likes"].as_u64()), (Some(14000), Some(9)));
+        assert_eq!(v["media_urls"][0], "https://pbs.twimg.com/media/a.jpg");
+        assert!(serde_json::to_value(Post::from(post("4", None))).unwrap().get("media_urls").is_none());
     }
 }
