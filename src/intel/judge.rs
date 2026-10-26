@@ -37,12 +37,17 @@ fn handle(author: &str) -> String {
 /// Who the judgments are for: `account.bio` and `niche.topics`, else the
 /// owner's recent posts from the local DB. None when there is nothing.
 pub fn owner(config: &AppConfig) -> Option<Value> {
+    owner_on(config, &config.niche.topic_list())
+}
+
+/// [`owner`] with `topics` in place of `niche.topics`: a feed's topics named
+/// on the command line.
+pub fn owner_on(config: &AppConfig, topics: &[String]) -> Option<Value> {
     let mut owner = serde_json::Map::new();
     let bio = config.account.bio.trim();
     if !bio.is_empty() {
         owner.insert("bio".into(), bio.into());
     }
-    let topics = config.niche.topic_list();
     if !topics.is_empty() {
         owner.insert("topics".into(), json!(topics));
     }
@@ -94,17 +99,25 @@ pub struct Pick {
     pub why: String,
 }
 
-/// Judge `(author, text)` posts as reply targets for `owner`.
-pub async fn rank_posts(jev: &Jev, owner: &Value, posts: &[(&str, &str)]) -> Option<Vec<Option<Pick>>> {
+/// Judge `(author, text)` posts as reply targets for `owner`. `on_topic`
+/// means the caller matched every post to a topic it named, and that match
+/// replaces the niche gate: a bio from another field held `on_niche` at
+/// 0.2-0.4 on posts squarely about the named topic (live, 26 Oct).
+pub async fn rank_posts(jev: &Jev, owner: &Value, posts: &[(&str, &str)], on_topic: bool) -> Option<Vec<Option<Pick>>> {
     let states = posts
         .iter()
         .map(|(author, text)| json!({"owner": owner, "post": {"author": handle(author), "text": text}}))
         .collect();
-    any_answered(jev.ask_all(states, questions("picker")).await, pick)
+    let mut qs = questions("picker").clone();
+    if let Some(q) = qs.as_object_mut().filter(|_| on_topic) {
+        q.remove("on_niche");
+    }
+    any_answered(jev.ask_all(states, &qs).await, |a| pick(a, on_topic))
 }
 
-fn pick(a: &Answers) -> Option<Pick> {
-    let gate = a.noul("on_niche")?
+fn pick(a: &Answers, on_topic: bool) -> Option<Pick> {
+    let niche = if on_topic { 1.0 } else { a.noul("on_niche")? };
+    let gate = niche
         * (1.0 - a.noul("promo")?)
         * (1.0 - a.noul("unwelcome")?)
         * a.noul("english")?;
@@ -265,14 +278,41 @@ mod tests {
             "on_niche": {"noul": 0.95}, "promo": {"noul": 0.02}, "unwelcome": {"noul": 0.01},
             "english": {"noul": 0.99}, "can_add": {"score": 1.8}, "invites": {"noul": 0.8}, "target": {"score": 1.7}
         }));
-        let p = pick(&strong).unwrap();
+        let p = pick(&strong, false).unwrap();
         assert!(p.score > PICK_FLOOR);
         assert_eq!(p.why, "you can add specifics from your own work; invites replies");
         let off = answers(json!({
             "on_niche": {"noul": 0.05}, "promo": {"noul": 0.02}, "unwelcome": {"noul": 0.01},
             "english": {"noul": 0.99}, "can_add": {"score": 1.8}, "invites": {"noul": 0.8}, "target": {"score": 1.7}
         }));
-        assert!(pick(&off).unwrap().score < PICK_FLOOR);
+        assert!(pick(&off, false).unwrap().score < PICK_FLOOR);
+    }
+
+    #[test]
+    fn named_topic_match_stands_in_for_the_niche_gate() {
+        // Live answers for "junior ships a feature with claude code" judged
+        // for a longevity bio, asked without on_niche.
+        let a = answers(json!({
+            "promo": {"noul": 0.08}, "unwelcome": {"noul": 0.06}, "english": {"noul": 0.99},
+            "can_add": {"score": 1.08}, "invites": {"noul": 0.89}, "target": {"score": 1.21}
+        }));
+        assert!(pick(&a, true).unwrap().score > PICK_FLOOR);
+        assert!(pick(&a, false).is_none(), "the configured niche still needs on_niche");
+        let promo = answers(json!({
+            "promo": {"noul": 0.77}, "unwelcome": {"noul": 0.03}, "english": {"noul": 0.99},
+            "can_add": {"score": 0.99}, "invites": {"noul": 0.81}, "target": {"score": 1.12}
+        }));
+        assert!(pick(&promo, true).unwrap().score < PICK_FLOOR, "promo still drops");
+    }
+
+    #[test]
+    fn named_topics_replace_the_configured_niche() {
+        let mut config = AppConfig::default();
+        config.account.bio = "Longevity founder".into();
+        config.niche.topics = "longevity science,aging biology".into();
+        let named = owner_on(&config, &["Claude Code".to_string()]).unwrap();
+        assert_eq!(named, json!({"bio": "Longevity founder", "topics": ["Claude Code"]}));
+        assert_eq!(owner(&config).unwrap()["topics"], json!(["longevity science", "aging biology"]));
     }
 
     #[test]

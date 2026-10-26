@@ -585,8 +585,9 @@ impl Tableable for FeedResult {
 /// Resolve the list of topics to scan. Accepts multi positional args AND
 /// comma-separated values in any positional arg (split + merged). If the
 /// caller passes no topics at all, falls back to `niche.topics` from config.
-/// Returns an empty Vec only if both sources are empty.
-fn resolve_topics(cli_topics: &[String]) -> Vec<String> {
+/// Returns the topics (empty only if both sources are) and whether they were
+/// named on the command line.
+fn resolve_topics(cli_topics: &[String]) -> (Vec<String>, bool) {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
 
@@ -609,7 +610,8 @@ fn resolve_topics(cli_topics: &[String]) -> Vec<String> {
     }
 
     // Fallback to config.niche.topics only when the CLI passed nothing at all.
-    if out.is_empty() {
+    let named = !out.is_empty();
+    if !named {
         if let Ok(cfg) = crate::config::load_config() {
             for t in cfg.niche.topic_list() {
                 push_entry(&t, &mut out, &mut seen);
@@ -617,7 +619,7 @@ fn resolve_topics(cli_topics: &[String]) -> Vec<String> {
         }
     }
 
-    out
+    (out, named)
 }
 
 /// The feed's preferred window widens in ×2 steps up to this when thin
@@ -951,7 +953,7 @@ pub async fn feed(
     max_age_mins: u64,
     count: Option<usize>,
 ) -> Result<(), XmasterError> {
-    let mut topics = resolve_topics(cli_topics);
+    let (mut topics, named) = resolve_topics(cli_topics);
     let keep = count.unwrap_or(if ctx.config.jev_key().is_some() { 5 } else { 10 });
     let preferred = max_age_mins as i64;
     let cap = preferred.max(FEED_WINDOW_CAP_MINS);
@@ -990,54 +992,14 @@ pub async fn feed(
     }
 
     let total_found = tweets.len();
-    let mut filtered_count = 0usize;
-    let judged = ctx.config.jev_key().is_some() && judge::owner(&ctx.config).is_some();
-    let now = chrono::Utc::now();
-    let mut posts: Vec<FeedPost> = Vec::new();
-    for (source, t) in sources.into_iter().zip(tweets) {
-        let author_followers = t.author_followers.unwrap_or(0);
-        if author_followers < min_followers {
-            filtered_count += 1;
-            continue;
-        }
-        let is_reply_or_repost = t
-            .referenced_tweets
-            .as_ref()
-            .is_some_and(|refs| refs.iter().any(|r| r.ref_type == "retweeted" || r.ref_type == "replied_to"));
-        let age_minutes = t
-            .created_at
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_minutes())
-            .unwrap_or(0);
-        if is_reply_or_repost || age_minutes > cap || facts.handled.contains(&t.id) || looks_spammy(&t.text) {
-            continue;
-        }
-        // Without JEV, keyword overlap is the niche check (watchlist posts too).
-        let on_topic = topics.is_empty() || mentions_topic(&tokens(&t.text), &topics);
-        if !judged && !on_topic {
-            continue;
-        }
-        let metrics = t.public_metrics.as_ref();
-        let author = t.author_username.clone().unwrap_or_else(|| t.author_id.clone().unwrap_or_default());
-        posts.push(FeedPost {
-            reply_command: format!("xmaster reply {} \"your reply\"", t.id),
-            id: t.id,
-            author,
-            watchlist_username: t.author_username,
-            author_user_id: t.author_id,
-            author_followers,
-            text: t.text,
-            age_minutes,
-            likes: metrics.map(|m| m.like_count).unwrap_or(0),
-            replies: metrics.map(|m| m.reply_count).unwrap_or(0),
-            opportunity_score: 0.0,
-            jev_score: None,
-            why: String::new(),
-            on_topic,
-            source,
-        });
-    }
+    // Named topics are the feed's subject: JEV judges niche fit against them
+    // instead of the configured niche, and off-topic posts never get in.
+    let owner = if named { judge::owner_on(&ctx.config, &topics) } else { judge::owner(&ctx.config) }
+        .filter(|_| ctx.config.jev_key().is_some());
+    let judged = owner.is_some();
+    let found = sources.into_iter().zip(tweets).collect();
+    let (mut posts, filtered_count) =
+        candidates(found, &topics, judged && !named, min_followers, cap, &facts, chrono::Utc::now());
 
     // Score, cap per author, then share the pool fairly between searches so
     // a busy topic can't crowd out a niche one.
@@ -1056,7 +1018,10 @@ pub async fn feed(
     let pool = if judged { jev_input_cap(keep) } else { keep * 2 };
     let (mut posts, window) = balance(posts, pool, preferred, cap);
 
-    let jev = if judged { jev_pick(&ctx, &mut posts, keep).await } else { None };
+    let jev = match &owner {
+        Some(owner) => jev_pick(&ctx, owner, &mut posts, keep, named).await,
+        None => None,
+    };
     if jev.is_none() {
         posts.retain(|p| p.on_topic);
         posts.truncate(keep);
@@ -1097,14 +1062,84 @@ fn jev_input_cap(keep: usize) -> usize {
     (keep * 4).clamp(12, 20).min(judge::MAX_ITEMS)
 }
 
-/// Keep the posts JEV judges worth a reply, best first, at most `keep`.
-/// `None` leaves `posts` untouched: no key, no owner profile, or JEV down.
-async fn jev_pick(ctx: &AppContext, posts: &mut Vec<FeedPost>, keep: usize) -> Option<FeedJev> {
+/// Feed candidates from `(search, post)` results: originals no older than
+/// `cap` minutes from accounts with `min_followers`+, not yet handled and not
+/// spam. Off-topic posts are dropped unless `keep_off_topic` (JEV will judge
+/// them against the configured niche). Returns them and how many were too
+/// small.
+fn candidates(
+    found: Vec<(usize, TweetData)>,
+    topics: &[String],
+    keep_off_topic: bool,
+    min_followers: u64,
+    cap: i64,
+    facts: &LocalFacts,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (Vec<FeedPost>, usize) {
+    let mut too_small = 0usize;
+    let mut posts = Vec::new();
+    for (source, t) in found {
+        let author_followers = t.author_followers.unwrap_or(0);
+        if author_followers < min_followers {
+            too_small += 1;
+            continue;
+        }
+        let is_reply_or_repost = t
+            .referenced_tweets
+            .as_ref()
+            .is_some_and(|refs| refs.iter().any(|r| r.ref_type == "retweeted" || r.ref_type == "replied_to"));
+        let age_minutes = t
+            .created_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_minutes())
+            .unwrap_or(0);
+        if is_reply_or_repost || age_minutes > cap || facts.handled.contains(&t.id) || looks_spammy(&t.text) {
+            continue;
+        }
+        // Keyword overlap is the topic check (watchlist posts too).
+        let on_topic = topics.is_empty() || mentions_topic(&tokens(&t.text), topics);
+        if !keep_off_topic && !on_topic {
+            continue;
+        }
+        let metrics = t.public_metrics.as_ref();
+        let author = t.author_username.clone().unwrap_or_else(|| t.author_id.clone().unwrap_or_default());
+        posts.push(FeedPost {
+            reply_command: format!("xmaster reply {} \"your reply\"", t.id),
+            id: t.id,
+            author,
+            watchlist_username: t.author_username,
+            author_user_id: t.author_id,
+            author_followers,
+            text: t.text,
+            age_minutes,
+            likes: metrics.map(|m| m.like_count).unwrap_or(0),
+            replies: metrics.map(|m| m.reply_count).unwrap_or(0),
+            opportunity_score: 0.0,
+            jev_score: None,
+            why: String::new(),
+            on_topic,
+            source,
+        });
+    }
+    (posts, too_small)
+}
+
+/// Keep the posts JEV judges worth a reply for `owner`, best first, at most
+/// `keep`. `on_topic`: every post matched a topic named on the command line,
+/// so JEV skips its niche gate. `None` leaves `posts` untouched: no key, or
+/// JEV down.
+async fn jev_pick(
+    ctx: &AppContext,
+    owner: &serde_json::Value,
+    posts: &mut Vec<FeedPost>,
+    keep: usize,
+    on_topic: bool,
+) -> Option<FeedJev> {
     let jev = Jev::from_ctx(ctx)?;
-    let owner = judge::owner(&ctx.config)?;
     posts.truncate(jev_input_cap(keep));
     let input: Vec<(&str, &str)> = posts.iter().map(|p| (p.author.as_str(), p.text.as_str())).collect();
-    let picks = judge::rank_posts(&jev, &owner, &input).await?;
+    let picks = judge::rank_posts(&jev, owner, &input, on_topic).await?;
     let judged = picks.iter().flatten().count();
     let total = posts.len();
     let mut kept: Vec<(f64, FeedPost)> = posts
@@ -1437,13 +1472,40 @@ mod tests {
         assert!(why.contains(&"replied back 2/3".to_string()));
     }
 
+    fn found(id: &str, text: &str, mins_ago: i64, now: chrono::DateTime<chrono::Utc>) -> (usize, TweetData) {
+        let created = (now - chrono::Duration::minutes(mins_ago)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let t = serde_json::json!({
+            "id": id, "text": text, "author_username": format!("author{id}"), "created_at": created,
+            "author_followers": 50_000, "public_metrics": {"like_count": 40, "reply_count": 6, "impression_count": 12_345}
+        });
+        (0, serde_json::from_value(t).unwrap())
+    }
+
+    #[test]
+    fn named_topic_drops_off_topic_posts() {
+        let now = chrono::Utc::now();
+        let posts = vec![
+            found("1", "Claude Code's advisor tool pairs a cheaper main model with a stronger one", 20, now),
+            found("2", "Rapamycin at 6mg weekly dropped IGF-1 by 12% in our 2024 cohort, data below", 20, now),
+        ];
+        let topics = vec!["Claude Code".to_string()];
+        let ids = |keep_off_topic| -> Vec<String> {
+            let (kept, _) = candidates(posts.clone(), &topics, keep_off_topic, 0, 480, &LocalFacts::default(), now);
+            kept.into_iter().map(|p| p.id).collect()
+        };
+        // Named topics, JEV on or off: the watchlist's longevity post never gets in.
+        assert_eq!(ids(false), ["1"]);
+        // The configured niche with JEV: JEV judges both.
+        assert_eq!(ids(true), ["1", "2"]);
+    }
+
     #[tokio::test]
     async fn feed_keeps_heuristic_list_without_jev() {
         let mut config = crate::config::AppConfig::default();
         config.settings.disable_jev = true;
         let ctx = AppContext::new(config).unwrap();
         let mut posts = vec![post("1"), post("2")];
-        assert!(jev_pick(&ctx, &mut posts, 5).await.is_none());
+        assert!(jev_pick(&ctx, &serde_json::json!({"bio": "x"}), &mut posts, 5, false).await.is_none());
         let ids: Vec<&str> = posts.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["1", "2"]);
     }
